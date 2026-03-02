@@ -1,0 +1,48 @@
+[project]
+name = "aws-rag"
+version = "0.1.0"
+description = "Multi-scale context-aware RAG pipeline for electronics datasheets"
+requires-python = ">=3.11"
+dependencies = [
+    "boto3>=1.35.0",
+    "botocore[crt]>=1.35.0",
+    "click>=8.1.0",
+    "pdf2image>=1.16.0",
+    "Pillow>=10.0.0",
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    "rich>=13.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "ruff>=0.5.0",
+    "mypy>=1.10.0",
+    "boto3-stubs[s3,textract]>=1.35.0",
+]
+embedding = [
+    "tiktoken>=0.7.0",
+    "numpy>=1.26.0",
+]
+
+[project.scripts]
+rag = "aws_rag.cli:cli"
+
+[build-system]
+requires = ["setuptools>=68.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
