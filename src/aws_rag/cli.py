@@ -293,3 +293,102 @@ def extract_figures_cmd(
             )
 
         console.print(table)
+
+
+# ---------------------------------------------------------------------------
+# Chunk (multi-scale chunking pipeline)
+# ---------------------------------------------------------------------------
+
+
+@cli.command("chunk")
+@click.argument("blocks_json", type=click.Path(exists=True, path_type=Path))
+@click.option("--doc-id", default=None, help="Document ID (inferred from filename if omitted).")
+@click.option(
+    "--figures-manifest",
+    type=click.Path(exists=True, path_type=Path),
+    default=None,
+    help="Path to figure manifest JSON from extract-figures.",
+)
+@click.option("--micro-tokens", default=128, type=int, help="Max tokens per MICRO chunk.")
+@click.option("--meso-tokens", default=512, type=int, help="Max tokens per MESO chunk.")
+@click.option(
+    "--summarizer",
+    type=click.Choice(["extractive", "abstractive"]),
+    default="extractive",
+    help="Summarization mode for MACRO chunks.",
+)
+@click.option("--output", "-o", type=click.Path(path_type=Path), default=None)
+def chunk_cmd(
+    blocks_json: Path,
+    doc_id: str | None,
+    figures_manifest: Path | None,
+    micro_tokens: int,
+    meso_tokens: int,
+    summarizer: str,
+    output: Path | None,
+) -> None:
+    """Run the multi-scale chunking pipeline on Textract blocks.
+
+    Produces a hierarchical chunk graph at three levels (MACRO/MESO/MICRO)
+    with navigation links, context enrichment, and chapter summaries.
+    """
+    from aws_rag.chunking.pipeline import run_chunking_pipeline, save_chunk_graph
+    from aws_rag.chunking.splitter import SplitterConfig
+
+    with open(blocks_json) as f:
+        blocks = json.load(f)
+
+    if doc_id is None:
+        doc_id = blocks_json.stem.replace("_blocks", "")
+
+    # Load figure manifest if provided
+    figure_manifest = None
+    if figures_manifest:
+        with open(figures_manifest) as f:
+            figure_manifest = json.load(f)
+
+    config = SplitterConfig(
+        micro_max_tokens=micro_tokens,
+        meso_max_tokens=meso_tokens,
+    )
+
+    graph = run_chunking_pipeline(
+        blocks,
+        doc_id=doc_id,
+        figure_manifest=figure_manifest,
+        config=config,
+        summarizer_mode=summarizer,
+    )
+
+    # Save
+    settings = get_settings()
+    if output is None:
+        output = settings.output_dir / f"{doc_id}_chunks.json"
+
+    save_chunk_graph(graph, output)
+
+    # Display summary
+    stats = graph.stats()
+    table = Table(title="Chunk Graph Summary")
+    table.add_column("Level", style="cyan")
+    table.add_column("Count", justify="right")
+
+    for level_name, count in stats["by_level"].items():
+        table.add_row(level_name, str(count))
+    table.add_row("TOTAL", str(stats["total_chunks"]), style="bold")
+
+    console.print(table)
+
+    # Show MACRO chunks (chapter summaries)
+    from aws_rag.models.chunk import ChunkLevel
+
+    macros = graph.by_level(ChunkLevel.MACRO)
+    if macros:
+        console.print("\n[bold]Chapter Summaries:[/]")
+        for m in macros:
+            console.print(f"\n[cyan]{m.metadata.chapter_title}[/] (pages {m.metadata.page_numbers})")
+            if m.text:
+                preview = m.text[:300] + "…" if len(m.text) > 300 else m.text
+                console.print(f"  {preview}")
+            else:
+                console.print("  [yellow](no summary generated)[/]")
