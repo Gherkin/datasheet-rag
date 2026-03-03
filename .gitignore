@@ -10,3 +10,4 @@ output/
 .mypy_cache/
 .ruff_cache/
 .pytest_cache/
+.git_commit_msg.txt
