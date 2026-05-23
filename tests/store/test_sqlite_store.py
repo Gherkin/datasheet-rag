@@ -119,7 +119,7 @@ def _seed_chunks() -> list[Chunk]:
             "doc1:0:0",
             doc_id="doc1",
             level=ChunkLevel.MACRO,
-            text="I2C clock stretching specification overview chapter.",
+            text="I2C interface specification overview chapter.",
             page=1,
             chapter="I2C Interface",
         ),
@@ -516,3 +516,159 @@ def test_apply_metadata_noops_when_missing(conn: sqlite3.Connection) -> None:
     # Sidecar exists but no project / group set.
     set_metadata(conn, "doc-bare", mpn="X")
     assert apply_metadata_to_chunks(conn, "doc-bare") == 0
+
+
+# ---------------------------------------------------------------------------
+# Figure persistence (schema v2 — figure_image_path + figure_description)
+# ---------------------------------------------------------------------------
+
+
+def _make_figure_chunk(
+    chunk_id: str = "doc-fig:2:0",
+    *,
+    image_path: str | None = "/tmp/figs/fig-1.png",
+    description: str | None = None,
+    caption: str = "Figure 3-2: SPI4 timing diagram",
+) -> Chunk:
+    md = ChunkMetadata(
+        doc_id="doc-fig",
+        doc_title="STM32H7 RM",
+        chapter_title="SPI",
+        section_title="Timing",
+        page_numbers=[42],
+        layout_type=LayoutType.FIGURE,
+    )
+    return Chunk(
+        id=chunk_id,
+        doc_id="doc-fig",
+        level=ChunkLevel.MICRO,
+        text="[Figure]",
+        context_text="SPI > Timing > [Figure] " + caption,
+        token_count=5,
+        metadata=md,
+        figure_image_path=image_path,
+        figure_s3_key="figures/doc-fig/page-42-fig-1.png",
+        figure_caption=caption,
+        figure_description=description,
+    )
+
+
+def test_figure_columns_round_trip(conn: sqlite3.Connection) -> None:
+    """figure_image_path and figure_description must survive insert/fetch."""
+    chunk = _make_figure_chunk(
+        image_path="/abs/path/cropped.png",
+        description="Block diagram showing APB2 → SPI4 TX FIFO → MOSI pad.",
+    )
+    insert_chunks(conn, [chunk])
+
+    round_tripped = get_chunk(conn, chunk.id)
+    assert round_tripped is not None
+    assert round_tripped.figure_image_path == "/abs/path/cropped.png"
+    assert round_tripped.figure_s3_key == "figures/doc-fig/page-42-fig-1.png"
+    assert round_tripped.figure_caption.startswith("Figure 3-2")
+    assert round_tripped.figure_description is not None
+    assert "APB2" in round_tripped.figure_description
+
+
+def test_list_figure_chunks_filters_and_image_required(
+    conn: sqlite3.Connection,
+) -> None:
+    from aws_rag.store import list_figure_chunks
+
+    fig_with_image = _make_figure_chunk("fig:has-image")
+    fig_no_image = _make_figure_chunk("fig:orphan", image_path=None)
+    # Strip the S3 key too so this one has no usable source.
+    fig_no_image.figure_s3_key = None
+    text_chunk = _make_chunk(
+        "doc-fig:2:1",
+        doc_id="doc-fig",
+        level=ChunkLevel.MICRO,
+        text="Body paragraph about SPI clock polarity.",
+        layout=LayoutType.TEXT,
+    )
+    insert_chunks(conn, [fig_with_image, fig_no_image, text_chunk])
+
+    # Default: only chunks with a usable image source come back.
+    only_with_image = list_figure_chunks(conn)
+    ids = {c.id for c in only_with_image}
+    assert ids == {"fig:has-image"}
+
+    # When the flag is off, both figure chunks come back (but never the
+    # plain text one).
+    all_figures = list_figure_chunks(conn, only_with_image=False)
+    assert {c.id for c in all_figures} == {"fig:has-image", "fig:orphan"}
+
+    # doc_id filter still applies.
+    by_doc = list_figure_chunks(conn, doc_id="does-not-exist")
+    assert by_doc == []
+
+
+def test_update_figure_description_persists_and_folds_into_context(
+    conn: sqlite3.Connection,
+) -> None:
+    from aws_rag.store import update_figure_description
+
+    chunk = _make_figure_chunk("fig:to-describe", description=None)
+    insert_chunks(conn, [chunk])
+
+    description = "State diagram of the I2C bus: IDLE → START → ADDR → ACK."
+    updated = update_figure_description(conn, chunk.id, description)
+    assert updated is True
+
+    after = get_chunk(conn, chunk.id)
+    assert after is not None
+    assert after.figure_description == description
+    assert description in after.context_text  # folded in for re-embed
+
+    # Idempotent: re-applying the same description should not duplicate it.
+    update_figure_description(conn, chunk.id, description)
+    after2 = get_chunk(conn, chunk.id)
+    assert after2 is not None
+    assert after2.context_text.count(description) == 1
+
+    # Unknown chunk → False, no row touched.
+    assert update_figure_description(conn, "nope", "x") is False
+
+
+def test_schema_v1_database_is_migrated_to_v2() -> None:
+    """A database created at schema v1 must gain the new figure columns
+    without losing existing rows."""
+    from aws_rag.store import schema as schema_mod
+
+    # Open a real file-backed DB so we can re-open it. (:memory: dies on close.)
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        db_path = f"{td}/v1.sqlite"
+
+        # 1) Create the v1-flavoured DB by temporarily clamping SCHEMA_VERSION
+        # and stripping the new columns out of the DDL via monkeypatching.
+        real_version = schema_mod.SCHEMA_VERSION
+        real_v2_cols = schema_mod._CHUNKS_COLUMNS_BY_VERSION.get(2, [])
+        try:
+            schema_mod.SCHEMA_VERSION = 1
+            schema_mod._CHUNKS_COLUMNS_BY_VERSION = {
+                k: v for k, v in schema_mod._CHUNKS_COLUMNS_BY_VERSION.items() if k > 1
+            }
+            c1 = connect(db_path, embedding_dim=EMBED_DIM)
+            # Drop the v2 columns the new DDL bakes in, to truly emulate v1.
+            c1.execute("ALTER TABLE chunks DROP COLUMN figure_image_path")
+            c1.execute("ALTER TABLE chunks DROP COLUMN figure_description")
+            c1.commit()
+            c1.close()
+        finally:
+            schema_mod.SCHEMA_VERSION = real_version
+            schema_mod._CHUNKS_COLUMNS_BY_VERSION[2] = real_v2_cols
+
+        # 2) Re-open via the modern connect(): the migration must run and
+        # the new columns must appear.
+        c2 = connect(db_path, embedding_dim=EMBED_DIM)
+        try:
+            cols = {row["name"] for row in c2.execute("PRAGMA table_info(chunks)")}
+            assert "figure_image_path" in cols
+            assert "figure_description" in cols
+            version = c2.execute(
+                "SELECT version FROM schema_version WHERE id = 1"
+            ).fetchone()["version"]
+            assert version == schema_mod.SCHEMA_VERSION
+        finally:
+            c2.close()

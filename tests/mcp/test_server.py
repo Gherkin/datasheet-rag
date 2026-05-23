@@ -350,3 +350,125 @@ def test_stats_doc_id_scope(conn: Any) -> None:
     out = _stats_impl(doc_id="docB", conn=conn)
     assert out["total_chunks"] == 1
     assert out["by_level"] == {"MICRO": 1}
+
+
+# ---------------------------------------------------------------------------
+# Figures — _get_figure_impl + search-result shaping
+# ---------------------------------------------------------------------------
+
+
+def _seed_figure_chunk(
+    c: Any,
+    chunk_id: str,
+    *,
+    image_path: str | None,
+    s3_key: str | None = None,
+    description: str | None = None,
+) -> None:
+    """Insert one figure-flavoured chunk into the in-memory store."""
+    from aws_rag.models.chunk import Chunk, ChunkMetadata
+    from aws_rag.store import insert_chunks
+
+    md = ChunkMetadata(
+        doc_id="docA",
+        chapter_title="Comm",
+        section_title="SPI Timing",
+        page_numbers=[42],
+        layout_type=LayoutType.FIGURE,
+    )
+    chunk = Chunk(
+        id=chunk_id,
+        doc_id="docA",
+        level=ChunkLevel.MICRO,
+        text="[Figure]",
+        context_text="SPI timing diagram",
+        token_count=5,
+        metadata=md,
+        figure_image_path=image_path,
+        figure_s3_key=s3_key,
+        figure_caption="Figure 3-2: SPI4 timing",
+        figure_description=description,
+    )
+    insert_chunks(c, [chunk], project_id="p1")
+
+
+def test_search_results_flag_figure_chunks_with_uri(
+    conn: Any, fake_embedder: Any, tmp_path: Any
+) -> None:
+    """Figure chunks must appear in results with has_figure + figure_uri."""
+    img = tmp_path / "fig.png"
+    img.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+    _seed_figure_chunk(
+        conn, "fig:c1",
+        image_path=str(img),
+        description="Block diagram of SPI4",
+    )
+    out = _search_impl(
+        "SPI timing diagram", mode="keyword", k=5,
+        project_id="p1", conn=conn,
+    )
+    fig_hits = [r for r in out if r.get("has_figure")]
+    assert fig_hits, "figure chunk should be surfaced"
+    fig = fig_hits[0]
+    assert fig["figure_uri"] == f"rag://figure/{fig['chunk_id']}"
+    assert fig["figure_caption"].startswith("Figure 3-2")
+    assert fig["figure_description"] == "Block diagram of SPI4"
+
+
+def test_get_figure_returns_image_bytes_and_citation(
+    conn: Any, tmp_path: Any
+) -> None:
+    from aws_rag.mcp.server import _get_figure_impl
+
+    payload = b"\x89PNG\r\n\x1a\nimg-bytes-here"
+    img = tmp_path / "spi.png"
+    img.write_bytes(payload)
+    _seed_figure_chunk(
+        conn, "fig:show",
+        image_path=str(img),
+        description="State diagram of the SPI4 controller.",
+    )
+
+    out = _get_figure_impl("fig:show", conn=conn)
+    assert out["image_bytes"] == payload
+    assert out["format"] == "png"
+    assert out["caption"].startswith("Figure 3-2")
+    assert "SPI4" in out["description"]
+    assert out["citation"]["page"] == "42"
+    assert out["citation"]["section"] == "SPI Timing"
+
+
+def test_get_figure_unknown_chunk_raises(conn: Any) -> None:
+    from aws_rag.mcp.server import _get_figure_impl
+
+    with pytest.raises(ValueError, match="unknown chunk_id"):
+        _get_figure_impl("does-not-exist", conn=conn)
+
+
+def test_get_figure_on_non_figure_chunk_raises(conn: Any) -> None:
+    """The seed fixture inserts text chunks under 'c1' etc — those must
+    be rejected by get_figure."""
+    from aws_rag.mcp.server import _get_figure_impl
+
+    with pytest.raises(ValueError, match="not a figure"):
+        _get_figure_impl("c1", conn=conn)
+
+
+def test_get_figure_missing_local_file_raises(conn: Any, tmp_path: Any) -> None:
+    from aws_rag.mcp.server import _get_figure_impl
+
+    _seed_figure_chunk(
+        conn, "fig:gone",
+        image_path=str(tmp_path / "does-not-exist.png"),
+    )
+    with pytest.raises(FileNotFoundError, match="missing"):
+        _get_figure_impl("fig:gone", conn=conn)
+
+
+def test_get_figure_no_source_raises(conn: Any) -> None:
+    """A figure chunk with neither local path nor S3 key has nothing to fetch."""
+    from aws_rag.mcp.server import _get_figure_impl
+
+    _seed_figure_chunk(conn, "fig:bare", image_path=None, s3_key=None)
+    with pytest.raises(ValueError, match="no figure_image_path or figure_s3_key"):
+        _get_figure_impl("fig:bare", conn=conn)

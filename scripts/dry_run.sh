@@ -50,7 +50,7 @@ banner "3. Embed (Bedrock Titan v2)"
 echo "doc_id     = ${DOC_ID}"
 echo "project_id = ${PROJECT_ID}"
 echo "source     = ${CHUNKS_JSON}"
-rag embed "${CHUNKS_JSON}" --project-id "${PROJECT_ID}"
+#rag embed "${CHUNKS_JSON}" --project-id "${PROJECT_ID}"
 
 banner "4. Set document metadata"
 rag metadata set "${DOC_ID}" \
@@ -66,6 +66,11 @@ rag search "register" --project-id "${PROJECT_ID}" --mode keyword -k 3
 
 banner "5c. Vector-only search (good for conceptual queries)"
 rag search "thermal characteristics" --project-id "${PROJECT_ID}" --mode vector -k 3
+
+banner "5d. Figure descriptions (no-op if no figure chunks)"
+rag list-figures --project-id "${PROJECT_ID}" --missing-description-only | head -20
+# --limit 3 caps the Bedrock-vision spend during a dry-run.
+rag describe-figures --project-id "${PROJECT_ID}" --missing-only --limit 3 || true
 
 banner "6. MCP server smoke test"
 export RAG_DEFAULT_PROJECT_ID="${PROJECT_ID}"

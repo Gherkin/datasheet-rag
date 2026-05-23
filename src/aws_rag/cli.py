@@ -428,6 +428,40 @@ def embed(
                   f"MESO {stats['by_level']['MESO']}, "
                   f"MICRO {stats['by_level']['MICRO']})")
 
+    settings = get_settings()
+    target = db_path or settings.sqlite_db_path
+
+    # Fold any previously-generated figure descriptions into context_text so
+    # vectors include them. The JSON file never carries descriptions back.
+    if target.exists():
+        _conn = connect(target)
+        try:
+            undescribed_ids = [
+                c.id for c in graph.chunks.values() if not c.figure_description
+            ]
+            if undescribed_ids:
+                placeholders = ",".join("?" * len(undescribed_ids))
+                rows = _conn.execute(
+                    f"SELECT id, figure_description FROM chunks "
+                    f"WHERE id IN ({placeholders}) AND figure_description IS NOT NULL",
+                    undescribed_ids,
+                ).fetchall()
+                if rows:
+                    console.print(
+                        f"  Merging [green]{len(rows)}[/] stored figure "
+                        f"descriptions into context_text before embedding…"
+                    )
+                for row in rows:
+                    chunk = graph.chunks.get(row["id"])
+                    if chunk:
+                        desc = row["figure_description"]
+                        chunk.figure_description = desc
+                        tag = f"Description: {desc}"
+                        if tag not in (chunk.context_text or ""):
+                            chunk.context_text = (chunk.context_text or chunk.text) + "\n" + tag
+        finally:
+            _conn.close()
+
     console.print("Embedding with Bedrock Titan v2…")
     embedder = BedrockEmbedder(verbose=verbose)
     vectors = embed_chunk_graph(graph, embedder=embedder)
@@ -442,8 +476,6 @@ def embed(
         console.print("[yellow]Dry run — not writing to the store.[/]")
         return
 
-    settings = get_settings()
-    target = db_path or settings.sqlite_db_path
     console.print(f"Writing to [cyan]{target}[/]…")
     conn = connect(target)
     inserted = insert_chunk_graph(
@@ -551,6 +583,152 @@ def search(
         )
 
     console.print(table)
+    conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Figures (list / inspect figure chunks in the store)
+# ---------------------------------------------------------------------------
+
+
+@cli.command("list-figures")
+@click.option("--doc-id", default=None)
+@click.option("--project-id", default=None)
+@click.option("--db", "db_path", type=click.Path(path_type=Path), default=None)
+@click.option("--missing-description-only", is_flag=True,
+              help="Only show figure chunks whose figure_description is empty.")
+def list_figures_cmd(
+    doc_id: str | None,
+    project_id: str | None,
+    db_path: Path | None,
+    missing_description_only: bool,
+) -> None:
+    """List figure chunks in the store (those with a usable image)."""
+    from aws_rag.store import connect, list_figure_chunks
+
+    settings = get_settings()
+    target = db_path or settings.sqlite_db_path
+    conn = connect(target)
+    figs = list_figure_chunks(conn, doc_id=doc_id, project_id=project_id)
+    if missing_description_only:
+        figs = [c for c in figs if not c.figure_description]
+
+    if not figs:
+        console.print("[yellow]No figure chunks match.[/]")
+        return
+
+    table = Table(title=f"Figure chunks ({len(figs)})")
+    table.add_column("chunk_id", style="cyan")
+    table.add_column("doc")
+    table.add_column("page")
+    table.add_column("section")
+    table.add_column("caption")
+    table.add_column("desc?", justify="center")
+    table.add_column("source", style="dim")
+
+    for c in figs:
+        pages = c.metadata.page_numbers
+        page = (str(pages[0]) if len(pages) == 1
+                else f"{pages[0]}-{pages[-1]}" if pages else "")
+        src = "local" if c.figure_image_path else ("s3" if c.figure_s3_key else "—")
+        table.add_row(
+            c.id[-14:],
+            c.doc_id[:10],
+            page,
+            (c.metadata.section_title or "")[:30],
+            (c.figure_caption or "")[:40],
+            "[green]Y[/]" if c.figure_description else "[red]N[/]",
+            src,
+        )
+    console.print(table)
+    conn.close()
+
+
+# ---------------------------------------------------------------------------
+# describe-figures (Bedrock Claude vision → figure_description)
+# ---------------------------------------------------------------------------
+
+
+@cli.command("describe-figures")
+@click.option("--doc-id", default=None, help="Restrict to a single document.")
+@click.option("--project-id", default=None, help="Restrict to a single project.")
+@click.option("--missing-only/--all", default=True,
+              help="Skip figures that already have a description (default on).")
+@click.option("--limit", default=None, type=int,
+              help="Stop after this many figures (cost guard).")
+@click.option("--model", "model_id", default=None,
+              help="Override settings.description_model_id for this run.")
+@click.option("--dry-run", is_flag=True,
+              help="Generate descriptions and print them but do not persist.")
+@click.option("--db", "db_path", type=click.Path(path_type=Path), default=None)
+@click.option("--verbose/--quiet", default=True)
+def describe_figures_cmd(
+    doc_id: str | None,
+    project_id: str | None,
+    missing_only: bool,
+    limit: int | None,
+    model_id: str | None,
+    dry_run: bool,
+    db_path: Path | None,
+    verbose: bool,
+) -> None:
+    """Generate vision-LLM descriptions for figure chunks and persist them.
+
+    Walks `chunks WHERE layout_type='figure'` (optionally filtered by
+    doc/project, skipping those that already have a description), sends
+    each image + caption + neighbour text to Bedrock Claude vision, and
+    folds the response into the chunk row + context_text.
+
+    After running, re-embed the affected document so the new
+    descriptions show up in vector search:
+
+        rag describe-figures --doc-id <doc>
+        rag chunk output/<doc>_blocks.json --figures-manifest ...   # if needed
+        rag embed output/<doc>_chunks.json --project-id <p>
+    """
+    from aws_rag.description import FigureDescriber, describe_figures_in_store
+    from aws_rag.store import connect
+
+    settings = get_settings()
+    target = db_path or settings.sqlite_db_path
+    conn = connect(target)
+
+    describer = FigureDescriber(model_id=model_id, verbose=verbose)
+    console.print(
+        f"Describing figures with [cyan]{describer.model_id}[/] "
+        f"(concurrency={describer.max_concurrency}, max_tokens={describer.max_tokens})"
+    )
+
+    descriptions = describe_figures_in_store(
+        conn,
+        doc_id=doc_id,
+        project_id=project_id,
+        missing_only=missing_only,
+        limit=limit,
+        describer=describer,
+        dry_run=dry_run,
+    )
+
+    s = describer.stats()
+    console.print(
+        f"  [green]{len(descriptions)}[/] descriptions · "
+        f"in={s['total_input_tokens']} tok · "
+        f"out={s['total_output_tokens']} tok · "
+        f"errors={s['total_errors']}"
+    )
+
+    if dry_run and descriptions:
+        console.print("\n[yellow]Dry run — not persisted.[/]\n")
+        for chunk_id, desc in descriptions.items():
+            console.print(f"[cyan]{chunk_id}[/]")
+            console.print(f"  {desc}\n")
+    elif descriptions:
+        console.print("[green]Descriptions written to chunks + context_text.[/]")
+        console.print(
+            "  Re-run `rag embed <chunks.json>` (or implement an "
+            "updated-only re-embed) to refresh the vectors."
+        )
+
     conn.close()
 
 

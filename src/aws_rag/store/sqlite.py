@@ -29,24 +29,47 @@ from aws_rag.models.chunk import (
 # Columns inserted in the order below — keeping the SQL and the parameter
 # tuple aligned is the single source of truth for the row shape.
 _INSERT_SQL = """
-INSERT OR REPLACE INTO chunks (
+INSERT INTO chunks (
     id, doc_id, project_id, group_name, level,
     text, context_text, token_count, layout_type, page_numbers,
     chapter_title, section_title, doc_title,
     parent_id, prev_id, next_id, chapter_root_id,
-    figure_s3_key, figure_caption, metadata_json
+    figure_s3_key, figure_caption, figure_image_path, figure_description,
+    metadata_json
 ) VALUES (
     ?, ?, ?, ?, ?,
     ?, ?, ?, ?, ?,
     ?, ?, ?,
     ?, ?, ?, ?,
-    ?, ?, ?
+    ?, ?, ?, ?,
+    ?
 )
+ON CONFLICT(id) DO UPDATE SET
+    doc_id            = excluded.doc_id,
+    project_id        = excluded.project_id,
+    group_name        = excluded.group_name,
+    level             = excluded.level,
+    text              = excluded.text,
+    context_text      = excluded.context_text,
+    token_count       = excluded.token_count,
+    layout_type       = excluded.layout_type,
+    page_numbers      = excluded.page_numbers,
+    chapter_title     = excluded.chapter_title,
+    section_title     = excluded.section_title,
+    doc_title         = excluded.doc_title,
+    parent_id         = excluded.parent_id,
+    prev_id           = excluded.prev_id,
+    next_id           = excluded.next_id,
+    chapter_root_id   = excluded.chapter_root_id,
+    figure_s3_key     = excluded.figure_s3_key,
+    figure_caption    = excluded.figure_caption,
+    figure_image_path = excluded.figure_image_path,
+    figure_description = COALESCE(excluded.figure_description, chunks.figure_description),
+    metadata_json     = excluded.metadata_json
 """
 
-_VEC_INSERT_SQL = (
-    "INSERT OR REPLACE INTO chunk_vecs(chunk_id, embedding) VALUES (?, ?)"
-)
+_VEC_DELETE_SQL = "DELETE FROM chunk_vecs WHERE chunk_id = ?"
+_VEC_INSERT_SQL = "INSERT INTO chunk_vecs(chunk_id, embedding) VALUES (?, ?)"
 
 
 def _vector_to_bytes(vector: Sequence[float]) -> bytes:
@@ -91,6 +114,8 @@ def _chunk_row(
         chunk.chapter_root_id,
         chunk.figure_s3_key,
         chunk.figure_caption,
+        chunk.figure_image_path,
+        chunk.figure_description,
         metadata_json,
     )
 
@@ -135,6 +160,7 @@ def insert_chunks(
             cur.execute(_INSERT_SQL, row)
 
             if vectors is not None and chunk.id in vectors:
+                cur.execute(_VEC_DELETE_SQL, (chunk.id,))
                 cur.execute(
                     _VEC_INSERT_SQL,
                     (chunk.id, _vector_to_bytes(vectors[chunk.id])),
@@ -190,6 +216,11 @@ def _row_to_chunk(row: sqlite3.Row) -> Chunk:
             layout_type=LayoutType(layout_value),
         )
 
+    # figure_image_path / figure_description were added in schema v2; older
+    # rows return None for them after migration, which is the correct default.
+    figure_image_path = row["figure_image_path"] if "figure_image_path" in row.keys() else None
+    figure_description = row["figure_description"] if "figure_description" in row.keys() else None
+
     return Chunk(
         id=row["id"],
         doc_id=row["doc_id"],
@@ -205,6 +236,8 @@ def _row_to_chunk(row: sqlite3.Row) -> Chunk:
         chapter_root_id=row["chapter_root_id"],
         figure_s3_key=row["figure_s3_key"],
         figure_caption=row["figure_caption"],
+        figure_image_path=figure_image_path,
+        figure_description=figure_description,
     )
 
 
@@ -241,6 +274,77 @@ def delete_doc(conn: sqlite3.Connection, doc_id: str) -> int:
     deleted = cur.rowcount
     conn.commit()
     return int(deleted)
+
+
+def list_figure_chunks(
+    conn: sqlite3.Connection,
+    *,
+    doc_id: str | None = None,
+    project_id: str | None = None,
+    only_with_image: bool = True,
+) -> list[Chunk]:
+    """Return all chunks whose layout_type is 'figure'.
+
+    Useful for both the MCP ``get_figure`` tool and offline workflows like
+    "generate descriptions for every figure that doesn't have one yet."
+
+    Parameters
+    ----------
+    only_with_image:
+        When True (default), filter out figure chunks that don't have a
+        usable image source (no ``figure_image_path`` and no ``figure_s3_key``).
+    """
+    sql = "SELECT * FROM chunks WHERE layout_type = ?"
+    params: list[object] = [LayoutType.FIGURE.value]
+    if doc_id:
+        sql += " AND doc_id = ?"
+        params.append(doc_id)
+    if project_id:
+        sql += " AND project_id = ?"
+        params.append(project_id)
+    if only_with_image:
+        sql += " AND (figure_image_path IS NOT NULL OR figure_s3_key IS NOT NULL)"
+    sql += " ORDER BY doc_id, rowid"
+
+    rows = conn.execute(sql, params).fetchall()
+    return [_row_to_chunk(row) for row in rows]
+
+
+def update_figure_description(
+    conn: sqlite3.Connection,
+    chunk_id: str,
+    description: str,
+    *,
+    update_context_text: bool = True,
+) -> bool:
+    """Set ``figure_description`` on a chunk and (optionally) re-fold it
+    into ``context_text`` so future re-embeds pick it up.
+
+    Returns True if a row was updated.
+    """
+    if update_context_text:
+        # Append the description to context_text — the embedding pipeline
+        # uses context_text verbatim. We don't try to dedup if called twice
+        # because the splitter's enrich_context already structures the
+        # blob; callers running this multiple times should re-run the full
+        # chunking pipeline instead.
+        cur = conn.execute(
+            """UPDATE chunks
+               SET figure_description = ?,
+                   context_text = CASE
+                       WHEN context_text LIKE '%' || ? || '%' THEN context_text
+                       ELSE context_text || char(10) || 'Description: ' || ?
+                   END
+               WHERE id = ?""",
+            (description, description, description, chunk_id),
+        )
+    else:
+        cur = conn.execute(
+            "UPDATE chunks SET figure_description = ? WHERE id = ?",
+            (description, chunk_id),
+        )
+    conn.commit()
+    return cur.rowcount > 0
 
 
 def count_chunks(

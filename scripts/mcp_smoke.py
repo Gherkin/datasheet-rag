@@ -33,6 +33,10 @@ def _unwrap(result: Any) -> Any:
     """
     sc = getattr(result, "structuredContent", None)
     if sc is not None:
+        # FastMCP wraps list/primitive returns in {"result": ...} because the
+        # MCP protocol only allows dict for structuredContent, not bare lists.
+        if isinstance(sc, dict) and list(sc.keys()) == ["result"]:
+            return sc["result"]
         return sc
     content = getattr(result, "content", None) or []
     if content and hasattr(content[0], "text"):
@@ -121,6 +125,36 @@ async def main() -> int:
             ))
             print(f"[mcp-smoke] keyword search returned "
                   f"{len(kw_result) if isinstance(kw_result, list) else '?'} results")
+
+            # ---- 9. figure path (only if a figure chunk exists) ---------
+            fig_search = _unwrap(await session.call_tool(
+                "search",
+                {"query": "diagram", "mode": "keyword", "k": 10},
+            ))
+            fig_hits = [
+                r for r in (fig_search or [])
+                if isinstance(r, dict) and r.get("has_figure")
+            ]
+            if fig_hits:
+                target = fig_hits[0]
+                print(f"[mcp-smoke] figure hit: chunk_id={target['chunk_id']} "
+                      f"uri={target.get('figure_uri')}")
+                # The get_figure tool returns mixed content blocks (Image
+                # + text). Don't _unwrap — inspect the raw result.
+                gf = await session.call_tool(
+                    "get_figure", {"chunk_id": target["chunk_id"]},
+                )
+                content = getattr(gf, "content", []) or []
+                kinds = [type(b).__name__ for b in content]
+                print(f"[mcp-smoke] get_figure returned {len(content)} blocks: {kinds}")
+                # Sanity check: at least one block exposes image bytes.
+                img_blocks = [b for b in content
+                              if getattr(b, "type", None) == "image"
+                              or hasattr(b, "data")]
+                assert img_blocks, "get_figure did not return any image content"
+            else:
+                print("[mcp-smoke] no figure chunks in this corpus — skipping "
+                      "get_figure (run `rag chunk --figures-manifest …` to ingest figures)")
 
     print("[mcp-smoke] OK — all tool calls returned without error.")
     return 0

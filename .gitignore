@@ -12,3 +12,4 @@ output/
 .pytest_cache/
 .git_commit_msg.txt
 example-pdfs/
+test-project/

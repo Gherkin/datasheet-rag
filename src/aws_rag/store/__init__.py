@@ -35,6 +35,8 @@ from aws_rag.store.sqlite import (
     get_chunk,
     insert_chunk_graph,
     insert_chunks,
+    list_figure_chunks,
+    update_figure_description,
 )
 
 __all__ = [
@@ -53,6 +55,8 @@ __all__ = [
     "insert_chunks",
     "keyword_search",
     "list_docs",
+    "list_figure_chunks",
     "set_metadata",
+    "update_figure_description",
     "vector_search",
 ]

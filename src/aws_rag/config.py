@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     aws_profile: str | None = Field(default=None, alias="AWS_PROFILE")
 
     # S3
-    s3_bucket: str = Field(description="S3 bucket for PDF storage and Textract output")
+    s3_bucket: str = Field(description="S3 bucket for PDF storage and Textract output", alias="RAG_S3_BUCKET")
     s3_pdf_prefix: str = "raw-pdfs/"
     s3_textract_prefix: str = "textract-output/"
 
@@ -57,6 +57,26 @@ class Settings(BaseSettings):
     embedding_batch_size: int = Field(
         default=16,
         description="Number of texts to embed concurrently per batch.",
+    )
+
+    # Figure description (Bedrock Claude vision)
+    description_model_id: str = Field(
+        default="eu.anthropic.claude-haiku-4-5-20251001-v1:0",
+        description=(
+            "Bedrock model ID for figure description generation. "
+            "Claude 3.5 Haiku is the cheapest vision-capable Claude on Bedrock. "
+            "Use anthropic.claud-3-5-sonnet for higher-quality "
+            "diagram interpretation at ~10× cost."
+        ),
+    )
+    description_max_tokens: int = Field(
+        default=400,
+        description="Max output tokens per figure description.",
+    )
+    description_concurrency: int = Field(
+        default=4,
+        description="Concurrent vision API calls. Lower than embeddings — "
+                    "vision is slower and rate-limits are tighter.",
     )
 
     # SQLite store

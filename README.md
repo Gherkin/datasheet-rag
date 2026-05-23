@@ -37,6 +37,9 @@ rag chunk output/<doc_id>_blocks.json
 # Embed and store (Bedrock Titan v2 → SQLite + sqlite-vec + FTS5)
 rag embed output/<doc_id>_chunks.json --project-id my-board
 
+# Generate vision-LLM descriptions for figure chunks (Bedrock Claude 3 Haiku)
+rag describe-figures --project-id my-board --missing-only
+
 # Tag the document (sidecar — no re-ingest needed)
 rag metadata set <doc_id> --mpn STM32H743VIT6 --manufacturer ST --subsystem mcu
 

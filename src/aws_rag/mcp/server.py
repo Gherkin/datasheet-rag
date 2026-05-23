@@ -153,6 +153,9 @@ def _shape_chunk(result_or_chunk: Any, *, score: float | None = None) -> dict[st
     if pages:
         page = str(pages[0]) if len(pages) == 1 else f"{pages[0]}-{pages[-1]}"
 
+    is_figure = chunk.metadata.layout_type == LayoutType.FIGURE
+    has_figure = is_figure and bool(chunk.figure_image_path or chunk.figure_s3_key)
+
     out: dict[str, Any] = {
         "chunk_id": chunk.id,
         "doc_id": chunk.doc_id,
@@ -166,6 +169,14 @@ def _shape_chunk(result_or_chunk: Any, *, score: float | None = None) -> dict[st
         "next_id": chunk.next_id,
         "chapter_root_id": chunk.chapter_root_id,
     }
+    if has_figure:
+        # The agent uses this flag to decide whether to call get_figure.
+        out["has_figure"] = True
+        out["figure_caption"] = chunk.figure_caption or ""
+        if chunk.figure_description:
+            out["figure_description"] = chunk.figure_description
+        # Stable URI the agent can show / link to without fetching bytes.
+        out["figure_uri"] = f"rag://figure/{chunk.id}"
     if score is not None:
         out["score"] = round(float(score), 4)
     return out
@@ -346,6 +357,88 @@ def _get_document_metadata_impl(
     return meta.model_dump(exclude_none=False)
 
 
+def _figure_image_bytes(chunk: Any) -> tuple[bytes, str]:
+    """Read a figure chunk's image, returning ``(bytes, format)``.
+
+    Prefers the local cropped file (``figure_image_path``). Falls back to
+    S3 (``figure_s3_key``) using the configured bucket. Raises if neither
+    is available or the file is missing.
+    """
+    if chunk.figure_image_path:
+        path = Path(chunk.figure_image_path)
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"figure_image_path on chunk {chunk.id} points to a missing "
+                f"file: {path}"
+            )
+        fmt = path.suffix.lstrip(".").lower() or "png"
+        return path.read_bytes(), fmt
+
+    if chunk.figure_s3_key:
+        from aws_rag.aws import s3_client
+
+        settings = get_settings()
+        client = s3_client()
+        resp = client.get_object(Bucket=settings.s3_bucket, Key=chunk.figure_s3_key)
+        data = resp["Body"].read()
+        ext = Path(chunk.figure_s3_key).suffix.lstrip(".").lower() or "png"
+        return data, ext
+
+    raise ValueError(
+        f"chunk {chunk.id} has no figure_image_path or figure_s3_key — "
+        f"nothing to fetch."
+    )
+
+
+def _get_figure_impl(
+    chunk_id: str,
+    *,
+    conn: sqlite3.Connection | None = None,
+) -> dict[str, Any]:
+    """Return everything needed to render and cite a figure.
+
+    Includes:
+    - ``image_bytes`` — raw file bytes (base64 when serialized over MCP)
+    - ``format`` — 'png' / 'jpg' / 'webp' for MIME detection
+    - ``caption``, ``description`` — text the agent can use for reasoning
+    - ``citation`` — page / section / doc for showing the user where it came from
+
+    Tests exercise this directly; the MCP tool wrapper repackages the
+    bytes into an MCP ``Image`` content block.
+    """
+    conn = conn or _get_conn()
+    chunk = store_get_chunk(conn, chunk_id)
+    if chunk is None:
+        raise ValueError(f"unknown chunk_id: {chunk_id}")
+    if chunk.metadata.layout_type != LayoutType.FIGURE:
+        raise ValueError(
+            f"chunk {chunk_id} is not a figure "
+            f"(layout_type={chunk.metadata.layout_type.value})"
+        )
+
+    image_bytes, fmt = _figure_image_bytes(chunk)
+
+    pages = chunk.metadata.page_numbers
+    page = (str(pages[0]) if len(pages) == 1
+            else f"{pages[0]}-{pages[-1]}" if pages else "")
+
+    return {
+        "chunk_id": chunk.id,
+        "doc_id": chunk.doc_id,
+        "image_bytes": image_bytes,
+        "format": fmt,
+        "local_path": str(chunk.figure_image_path) if chunk.figure_image_path else None,
+        "caption": chunk.figure_caption or "",
+        "description": chunk.figure_description or "",
+        "citation": {
+            "doc_id": chunk.doc_id,
+            "page": page,
+            "section": chunk.metadata.section_title or "",
+            "chapter": chunk.metadata.chapter_title or "",
+        },
+    }
+
+
 def _stats_impl(
     *,
     project_id: str | None = None,
@@ -393,6 +486,15 @@ def _stats_impl(
 # ---------------------------------------------------------------------------
 
 
+_FIGURE_MIME = {
+    "png": "image/png",
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "webp": "image/webp",
+    "gif": "image/gif",
+}
+
+
 def build_server() -> Any:
     """Construct and return the FastMCP server with all tools registered.
 
@@ -400,6 +502,7 @@ def build_server() -> Any:
     installed in the sandbox.
     """
     from mcp.server.fastmcp import FastMCP
+    from mcp.types import ImageContent, TextContent
 
     settings = get_settings()
     project_hint = settings.default_project_id or "(unscoped)"
@@ -415,7 +518,15 @@ def build_server() -> Any:
             "lookups of identifiers, mode='vector' for conceptual queries. "
             "After finding a relevant chunk, use `zoom_out` to read the "
             "wider section summary, `zoom_in` for finer detail, or "
-            "`navigate` with direction='next' to read sequentially."
+            "`navigate` with direction='next' to read sequentially. "
+            "\n\n"
+            "Figures: search and get_chunk results include `has_figure: "
+            "true` and a `figure_uri` when the chunk represents a "
+            "diagram, schematic, or block-diagram. Read the "
+            "`figure_description` and `figure_caption` to reason about "
+            "the figure without fetching it. Call `get_figure(chunk_id)` "
+            "only when the user explicitly asks to see the image, or "
+            "when the description is insufficient to answer."
         ),
     )
 
@@ -491,6 +602,55 @@ def build_server() -> Any:
     ) -> dict[str, Any]:
         """Return chunk counts (total + by level) for the current scope."""
         return _stats_impl(project_id=project_id, doc_id=doc_id)
+
+    @mcp.tool()
+    def get_figure(chunk_id: str):
+        """Fetch the image for a figure chunk and return it for the user to see.
+
+        Returns a list of MCP content blocks: an Image block (the actual
+        figure, rendered inline by clients that support it) followed by a
+        text block with caption, description, and citation. Raises
+        ``ValueError`` if the chunk_id is unknown or not a figure chunk.
+
+        Use ``search`` (or ``get_chunk``) first — figure chunks have
+        ``has_figure: true`` and a ``figure_uri`` field. Call this tool
+        when the user asks to see the figure, or when reasoning from the
+        description alone is insufficient.
+        """
+        import base64
+        result = _get_figure_impl(chunk_id)
+        mime = _FIGURE_MIME.get(result["format"], "image/png")
+        image_b64 = base64.b64encode(result["image_bytes"]).decode()
+        caption = result["caption"]
+        description = result["description"]
+        citation = result["citation"]
+        path_line = (
+            f"\n  file: {result['local_path']}"
+            if result.get("local_path") else ""
+        )
+        text_summary = (
+            f"Figure {result['chunk_id']}\n"
+            f"  caption: {caption or '(none)'}\n"
+            f"  description: {description or '(none generated yet)'}\n"
+            f"  source: doc {citation['doc_id'][:10]} · "
+            f"page {citation['page']} · section {citation['section']!r}"
+            f"{path_line}"
+        )
+        return [
+            ImageContent(type="image", data=image_b64, mimeType=mime),
+            TextContent(type="text", text=text_summary),
+        ]
+
+    @mcp.resource("rag://figure/{chunk_id}")
+    def figure_resource(chunk_id: str) -> bytes:
+        """Stable URI for a figure. Clients can dereference this on demand.
+
+        Returned as raw bytes; the MCP SDK negotiates the content type
+        from the resource registration. See ``get_figure`` for the
+        in-tool-result rendering path.
+        """
+        result = _get_figure_impl(chunk_id)
+        return result["image_bytes"]
 
     return mcp
 

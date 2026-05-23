@@ -28,7 +28,17 @@ from aws_rag.config import get_settings
 
 console = Console()
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+# Columns added in each schema version, used for in-place migration of
+# databases created at an older version. Each entry is (column_name, DDL
+# fragment to feed ALTER TABLE chunks ADD COLUMN).
+_CHUNKS_COLUMNS_BY_VERSION: dict[int, list[tuple[str, str]]] = {
+    2: [
+        ("figure_image_path", "figure_image_path TEXT"),
+        ("figure_description", "figure_description TEXT"),
+    ],
+}
 
 
 def connect(
@@ -83,6 +93,7 @@ def connect(
         init_schema(conn, embedding_dim=embedding_dim)
     else:
         _check_embedding_dim(conn, embedding_dim)
+        _migrate_if_needed(conn)
 
     return conn
 
@@ -92,6 +103,39 @@ def _schema_initialized(conn: sqlite3.Connection) -> bool:
         "SELECT name FROM sqlite_master WHERE type='table' AND name='schema_version'"
     ).fetchone()
     return row is not None
+
+
+def _migrate_if_needed(conn: sqlite3.Connection) -> None:
+    """Bring an older DB up to the current ``SCHEMA_VERSION`` in place.
+
+    Idempotent: re-checks columns via ``PRAGMA table_info`` so re-running
+    on an already-migrated DB is a no-op. SQLite has no ``ADD COLUMN IF
+    NOT EXISTS``, hence the explicit check.
+    """
+    row = conn.execute("SELECT version FROM schema_version WHERE id = 1").fetchone()
+    if row is None:
+        return
+    current = int(row["version"])
+    if current >= SCHEMA_VERSION:
+        return
+
+    cur = conn.cursor()
+    existing_cols = {r["name"] for r in cur.execute("PRAGMA table_info(chunks)")}
+
+    for target_version in range(current + 1, SCHEMA_VERSION + 1):
+        for col_name, ddl_frag in _CHUNKS_COLUMNS_BY_VERSION.get(target_version, []):
+            if col_name not in existing_cols:
+                cur.execute(f"ALTER TABLE chunks ADD COLUMN {ddl_frag}")
+                existing_cols.add(col_name)
+        console.print(
+            f"[yellow]Migrated chunks store {current} → {target_version}[/]"
+        )
+
+    cur.execute(
+        "UPDATE schema_version SET version = ? WHERE id = 1",
+        (SCHEMA_VERSION,),
+    )
+    conn.commit()
 
 
 def _check_embedding_dim(conn: sqlite3.Connection, embedding_dim: int) -> None:
@@ -143,6 +187,8 @@ def init_schema(conn: sqlite3.Connection, *, embedding_dim: int) -> None:
             chapter_root_id TEXT,
             figure_s3_key   TEXT,
             figure_caption  TEXT,
+            figure_image_path  TEXT,         -- local cropped figure file (added v2)
+            figure_description TEXT,         -- vision-LLM description (added v2)
             metadata_json   TEXT,            -- full ChunkMetadata JSON
             created_at      TEXT DEFAULT CURRENT_TIMESTAMP
         )
