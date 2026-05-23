@@ -96,15 +96,21 @@ def _get_embedder() -> Any:
         return _embedder
 
 
+def _project_root() -> Path:
+    """Project root — parent of the ``output/`` dir that holds rag.sqlite."""
+    settings = get_settings()
+    return Path(settings.sqlite_db_path).resolve().parent.parent
+
+
 def _resolve_project(project_id: str | None) -> str | None:
     """Resolve the effective project_id for a tool call.
 
     Priority: explicit arg → settings.default_project_id (RAG_DEFAULT_PROJECT_ID env).
     Returns None if neither set, meaning "search globally".
     """
-    if project_id is not None:
+    if project_id:
         return project_id
-    return get_settings().default_project_id
+    return get_settings().default_project_id or None
 
 
 def _resolve_level(level: str | None) -> ChunkLevel | None:
@@ -170,13 +176,18 @@ def _shape_chunk(result_or_chunk: Any, *, score: float | None = None) -> dict[st
         "chapter_root_id": chunk.chapter_root_id,
     }
     if has_figure:
-        # The agent uses this flag to decide whether to call get_figure.
         out["has_figure"] = True
         out["figure_caption"] = chunk.figure_caption or ""
         if chunk.figure_description:
             out["figure_description"] = chunk.figure_description
-        # Stable URI the agent can show / link to without fetching bytes.
         out["figure_uri"] = f"rag://figure/{chunk.id}"
+        # Directive embedded in result data — more reliable than server instructions
+        # because the model reads it at the moment it is deciding what to do next.
+        out["DISPLAY_INSTRUCTION"] = (
+            f"This chunk has a figure. If it is relevant to the user's question, "
+            f"you MUST call show_figure('{chunk.id}') — do not skip it. "
+            f"If relevance is uncertain, offer it to the user instead of silently skipping."
+        )
     if score is not None:
         out["score"] = round(float(score), 4)
     return out
@@ -357,22 +368,31 @@ def _get_document_metadata_impl(
     return meta.model_dump(exclude_none=False)
 
 
-def _figure_image_bytes(chunk: Any) -> tuple[bytes, str]:
-    """Read a figure chunk's image, returning ``(bytes, format)``.
+def _figure_image_bytes(chunk: Any) -> tuple[bytes, str, Path | None]:
+    """Read a figure chunk's image, returning ``(bytes, format, resolved_path)``.
 
     Prefers the local cropped file (``figure_image_path``). Falls back to
     S3 (``figure_s3_key``) using the configured bucket. Raises if neither
-    is available or the file is missing.
+    is available or the file is missing. ``resolved_path`` is the absolute
+    filesystem path when read from disk, ``None`` for S3-sourced figures.
     """
     if chunk.figure_image_path:
         path = Path(chunk.figure_image_path)
+        if not path.is_absolute():
+            # Stored as relative path (old ingestion runs). Resolve relative to
+            # the project root, which is two directories above the sqlite db
+            # (e.g. <root>/output/rag.sqlite → <root>/).
+            settings = get_settings()
+            project_root = Path(settings.sqlite_db_path).resolve().parent.parent
+            path = project_root / path
+        path = path.resolve()
         if not path.is_file():
             raise FileNotFoundError(
                 f"figure_image_path on chunk {chunk.id} points to a missing "
                 f"file: {path}"
             )
         fmt = path.suffix.lstrip(".").lower() or "png"
-        return path.read_bytes(), fmt
+        return path.read_bytes(), fmt, path
 
     if chunk.figure_s3_key:
         from aws_rag.aws import s3_client
@@ -382,7 +402,7 @@ def _figure_image_bytes(chunk: Any) -> tuple[bytes, str]:
         resp = client.get_object(Bucket=settings.s3_bucket, Key=chunk.figure_s3_key)
         data = resp["Body"].read()
         ext = Path(chunk.figure_s3_key).suffix.lstrip(".").lower() or "png"
-        return data, ext
+        return data, ext, None
 
     raise ValueError(
         f"chunk {chunk.id} has no figure_image_path or figure_s3_key — "
@@ -416,7 +436,7 @@ def _get_figure_impl(
             f"(layout_type={chunk.metadata.layout_type.value})"
         )
 
-    image_bytes, fmt = _figure_image_bytes(chunk)
+    image_bytes, fmt, resolved_path = _figure_image_bytes(chunk)
 
     pages = chunk.metadata.page_numbers
     page = (str(pages[0]) if len(pages) == 1
@@ -427,7 +447,7 @@ def _get_figure_impl(
         "doc_id": chunk.doc_id,
         "image_bytes": image_bytes,
         "format": fmt,
-        "local_path": str(chunk.figure_image_path) if chunk.figure_image_path else None,
+        "local_path": str(resolved_path) if resolved_path else None,
         "caption": chunk.figure_caption or "",
         "description": chunk.figure_description or "",
         "citation": {
@@ -521,12 +541,40 @@ def build_server() -> Any:
             "`navigate` with direction='next' to read sequentially. "
             "\n\n"
             "Figures: search and get_chunk results include `has_figure: "
-            "true` and a `figure_uri` when the chunk represents a "
-            "diagram, schematic, or block-diagram. Read the "
-            "`figure_description` and `figure_caption` to reason about "
-            "the figure without fetching it. Call `get_figure(chunk_id)` "
-            "only when the user explicitly asks to see the image, or "
-            "when the description is insufficient to answer."
+            "true` when the chunk is a diagram, schematic, or block-diagram. "
+            "Use `figure_description` and `figure_caption` to reason about "
+            "the content without fetching it. "
+            "\n\n"
+            "Showing figures — decision rule: For every figure chunk found "
+            "(has_figure: true), decide: "
+            "(1) Clearly relevant — the figure directly illustrates what "
+            "the user asked about (e.g. a timing diagram for a propagation "
+            "delay question, a characteristic curve for an electrical spec "
+            "question). You MUST call `show_figure`. This is not optional; "
+            "do not skip it even if the text already answers the question. "
+            "Visualisation paired with text is always more useful than text "
+            "alone. "
+            "(2) Possibly relevant — you are unsure whether the figure adds "
+            "value. Do NOT silently skip it. Instead, mention it in your "
+            "reply and offer it: e.g. 'I also found a figure showing X — "
+            "it covers [brief aspect] rather than [what was asked]; want me "
+            "to show it?' "
+            "(3) Clearly unrelated — only then may you silently skip it. "
+            "\n\n"
+            "Showing figures — composition: Once you have decided to show a "
+            "figure, treat its placement as a question of communication "
+            "clarity. Ask yourself: where in my response does a reader most "
+            "need to see this? Write your explanation up to that natural "
+            "handoff point, call `show_figure` there, then continue. The "
+            "goal is a cohesive response where each figure appears exactly "
+            "where it illuminates the text around it. "
+            "\n\n"
+            "Showing figures — citation: Immediately after each `show_figure` "
+            "call write one short line: caption (or brief description if "
+            "none), page, and section. The widget shows only the image. "
+            "\n\n"
+            "Use `get_figure` only on non-Desktop hosts or when you need "
+            "the raw bytes for your own visual analysis."
         ),
     )
 
@@ -605,17 +653,15 @@ def build_server() -> Any:
 
     @mcp.tool()
     def get_figure(chunk_id: str):
-        """Fetch the image for a figure chunk and return it for the user to see.
+        """Fetch raw figure bytes for further reasoning (fallback for non-Desktop hosts).
 
-        Returns a list of MCP content blocks: an Image block (the actual
-        figure, rendered inline by clients that support it) followed by a
-        text block with caption, description, and citation. Raises
-        ``ValueError`` if the chunk_id is unknown or not a figure chunk.
+        Prefer ``show_figure`` in Claude Desktop — it renders the image inline
+        as an interactive widget. Use this only on hosts that do not support
+        MCP Apps, or when you need the image bytes for your own visual analysis.
 
-        Use ``search`` (or ``get_chunk``) first — figure chunks have
-        ``has_figure: true`` and a ``figure_uri`` field. Call this tool
-        when the user asks to see the figure, or when reasoning from the
-        description alone is insufficient.
+        Returns an Image content block followed by a text block with caption,
+        description, and citation. Do not emit markdown image links — the Image
+        block is what the client renders.
         """
         import base64
         result = _get_figure_impl(chunk_id)
@@ -624,17 +670,12 @@ def build_server() -> Any:
         caption = result["caption"]
         description = result["description"]
         citation = result["citation"]
-        path_line = (
-            f"\n  file: {result['local_path']}"
-            if result.get("local_path") else ""
-        )
         text_summary = (
             f"Figure {result['chunk_id']}\n"
             f"  caption: {caption or '(none)'}\n"
             f"  description: {description or '(none generated yet)'}\n"
             f"  source: doc {citation['doc_id'][:10]} · "
             f"page {citation['page']} · section {citation['section']!r}"
-            f"{path_line}"
         )
         return [
             ImageContent(type="image", data=image_b64, mimeType=mime),
@@ -651,6 +692,243 @@ def build_server() -> Any:
         """
         result = _get_figure_impl(chunk_id)
         return result["image_bytes"]
+
+    # ------------------------------------------------------------------
+    # MCP Apps experiment — Goose-style inline UI for figures.
+    # See https://modelcontextprotocol.io/extensions/apps/overview
+    # ------------------------------------------------------------------
+
+    # MCP Apps signal lives on the TOOL DEFINITION (`_meta` in tools/list),
+    # not on the call result. Verified against Claude Desktop 1.8555 — the
+    # built-in "imagine" server (show_widget) declares
+    # ``_meta: {ui: {resourceUri: csA}}`` on the tool itself. Goose's
+    # tutorial showed _meta on the call result, but Claude Desktop ignores
+    # that placement entirely.
+    @mcp.tool(meta={"ui": {"resourceUri": "ui://aws-rag/figure-app"}})
+    def show_figure(chunk_id: str):
+        """Display a figure as an inline rendered image widget (preferred in Claude Desktop).
+
+        Calling this is MANDATORY when the figure is clearly relevant to the
+        user's question — do not skip it even if the text already answers the
+        question. Visualisation paired with text is always more useful.
+
+        Place this call at the natural handoff point in your response where the
+        reader most needs to see the figure, then continue writing after it.
+
+        Immediately after this call, write one short line: caption (or brief
+        description if none), page number, and section.
+        """
+        import base64
+        result = _get_figure_impl(chunk_id)
+        mime = _FIGURE_MIME.get(result["format"], "image/png")
+        image_b64 = base64.b64encode(result["image_bytes"]).decode()
+        caption = result["caption"]
+        citation = result["citation"]
+        return [
+            ImageContent(type="image", data=image_b64, mimeType=mime),
+            TextContent(
+                type="text",
+                text=(
+                    f"caption: {caption or '(none)'} | "
+                    f"page {citation['page']} · {citation['section']}"
+                ),
+            ),
+        ]
+
+    @mcp.resource(
+        "ui://aws-rag/figure-app",
+        mime_type="text/html;profile=mcp-app",
+    )
+    def figure_app_html() -> str:
+        """Figure renderer MCP App.
+
+        The iframe receives:
+        - chunk_id via ``ui/notifications/tool-input`` params.arguments
+        - image base64 via ``ui/notifications/tool-result`` content[0].data
+        - caption/citation text via content[1].text
+
+        No extra tool calls needed — show_figure embeds the image directly
+        in its return value.
+        """
+        return """<!doctype html>
+<html><head><meta charset="utf-8"><style>
+  html, body { margin: 0; padding: 0; width: 100%; }
+  body { padding: 12px; font-family: system-ui, sans-serif; font-size: 13px;
+         background: var(--color-background-primary, #fff);
+         color: var(--color-text-primary, #000); box-sizing: border-box; }
+  img { max-width: 100%; height: auto; border-radius: 4px; display: block; }
+  .caption { margin-top: 8px; font-size: 0.85em; opacity: 0.7; }
+  .err { color: #c44; font-size: 0.85em; }
+  #loading { opacity: 0.5; }
+</style></head>
+<body>
+  <div id="loading">Loading figure…</div>
+  <img id="fig" style="display:none">
+  <div id="caption" class="caption"></div>
+  <div id="err" class="err"></div>
+  <script>
+    (function () {
+      const loadingEl = document.getElementById('loading');
+      const figEl = document.getElementById('fig');
+      const captionEl = document.getElementById('caption');
+      const errEl = document.getElementById('err');
+      const pending = new Map();
+      let nextId = 0;
+      let toolResult = null;
+
+      function sendSize() {
+        window.parent.postMessage({
+          jsonrpc: '2.0',
+          method: 'ui/notifications/size-changed',
+          params: { width: document.documentElement.scrollWidth, height: document.body.scrollHeight + 16 }
+        }, '*');
+      }
+
+      function request(method, params) {
+        return new Promise((resolve, reject) => {
+          const id = ++nextId;
+          pending.set(id, {resolve, reject});
+          window.parent.postMessage({jsonrpc: '2.0', id, method, params}, '*');
+          setTimeout(() => {
+            if (pending.has(id)) { pending.delete(id); reject(new Error('timeout')); }
+          }, 10000);
+        });
+      }
+
+      function renderFigure() {
+        if (!toolResult) return;
+        const imgBlock = toolResult.find(c => c.type === 'image');
+        const textBlock = toolResult.find(c => c.type === 'text');
+        if (!imgBlock) { errEl.textContent = 'No image in tool-result.'; loadingEl.style.display = 'none'; sendSize(); return; }
+        figEl.onload = () => { loadingEl.style.display = 'none'; sendSize(); };
+        figEl.src = 'data:' + imgBlock.mimeType + ';base64,' + imgBlock.data;
+        figEl.style.display = 'block';
+        if (textBlock) captionEl.textContent = textBlock.text;
+        sendSize();
+      }
+
+      window.addEventListener('message', (e) => {
+        const msg = e.data;
+        if (!msg) return;
+        if (msg.method === 'ui/notifications/tool-result' && msg.params && msg.params.content) {
+          toolResult = msg.params.content;
+          renderFigure();
+        }
+        if (msg.method === 'ui/notifications/host-context-changed' && msg.params && msg.params.styles) {
+          const vars = msg.params.styles.variables || {};
+          const root = document.documentElement;
+          Object.entries(vars).forEach(([k, v]) => root.style.setProperty(k, v));
+        }
+        if (msg.id != null && pending.has(msg.id)) {
+          const {resolve, reject} = pending.get(msg.id);
+          pending.delete(msg.id);
+          if (msg.error) reject(msg.error); else resolve(msg.result);
+        }
+      });
+
+      sendSize();
+      window.parent.postMessage({jsonrpc: '2.0', method: 'ui/notifications/initialized', params: {}}, '*');
+
+      request('ui/initialize', {
+        protocolVersion: '2026-01-26',
+        appInfo: { name: 'aws-rag-figure', version: '1.0.0' },
+        appCapabilities: {}
+      }).then(
+        (res) => { sendSize(); },
+        (err) => { errEl.textContent = 'init error: ' + JSON.stringify(err); sendSize(); }
+      );
+    })();
+  </script>
+</body></html>"""
+
+    # ------------------------------------------------------------------
+    # Diagnostic — bare-minimum MCP App to isolate failures.
+    # If show_hello renders but show_figure doesn't, the data URI / iframe
+    # CSP is the culprit. If show_hello doesn't render either, the host
+    # isn't honoring _meta.ui.resourceUri at all.
+    # ------------------------------------------------------------------
+
+    @mcp.tool(meta={"ui": {"resourceUri": "ui://aws-rag/hello"}})
+    def show_hello():
+        """Diagnostic: render a trivial 'Hello' MCP App with no images or DB access.
+
+        ``_meta.ui.resourceUri`` is on the tool definition (the placement
+        Claude Desktop's built-in apps use). Hosts that support MCP Apps
+        load the ``ui://aws-rag/hello`` resource into a sandboxed iframe.
+        """
+        return [TextContent(
+            type="text",
+            text="Hello MCP App rendered above (if host supports it).",
+        )]
+
+    @mcp.resource(
+        "ui://aws-rag/hello",
+        mime_type="text/html;profile=mcp-app",
+    )
+    def hello_app_html() -> str:
+        """Bare 'hello world' MCP App with correct handshake."""
+        return """<!doctype html>
+<html><head><meta charset="utf-8"><style>
+  html, body { margin: 0; padding: 0; width: 100%; }
+  body { padding: 16px; font-family: var(--font-sans, system-ui, sans-serif);
+         background: var(--color-background-primary, #fff);
+         color: var(--color-text-primary, #000); box-sizing: border-box; }
+  h1 { margin: 0 0 6px; font-size: 1.1em; }
+  p { margin: 0; font-size: 0.85em; color: var(--color-text-secondary, #666); }
+</style></head>
+<body>
+  <h1>👋 Hello from MCP App</h1>
+  <p>MCP App handshake successful — the host parsed _meta.ui.resourceUri and rendered this iframe.</p>
+  <script>
+    (function () {
+      const pending = new Map();
+      let nextId = 0;
+
+      function sendSize() {
+        window.parent.postMessage({
+          jsonrpc: '2.0',
+          method: 'ui/notifications/size-changed',
+          params: { width: document.documentElement.scrollWidth, height: document.body.scrollHeight + 16 }
+        }, '*');
+      }
+
+      function request(method, params) {
+        return new Promise((resolve, reject) => {
+          const id = ++nextId;
+          pending.set(id, {resolve, reject});
+          window.parent.postMessage({jsonrpc: '2.0', id, method, params}, '*');
+          setTimeout(() => {
+            if (pending.has(id)) { pending.delete(id); reject(new Error('timeout')); }
+          }, 10000);
+        });
+      }
+
+      window.addEventListener('message', (e) => {
+        const msg = e.data;
+        if (!msg) return;
+        if (msg.method === 'ui/notifications/host-context-changed' && msg.params && msg.params.styles) {
+          const vars = msg.params.styles.variables || {};
+          const root = document.documentElement;
+          Object.entries(vars).forEach(([k, v]) => root.style.setProperty(k, v));
+          sendSize();
+        }
+        if (msg.id != null && pending.has(msg.id)) {
+          const {resolve, reject} = pending.get(msg.id);
+          pending.delete(msg.id);
+          if (msg.error) reject(msg.error); else resolve(msg.result);
+        }
+      });
+
+      sendSize();
+      window.parent.postMessage({jsonrpc: '2.0', method: 'ui/notifications/initialized', params: {}}, '*');
+      request('ui/initialize', {
+        protocolVersion: '2026-01-26',
+        appInfo: { name: 'aws-rag-hello', version: '1.0.0' },
+        appCapabilities: {}
+      }).then(() => sendSize(), () => {});
+    })();
+  </script>
+</body></html>"""
 
     return mcp
 

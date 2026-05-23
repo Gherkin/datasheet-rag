@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -84,6 +85,32 @@ class Settings(BaseSettings):
         default=Path("output/rag.sqlite"),
         description="Path to the SQLite database file holding chunks + vectors.",
     )
+
+    # Figures
+    figures_dir: Path | None = Field(
+        default=None,
+        description=(
+            "Directory holding cropped figure images. The MCP server runs a "
+            "loopback static-file server rooted here so figures can be "
+            "rendered inline in Claude Desktop via http:// URLs (file:// is "
+            "blocked by the renderer). If unset, defaults to "
+            "``<sqlite_db_path parent>/figures``."
+        ),
+    )
+
+    @field_validator("figures_dir", "default_project_id", mode="before")
+    @classmethod
+    def _blank_string_means_unset(cls, v: Any) -> Any:
+        """Treat empty/whitespace env values as 'use the field default'.
+
+        Claude Desktop's .mcpb config substitutes ``${user_config.X}`` with
+        an empty string when X is left blank in the UI, which would
+        otherwise clobber sensible defaults (e.g. turn ``figures_dir`` into
+        ``Path('.')``).
+        """
+        if isinstance(v, str) and v.strip() == "":
+            return None
+        return v
 
     # MCP server scoping
     default_project_id: str | None = Field(

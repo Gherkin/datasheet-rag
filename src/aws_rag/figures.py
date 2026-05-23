@@ -308,7 +308,7 @@ def extract_figures(
     Returns a FigureManifest with paths and metadata for each figure.
     """
     if output_dir is None:
-        output_dir = Path("output") / "figures" / doc_id
+        output_dir = Path("output").resolve() / "figures" / doc_id
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
