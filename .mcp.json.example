@@ -1,0 +1,16 @@
+{
+  "//": "Copy this to your electronics project's repo as `.mcp.json` so Claude Code launches an aws-rag MCP server scoped to that project. Adjust RAG_DEFAULT_PROJECT_ID and RAG_SQLITE_DB_PATH per project.",
+  "mcpServers": {
+    "aws-rag": {
+      "command": "rag-mcp",
+      "args": [],
+      "env": {
+        "RAG_S3_BUCKET": "my-rag-datasheets",
+        "RAG_SQLITE_DB_PATH": "/Users/you/git/aws-rag/output/rag.sqlite",
+        "RAG_DEFAULT_PROJECT_ID": "pcb-rev-a",
+        "AWS_REGION": "eu-west-1",
+        "AWS_PROFILE": "default"
+      }
+    }
+  }
+}

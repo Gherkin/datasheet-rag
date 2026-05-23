@@ -392,3 +392,283 @@ def chunk_cmd(
                 console.print(f"  {preview}")
             else:
                 console.print("  [yellow](no summary generated)[/]")
+
+
+# ---------------------------------------------------------------------------
+# Embed (Bedrock Titan + SQLite store)
+# ---------------------------------------------------------------------------
+
+
+@cli.command()
+@click.argument("chunks_json", type=click.Path(exists=True, path_type=Path))
+@click.option("--db", "db_path", type=click.Path(path_type=Path), default=None,
+              help="SQLite DB path. Defaults to settings.sqlite_db_path.")
+@click.option("--project-id", default=None, help="Project ID to attach to every chunk.")
+@click.option("--group", "group_name", default=None, help="Group name to attach to every chunk.")
+@click.option("--verbose/--quiet", default=True, help="Print per-batch progress.")
+@click.option("--dry-run", is_flag=True, help="Embed but do not write to the store.")
+def embed(
+    chunks_json: Path,
+    db_path: Path | None,
+    project_id: str | None,
+    group_name: str | None,
+    verbose: bool,
+    dry_run: bool,
+) -> None:
+    """Embed a chunk graph (produced by `rag chunk`) and store it in SQLite."""
+    from aws_rag.chunking.pipeline import load_chunk_graph
+    from aws_rag.embedding import BedrockEmbedder, embed_chunk_graph
+    from aws_rag.store import connect, insert_chunk_graph
+
+    console.print(f"Loading chunk graph from [cyan]{chunks_json}[/]…")
+    graph = load_chunk_graph(chunks_json)
+    stats = graph.stats()
+    console.print(f"  {stats['total_chunks']} chunks "
+                  f"(MACRO {stats['by_level']['MACRO']}, "
+                  f"MESO {stats['by_level']['MESO']}, "
+                  f"MICRO {stats['by_level']['MICRO']})")
+
+    console.print("Embedding with Bedrock Titan v2…")
+    embedder = BedrockEmbedder(verbose=verbose)
+    vectors = embed_chunk_graph(graph, embedder=embedder)
+    s = embedder.stats()
+    console.print(
+        f"  [green]Embedded[/] {len(vectors)} chunks · "
+        f"{s['total_tokens_in']} input tokens · "
+        f"{s['total_errors']} errors"
+    )
+
+    if dry_run:
+        console.print("[yellow]Dry run — not writing to the store.[/]")
+        return
+
+    settings = get_settings()
+    target = db_path or settings.sqlite_db_path
+    console.print(f"Writing to [cyan]{target}[/]…")
+    conn = connect(target)
+    inserted = insert_chunk_graph(
+        conn, graph, vectors=vectors,
+        project_id=project_id, group_name=group_name,
+    )
+    conn.commit()
+    conn.close()
+    console.print(f"[green]Inserted[/] {inserted} chunks.")
+
+
+# ---------------------------------------------------------------------------
+# Search (hybrid / vector / keyword)
+# ---------------------------------------------------------------------------
+
+
+@cli.command()
+@click.argument("query", type=str)
+@click.option("--mode", type=click.Choice(["hybrid", "vector", "keyword"]),
+              default="hybrid", help="Retrieval mode.")
+@click.option("-k", "top_k", default=10, type=int, help="Number of results.")
+@click.option("--db", "db_path", type=click.Path(path_type=Path), default=None,
+              help="SQLite DB path. Defaults to settings.sqlite_db_path.")
+@click.option("--project-id", default=None)
+@click.option("--group", "group_name", default=None)
+@click.option("--doc-id", "doc_ids", multiple=True, help="Restrict to one or more doc IDs.")
+@click.option("--level", type=click.Choice(["macro", "meso", "micro"]),
+              default=None, help="Restrict to a single zoom level.")
+@click.option("--show-context/--no-show-context", default=False,
+              help="Show context_text (full embedding-ready blob) instead of raw text.")
+def search(
+    query: str,
+    mode: str,
+    top_k: int,
+    db_path: Path | None,
+    project_id: str | None,
+    group_name: str | None,
+    doc_ids: tuple[str, ...],
+    level: str | None,
+    show_context: bool,
+) -> None:
+    """Search the local SQLite store with hybrid / vector / keyword retrieval."""
+    from aws_rag.models.chunk import ChunkLevel
+    from aws_rag.store import (
+        SearchFilters,
+        connect,
+        hybrid_search,
+        keyword_search,
+        vector_search,
+    )
+
+    settings = get_settings()
+    target = db_path or settings.sqlite_db_path
+    conn = connect(target)
+
+    level_enum = None
+    if level:
+        level_enum = {"macro": ChunkLevel.MACRO, "meso": ChunkLevel.MESO,
+                      "micro": ChunkLevel.MICRO}[level]
+
+    filters = SearchFilters(
+        doc_ids=list(doc_ids) if doc_ids else None,
+        project_id=project_id,
+        group_name=group_name,
+        level=level_enum,
+    )
+
+    if mode in ("vector", "hybrid"):
+        from aws_rag.embedding import BedrockEmbedder
+
+        embedder = BedrockEmbedder()
+        query_vec = embedder.embed_one(query)
+    else:
+        query_vec = None
+
+    if mode == "vector":
+        results = vector_search(conn, query_vec, k=top_k, filters=filters)  # type: ignore[arg-type]
+    elif mode == "keyword":
+        results = keyword_search(conn, query, k=top_k, filters=filters)
+    else:
+        results = hybrid_search(conn, query_vec, query, k=top_k, filters=filters)  # type: ignore[arg-type]
+
+    if not results:
+        console.print("[yellow]No results.[/]")
+        return
+
+    table = Table(title=f"{mode.title()} search · {len(results)} results")
+    table.add_column("#", justify="right", style="dim")
+    table.add_column("score", justify="right", style="cyan")
+    table.add_column("level", style="magenta")
+    table.add_column("doc", style="dim")
+    table.add_column("section")
+    table.add_column("preview")
+
+    for i, r in enumerate(results, 1):
+        body = r.chunk.context_text if show_context else r.chunk.text
+        preview = body[:140].replace("\n", " ") + ("…" if len(body) > 140 else "")
+        table.add_row(
+            str(i),
+            f"{r.score:.4f}",
+            r.chunk.level.name,
+            r.chunk.doc_id[:10],
+            (r.chunk.metadata.section_title or r.chunk.metadata.chapter_title or "")[:40],
+            preview,
+        )
+
+    console.print(table)
+    conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Document metadata (sidecar — separate from chunks, no re-ingest required)
+# ---------------------------------------------------------------------------
+
+
+@cli.group()
+def metadata() -> None:
+    """Manage the doc-level metadata sidecar (project, mpn, manufacturer, …)."""
+
+
+@metadata.command("set")
+@click.argument("doc_id", type=str)
+@click.option("--project-id", default=None)
+@click.option("--group", "group_name", default=None)
+@click.option("--mpn", default=None, help="Manufacturer part number, e.g. STM32H743VIT6.")
+@click.option("--manufacturer", default=None)
+@click.option("--subsystem", default=None, help="e.g. power, rf, mcu.")
+@click.option("--doc-type", default=None,
+              help="datasheet | reference-manual | errata | app-note | …")
+@click.option("--tag", "tags", multiple=True, help="Repeatable --tag flag.")
+@click.option("--db", "db_path", type=click.Path(path_type=Path), default=None)
+@click.option("--apply-to-chunks/--no-apply-to-chunks", default=True,
+              help="Propagate project_id and group_name into the chunks table.")
+def metadata_set(
+    doc_id: str,
+    project_id: str | None,
+    group_name: str | None,
+    mpn: str | None,
+    manufacturer: str | None,
+    subsystem: str | None,
+    doc_type: str | None,
+    tags: tuple[str, ...],
+    db_path: Path | None,
+    apply_to_chunks: bool,
+) -> None:
+    """Upsert document metadata. Only fields you pass are updated."""
+    from aws_rag.store import apply_metadata_to_chunks, connect, set_metadata
+
+    settings = get_settings()
+    target = db_path or settings.sqlite_db_path
+    conn = connect(target)
+
+    meta = set_metadata(
+        conn, doc_id,
+        project_id=project_id, group_name=group_name,
+        mpn=mpn, manufacturer=manufacturer, subsystem=subsystem,
+        doc_type=doc_type,
+        tags=list(tags) if tags else None,
+    )
+    conn.commit()
+    console.print(f"[green]Saved metadata for[/] {doc_id}")
+    console.print(meta.model_dump_json(indent=2, exclude_none=True))
+
+    if apply_to_chunks:
+        updated = apply_metadata_to_chunks(conn, doc_id)
+        conn.commit()
+        console.print(f"  Propagated to {updated} chunk rows.")
+
+    conn.close()
+
+
+@metadata.command("get")
+@click.argument("doc_id", type=str)
+@click.option("--db", "db_path", type=click.Path(path_type=Path), default=None)
+def metadata_get(doc_id: str, db_path: Path | None) -> None:
+    """Show the sidecar metadata row for a document."""
+    from aws_rag.store import connect, get_metadata
+
+    settings = get_settings()
+    target = db_path or settings.sqlite_db_path
+    conn = connect(target)
+    meta = get_metadata(conn, doc_id)
+    if meta is None:
+        console.print(f"[yellow]No metadata recorded for[/] {doc_id}")
+        return
+    console.print(meta.model_dump_json(indent=2, exclude_none=True))
+    conn.close()
+
+
+@metadata.command("list")
+@click.option("--project-id", default=None)
+@click.option("--group", "group_name", default=None)
+@click.option("--mpn", default=None)
+@click.option("--db", "db_path", type=click.Path(path_type=Path), default=None)
+def metadata_list(
+    project_id: str | None,
+    group_name: str | None,
+    mpn: str | None,
+    db_path: Path | None,
+) -> None:
+    """List documents in the sidecar, optionally filtered."""
+    from aws_rag.store import connect, list_docs
+
+    settings = get_settings()
+    target = db_path or settings.sqlite_db_path
+    conn = connect(target)
+    docs = list_docs(conn, project_id=project_id, group_name=group_name, mpn=mpn)
+
+    if not docs:
+        console.print("[yellow]No documents match.[/]")
+        return
+
+    table = Table(title=f"Documents ({len(docs)})")
+    table.add_column("doc_id", style="cyan")
+    table.add_column("project")
+    table.add_column("group")
+    table.add_column("mpn")
+    table.add_column("manufacturer")
+    table.add_column("subsystem")
+
+    for d in docs:
+        table.add_row(
+            d.doc_id[:14], d.project_id or "—",
+            d.group_name or "—", d.mpn or "—",
+            d.manufacturer or "—", d.subsystem or "—",
+        )
+    console.print(table)
+    conn.close()

@@ -7,11 +7,15 @@ dependencies = [
     "boto3>=1.35.0",
     "botocore[crt]>=1.35.0",
     "click>=8.1.0",
+    "mcp>=1.2.0",
+    "numpy>=1.26.0",
     "pdf2image>=1.16.0",
     "Pillow>=10.0.0",
     "pydantic>=2.0.0",
     "pydantic-settings>=2.0.0",
     "rich>=13.0.0",
+    "sqlite-vec>=0.1.6",
+    "tenacity>=8.2.0",
 ]
 
 [project.optional-dependencies]
@@ -19,15 +23,15 @@ dev = [
     "pytest>=8.0.0",
     "ruff>=0.5.0",
     "mypy>=1.10.0",
-    "boto3-stubs[s3,textract]>=1.35.0",
+    "boto3-stubs[s3,textract,bedrock-runtime]>=1.35.0",
 ]
-embedding = [
+tokens = [
     "tiktoken>=0.7.0",
-    "numpy>=1.26.0",
 ]
 
 [project.scripts]
 rag = "aws_rag.cli:cli"
+rag-mcp = "aws_rag.mcp.server:main"
 
 [build-system]
 requires = ["setuptools>=68.0.0", "wheel"]
