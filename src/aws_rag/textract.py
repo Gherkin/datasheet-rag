@@ -146,6 +146,48 @@ def save_blocks(blocks: list[dict[str, Any]], dest: Path) -> Path:
 # Layout parsing helpers
 # ---------------------------------------------------------------------------
 
+def layout_reading_order(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return all LAYOUT_* blocks in document reading order.
+
+    Textract's LAYOUT feature already computes a column-aware reading order
+    and exposes it as the ordered CHILD list of each PAGE block (it reads a
+    full column top-to-bottom before moving to the next column). We trust
+    that order. A plain geometric (page, top, left) sort would interleave
+    columns on the multi-column datasheets that make up most of the corpus.
+
+    Blocks that Textract did not sequence (no PAGE→CHILD entry) fall back to
+    geometric order, placed after the sequenced blocks on their page.
+    """
+    id_map = {b["Id"]: b for b in blocks if "Id" in b}
+    layout_blocks = [
+        b for b in blocks if b.get("BlockType", "").startswith("LAYOUT_")
+    ]
+
+    # Per-page rank from each PAGE block's ordered CHILD list (layout only).
+    rank: dict[str, int] = {}
+    for pb in (b for b in blocks if b.get("BlockType") == "PAGE"):
+        position = 0
+        for rel in pb.get("Relationships", []):
+            if rel.get("Type") != "CHILD":
+                continue
+            for cid in rel["Ids"]:
+                child = id_map.get(cid)
+                if child and child.get("BlockType", "").startswith("LAYOUT_"):
+                    rank[cid] = position
+                    position += 1
+
+    def _key(b: dict[str, Any]) -> tuple[int, int, int, float, float]:
+        page = b.get("Page", 0)
+        bb = b.get("Geometry", {}).get("BoundingBox", {})
+        bid = b.get("Id", "")
+        if bid in rank:
+            return (page, 0, rank[bid], 0.0, 0.0)
+        # Unsequenced: after ranked blocks on the page, ordered geometrically.
+        return (page, 1, 0, bb.get("Top", 0.0), bb.get("Left", 0.0))
+
+    return sorted(layout_blocks, key=_key)
+
+
 def extract_layout_elements(blocks: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
     """Organise Textract blocks by layout type.
 
@@ -168,19 +210,10 @@ def build_text_from_layout(blocks: list[dict[str, Any]]) -> str:
     """
     id_map = {b["Id"]: b for b in blocks if "Id" in b}
 
-    # Prefer layout blocks for ordering
-    layout_blocks = [
-        b for b in blocks
-        if b.get("BlockType", "").startswith("LAYOUT_")
-    ]
+    # Prefer layout blocks for ordering, using Textract's column-aware order.
+    layout_blocks = layout_reading_order(blocks)
 
     if layout_blocks:
-        # Sort by page, then top, then left
-        layout_blocks.sort(key=lambda b: (
-            b.get("Page", 0),
-            b.get("Geometry", {}).get("BoundingBox", {}).get("Top", 0),
-            b.get("Geometry", {}).get("BoundingBox", {}).get("Left", 0),
-        ))
         parts: list[str] = []
         for lb in layout_blocks:
             text = _collect_text(lb, id_map)

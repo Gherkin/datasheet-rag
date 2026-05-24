@@ -98,17 +98,13 @@ class FigureManifest:
 
 def find_figure_regions(blocks: list[dict[str, Any]]) -> list[FigureRegion]:
     """Parse Textract blocks and return all LAYOUT_FIGURE regions with context."""
+    from aws_rag.textract import layout_reading_order
+
     id_map = {b["Id"]: b for b in blocks if "Id" in b}
 
-    # Collect all layout blocks sorted by page and position for context lookups
-    layout_blocks = [
-        b for b in blocks if b.get("BlockType", "").startswith("LAYOUT_")
-    ]
-    layout_blocks.sort(key=lambda b: (
-        b.get("Page", 0),
-        b.get("Geometry", {}).get("BoundingBox", {}).get("Top", 0),
-        b.get("Geometry", {}).get("BoundingBox", {}).get("Left", 0),
-    ))
+    # Layout blocks in Textract's column-aware reading order, so caption and
+    # nearest-header lookups walk the correct neighbours.
+    layout_blocks = layout_reading_order(blocks)
 
     figures: list[FigureRegion] = []
 

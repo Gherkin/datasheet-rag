@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from aws_rag.textract import layout_reading_order
+
 
 class ElementType(str, Enum):
     """Type of content element within a section."""
@@ -205,16 +207,8 @@ def parse_textract_blocks(
     page_blocks = [b for b in blocks if b.get("BlockType") == "PAGE"]
     total_pages = len(page_blocks) if page_blocks else 1
 
-    # Collect and sort layout blocks
-    layout_blocks = [
-        b for b in blocks
-        if b.get("BlockType", "").startswith("LAYOUT_")
-    ]
-    layout_blocks.sort(key=lambda b: (
-        b.get("Page", 0),
-        b.get("Geometry", {}).get("BoundingBox", {}).get("Top", 0),
-        b.get("Geometry", {}).get("BoundingBox", {}).get("Left", 0),
-    ))
+    # Collect layout blocks in Textract's column-aware reading order.
+    layout_blocks = layout_reading_order(blocks)
 
     # Build table lookup: TABLE blocks indexed by ID
     table_blocks = {b["Id"]: b for b in blocks if b.get("BlockType") == "TABLE"}
