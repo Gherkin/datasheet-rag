@@ -733,6 +733,232 @@ def describe_figures_cmd(
 
 
 # ---------------------------------------------------------------------------
+# Ingest (full pipeline: upload → analyze → extract-figures → chunk → embed)
+# ---------------------------------------------------------------------------
+
+
+@cli.command()
+@click.argument("pdf_path", type=click.Path(exists=True, path_type=Path))
+@click.option("--doc-id", default=None, help="Explicit document ID (default: content hash).")
+@click.option("--project-id", default=None, help="Project ID attached to all chunks.")
+@click.option("--group", "group_name", default=None, help="Group name attached to all chunks.")
+@click.option("--mpn", default=None, help="Manufacturer part number, e.g. STM32H743VIT6.")
+@click.option("--manufacturer", default=None)
+@click.option("--subsystem", default=None, help="e.g. power, rf, mcu.")
+@click.option("--doc-type", default=None,
+              help="datasheet | reference-manual | errata | app-note | …")
+@click.option("--tag", "tags", multiple=True, help="Repeatable --tag flag.")
+@click.option("--skip-figures", is_flag=True, help="Skip figure extraction and description steps.")
+@click.option("--skip-describe", is_flag=True, help="Skip AI figure description (but still extract).")
+@click.option("--dpi", default=300, type=int, help="Render DPI for figure extraction.")
+@click.option("--micro-tokens", default=128, type=int, help="Max tokens per MICRO chunk.")
+@click.option("--meso-tokens", default=512, type=int, help="Max tokens per MESO chunk.")
+@click.option("--db", "db_path", type=click.Path(path_type=Path), default=None,
+              help="SQLite DB path. Defaults to settings.sqlite_db_path.")
+@click.option("--dry-run", is_flag=True, help="Run all steps but do not write to the store.")
+def ingest(
+    pdf_path: Path,
+    doc_id: str | None,
+    project_id: str | None,
+    group_name: str | None,
+    mpn: str | None,
+    manufacturer: str | None,
+    subsystem: str | None,
+    doc_type: str | None,
+    tags: tuple[str, ...],
+    skip_figures: bool,
+    skip_describe: bool,
+    dpi: int,
+    micro_tokens: int,
+    meso_tokens: int,
+    db_path: Path | None,
+    dry_run: bool,
+) -> None:
+    """Full ingestion pipeline: upload → Textract → figures → chunk → embed.
+
+    Orchestrates all individual `rag` sub-commands in one shot. Intermediate
+    artefacts (blocks JSON, chunk graph, figure manifest) are saved to
+    output_dir so you can re-run individual steps afterwards if needed.
+    """
+    import time
+
+    from aws_rag.chunking.pipeline import run_chunking_pipeline, save_chunk_graph
+    from aws_rag.chunking.splitter import SplitterConfig
+    from aws_rag.embedding import BedrockEmbedder, embed_chunk_graph
+    from aws_rag.figures import extract_figures
+    from aws_rag.storage import upload_pdf
+    from aws_rag.store import connect, insert_chunk_graph, set_metadata, apply_metadata_to_chunks
+    from aws_rag.textract import (
+        get_job_results,
+        save_blocks,
+        start_analysis,
+        wait_for_job,
+    )
+
+    settings = get_settings()
+    t0 = time.monotonic()
+
+    def _step(n: int, total: int, label: str) -> None:
+        console.rule(f"[bold cyan]Step {n}/{total} — {label}[/]")
+
+    total_steps = 4 if skip_figures else (5 if skip_describe else 6)
+
+    # ── 1. Upload ────────────────────────────────────────────────────────────
+    _step(1, total_steps, "Upload PDF to S3")
+    did, s3_key = upload_pdf(pdf_path, doc_id=doc_id)
+    console.print(f"  doc_id = [cyan]{did}[/]")
+    console.print(f"  s3_key = {s3_key}")
+
+    # ── 2. Textract ──────────────────────────────────────────────────────────
+    _step(2, total_steps, "Textract layout analysis")
+    job_id = start_analysis(did, s3_key)
+    console.print(f"  job_id = {job_id}  (waiting…)")
+    status = wait_for_job(job_id)
+    if status != "SUCCEEDED":
+        raise click.ClickException(f"Textract job failed with status: {status}")
+
+    blocks = get_job_results(job_id)
+    blocks_path = settings.output_dir / f"{did}_blocks.json"
+    save_blocks(blocks, blocks_path)
+    console.print(f"  {len(blocks)} blocks → [cyan]{blocks_path}[/]")
+
+    # ── 3. Figure extraction (optional) ──────────────────────────────────────
+    figure_manifest_dict = None
+    if not skip_figures:
+        _step(3, total_steps, "Extract figures")
+        figures_out = settings.output_dir / "figures" / did
+        manifest = extract_figures(
+            pdf_path=pdf_path,
+            blocks=blocks,
+            doc_id=did,
+            output_dir=figures_out,
+            dpi=dpi,
+            image_format="png",
+            padding_pct=0.02,
+        )
+        manifest_path = figures_out / "manifest.json"
+        manifest.save(manifest_path)
+        figure_manifest_dict = manifest.to_dict()
+        console.print(f"  {len(manifest.figures)} figures → [cyan]{manifest_path}[/]")
+
+    # ── 4. Chunk ─────────────────────────────────────────────────────────────
+    step_n = 4
+    _step(step_n, total_steps, "Multi-scale chunking")
+    config = SplitterConfig(micro_max_tokens=micro_tokens, meso_max_tokens=meso_tokens)
+    graph = run_chunking_pipeline(
+        blocks,
+        doc_id=did,
+        figure_manifest=figure_manifest_dict,
+        config=config,
+        summarizer_mode="extractive",
+    )
+    chunks_path = settings.output_dir / f"{did}_chunks.json"
+    save_chunk_graph(graph, chunks_path)
+    stats = graph.stats()
+    console.print(
+        f"  {stats['total_chunks']} chunks "
+        f"(MACRO {stats['by_level']['MACRO']}, "
+        f"MESO {stats['by_level']['MESO']}, "
+        f"MICRO {stats['by_level']['MICRO']}) → [cyan]{chunks_path}[/]"
+    )
+
+    # ── 5. Describe figures (optional) ───────────────────────────────────────
+    if not skip_figures and not skip_describe:
+        step_n += 1
+        _step(step_n, total_steps, "AI figure descriptions")
+        # Need chunks in the store first so describe-figures can find them.
+        # We do a provisional write, then describe, then the embed step below
+        # will merge the descriptions into context_text.
+        if not dry_run:
+            from aws_rag.description import FigureDescriber, describe_figures_in_store
+
+            target = db_path or settings.sqlite_db_path
+            conn = connect(target)
+            embedder_tmp = BedrockEmbedder(verbose=False)
+            vectors_tmp = embed_chunk_graph(graph, embedder=embedder_tmp)
+            inserted_tmp = insert_chunk_graph(
+                conn, graph, vectors=vectors_tmp,
+                project_id=project_id, group_name=group_name,
+            )
+            conn.commit()
+            console.print(f"  Provisional write of {inserted_tmp} chunks for description pass.")
+
+            describer = FigureDescriber(verbose=True)
+            descriptions = describe_figures_in_store(
+                conn, doc_id=did, project_id=project_id,
+                missing_only=True, describer=describer, dry_run=False,
+            )
+            s = describer.stats()
+            console.print(
+                f"  [green]{len(descriptions)}[/] descriptions · "
+                f"in={s['total_input_tokens']} tok · out={s['total_output_tokens']} tok"
+            )
+            conn.close()
+
+            # Merge stored descriptions back into graph so the final embed
+            # includes them in context_text.
+            conn2 = connect(target)
+            for row in conn2.execute(
+                "SELECT id, figure_description FROM chunks WHERE doc_id=? AND figure_description IS NOT NULL",
+                (did,),
+            ).fetchall():
+                chunk = graph.chunks.get(row["id"])
+                if chunk:
+                    chunk.figure_description = row["figure_description"]
+                    tag = f"Description: {row['figure_description']}"
+                    if tag not in (chunk.context_text or ""):
+                        chunk.context_text = (chunk.context_text or chunk.text) + "\n" + tag
+            conn2.close()
+        else:
+            console.print("  [yellow]Dry run — skipping description and provisional embed.[/]")
+
+    # ── 6. Embed + store ─────────────────────────────────────────────────────
+    step_n += 1
+    _step(step_n, total_steps, "Embed & store")
+    console.print("  Embedding with Bedrock Titan v2…")
+    embedder = BedrockEmbedder(verbose=True)
+    vectors = embed_chunk_graph(graph, embedder=embedder)
+    es = embedder.stats()
+    console.print(
+        f"  [green]Embedded[/] {len(vectors)} chunks · "
+        f"{es['total_tokens_in']} input tokens · "
+        f"{es['total_errors']} errors"
+    )
+
+    if dry_run:
+        console.print("[yellow]Dry run — not writing to the store.[/]")
+    else:
+        target = db_path or settings.sqlite_db_path
+        conn = connect(target)
+        inserted = insert_chunk_graph(
+            conn, graph, vectors=vectors,
+            project_id=project_id, group_name=group_name,
+        )
+        conn.commit()
+        console.print(f"  [green]Upserted[/] {inserted} chunks → [cyan]{target}[/]")
+
+        # Metadata sidecar
+        any_meta = any([project_id, group_name, mpn, manufacturer, subsystem, doc_type, tags])
+        if any_meta:
+            set_metadata(
+                conn, did,
+                project_id=project_id, group_name=group_name,
+                mpn=mpn, manufacturer=manufacturer,
+                subsystem=subsystem, doc_type=doc_type,
+                tags=list(tags) if tags else None,
+            )
+            apply_metadata_to_chunks(conn, did)
+            conn.commit()
+            console.print("  Metadata sidecar saved.")
+
+        conn.close()
+
+    elapsed = time.monotonic() - t0
+    console.rule(f"[bold green]Done[/] — {elapsed:.0f}s")
+    console.print(f"  doc_id = [cyan]{did}[/]")
+
+
+# ---------------------------------------------------------------------------
 # Document metadata (sidecar — separate from chunks, no re-ingest required)
 # ---------------------------------------------------------------------------
 
@@ -850,3 +1076,294 @@ def metadata_list(
         )
     console.print(table)
     conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Eval (retrieval-layer evaluation)
+# ---------------------------------------------------------------------------
+
+
+@cli.group("eval")
+def eval_group() -> None:
+    """Retrieval-layer evaluation: golden set, metrics, ablations."""
+
+
+_CAT_ORDER = ["identifier", "conceptual", "figure", "table_spec", "synthesis", "overall"]
+
+
+def _render_report_table(report: object) -> None:
+    """Print one RunReport's per-category metrics."""
+    from aws_rag.eval.harness import RunReport
+
+    assert isinstance(report, RunReport)
+    hk = report.config.k
+    table = Table(
+        title=f"Retrieval eval · {report.config.describe()} "
+        f"(hit@k = strict lineage; pg@{hk} = loose page upper bound)"
+    )
+    table.add_column("category", style="magenta")
+    table.add_column("n", justify="right", style="dim")
+    for k in report.config.ks:
+        table.add_column(f"hit@{k}", justify="right", style="cyan")
+    table.add_column(f"pg@{hk}", justify="right", style="dim")
+    table.add_column("MRR", justify="right", style="green")
+    table.add_column("nDCG", justify="right", style="green")
+
+    for cat in _CAT_ORDER:
+        m = report.by_category.get(cat)
+        if m is None or m.n == 0:
+            continue
+        row = [cat, str(m.n)]
+        row += [f"{m.hit_rate_at_k.get(k, 0.0):.2f}" for k in report.config.ks]
+        row += [f"{m.hit_rate_at_k_loose.get(hk, 0.0):.2f}"]
+        row += [f"{m.mrr:.3f}", f"{m.ndcg:.3f}"]
+        table.add_row(*row, end_section=(cat == "overall"))
+    console.print(table)
+
+
+def _render_matrix_table(reports: list, headline_k: int) -> None:
+    """Print a comparison across configs: overall + per-category hit@k."""
+    from aws_rag.eval.dataset import CATEGORIES
+
+    table = Table(title=f"Ablation comparison · hit@{headline_k} by category")
+    table.add_column("config", style="yellow")
+    table.add_column("overall", justify="right", style="cyan")
+    table.add_column("MRR", justify="right", style="green")
+    table.add_column("nDCG", justify="right", style="green")
+    for cat in CATEGORIES:
+        table.add_column(cat[:5], justify="right")
+
+    for rep in reports:
+        overall = rep.by_category.get("overall")
+        if overall is None:
+            continue
+        row = [
+            rep.config.describe(),
+            f"{overall.hit_rate_at_k.get(headline_k, 0.0):.2f}",
+            f"{overall.mrr:.3f}",
+            f"{overall.ndcg:.3f}",
+        ]
+        for cat in CATEGORIES:
+            m = rep.by_category.get(cat)
+            row.append(f"{m.hit_rate_at_k.get(headline_k, 0.0):.2f}" if m else "—")
+        table.add_row(*row)
+    console.print(table)
+
+
+@eval_group.command("generate")
+@click.option("--db", "db_path", type=click.Path(path_type=Path), default=None,
+              help="SQLite DB path. Defaults to settings.sqlite_db_path.")
+@click.option("--per-category", default=4, type=int, help="Items to generate per category.")
+@click.option("--doc-id", default=None, help="Restrict sampling to one document.")
+@click.option("--project-id", default=None, help="Restrict sampling to one project.")
+@click.option("--model", "model_id", default=None, help="Bedrock model ID for generation.")
+@click.option("--seed", default=0, type=int, help="Sampling seed (reproducible).")
+@click.option("--output", "-o", "out_path", type=click.Path(path_type=Path),
+              default=Path("eval/golden.jsonl"), help="Output JSONL path.")
+@click.option("--append", is_flag=True, help="Append to the output file instead of overwriting.")
+@click.option("--verbose/--quiet", default=True)
+def eval_generate(
+    db_path: Path | None,
+    per_category: int,
+    doc_id: str | None,
+    project_id: str | None,
+    model_id: str | None,
+    seed: int,
+    out_path: Path,
+    append: bool,
+    verbose: bool,
+) -> None:
+    """Generate a reviewable golden set from the corpus (LLM-assisted)."""
+    from aws_rag.eval.generate import generate_golden_set
+    from aws_rag.store import connect
+
+    settings = get_settings()
+    conn = connect(db_path or settings.sqlite_db_path)
+    eval_set = generate_golden_set(
+        conn,
+        per_category=per_category,
+        doc_id=doc_id,
+        project_id=project_id,
+        model_id=model_id,
+        seed=seed,
+        verbose=verbose,
+    )
+    conn.close()
+
+    if append:
+        eval_set.append_jsonl(out_path)
+    else:
+        eval_set.save(out_path)
+    console.print(
+        f"[green]Wrote[/] {len(eval_set)} items to {out_path} "
+        f"(source='auto' — review before trusting as ground truth)."
+    )
+
+
+@eval_group.command("run")
+@click.option("--db", "db_path", type=click.Path(path_type=Path), default=None)
+@click.option("--set", "set_path", type=click.Path(exists=True, path_type=Path),
+              default=Path("eval/golden.jsonl"), help="Golden set JSONL.")
+@click.option("--mode", type=click.Choice(["hybrid", "vector", "keyword"]), default="hybrid")
+@click.option("-k", "top_k", default=5, type=int, help="Headline k (nDCG cutoff).")
+@click.option("--level", type=click.Choice(["macro", "meso", "micro"]), default=None)
+@click.option("--rrf-k", default=60, type=int)
+@click.option("--vector-weight", default=1.0, type=float)
+@click.option("--keyword-weight", default=1.0, type=float)
+@click.option("--trace", "trace_path", type=click.Path(path_type=Path), default=None,
+              help="Append per-query JSONL traces here.")
+@click.option("--json-out", type=click.Path(path_type=Path), default=None,
+              help="Write the full report JSON here.")
+def eval_run(
+    db_path: Path | None,
+    set_path: Path,
+    mode: str,
+    top_k: int,
+    level: str | None,
+    rrf_k: int,
+    vector_weight: float,
+    keyword_weight: float,
+    trace_path: Path | None,
+    json_out: Path | None,
+) -> None:
+    """Run the golden set through one search config and print metrics."""
+    from aws_rag.eval.dataset import EvalSet
+    from aws_rag.eval.harness import RunConfig, run_eval
+    from aws_rag.store import connect
+
+    settings = get_settings()
+    conn = connect(db_path or settings.sqlite_db_path)
+    eval_set = EvalSet.load(set_path)
+
+    embedder = None
+    if mode in ("vector", "hybrid"):
+        from aws_rag.embedding import BedrockEmbedder
+
+        embedder = BedrockEmbedder()
+
+    config = RunConfig(
+        mode=mode,  # type: ignore[arg-type]
+        k=top_k,
+        level=level,  # type: ignore[arg-type]
+        rrf_k=rrf_k,
+        vector_weight=vector_weight,
+        keyword_weight=keyword_weight,
+    )
+    report = run_eval(conn, eval_set, config, embedder=embedder, trace_path=trace_path)
+    conn.close()
+
+    _render_report_table(report)
+    if json_out:
+        json_out.parent.mkdir(parents=True, exist_ok=True)
+        json_out.write_text(report.model_dump_json(indent=2), encoding="utf-8")
+        console.print(f"[green]Report JSON →[/] {json_out}")
+
+
+@eval_group.command("ablate")
+@click.option("--db", "db_path", type=click.Path(path_type=Path), default=None)
+@click.option("--set", "set_path", type=click.Path(exists=True, path_type=Path),
+              default=Path("eval/golden.jsonl"))
+@click.option("-k", "top_k", default=5, type=int, help="Headline k for the comparison.")
+@click.option("--trace", "trace_path", type=click.Path(path_type=Path), default=None)
+@click.option("--json-out", type=click.Path(path_type=Path), default=None)
+@click.option("--index-ablation", type=click.Choice(["context-vs-raw", "figure-desc"]),
+              default=None, help="Heavy re-embedding ablation (incurs Bedrock cost).")
+@click.option("--variant-db", type=click.Path(path_type=Path),
+              default=Path("test-project/output/rag-variant.sqlite"),
+              help="Where to build the variant store for an index ablation.")
+@click.option("--limit", default=None, type=int, help="Cap chunks re-embedded (index ablation).")
+@click.option("--verbose/--quiet", default=True)
+def eval_ablate(
+    db_path: Path | None,
+    set_path: Path,
+    top_k: int,
+    trace_path: Path | None,
+    json_out: Path | None,
+    index_ablation: str | None,
+    variant_db: Path,
+    limit: int | None,
+    verbose: bool,
+) -> None:
+    """Run the ablation matrix and print which concepts move the needle."""
+    from aws_rag.embedding import BedrockEmbedder
+    from aws_rag.eval.ablation import (
+        build_variant_store,
+        default_matrix,
+        run_matrix,
+    )
+    from aws_rag.eval.dataset import EvalSet
+    from aws_rag.eval.harness import RunConfig, run_eval
+    from aws_rag.store import connect
+
+    settings = get_settings()
+    conn = connect(db_path or settings.sqlite_db_path)
+    eval_set = EvalSet.load(set_path)
+    embedder = BedrockEmbedder()
+
+    if index_ablation is None:
+        reports = run_matrix(
+            conn, eval_set, default_matrix(base_k=top_k),
+            embedder=embedder, trace_path=trace_path,
+        )
+        conn.close()
+        _render_matrix_table(reports, headline_k=top_k)
+        if json_out:
+            _dump_reports_json(reports, json_out)
+        return
+
+    # Index ablation: baseline (current store) vs variant (re-embedded).
+    variant = "raw_text" if index_ablation == "context-vs-raw" else "no_figure_desc"
+    console.print(
+        f"[yellow]Index ablation[/] '{index_ablation}': building variant store "
+        f"(variant={variant}) — this re-embeds and incurs Bedrock cost."
+    )
+    variant_conn = build_variant_store(
+        conn, variant_db, variant, embedder,  # type: ignore[arg-type]
+        limit=limit, verbose=verbose,
+    )
+
+    base_cfg = RunConfig(mode="hybrid", k=top_k, label="baseline (context_text)")
+    var_label = "raw text" if variant == "raw_text" else "no figure desc"
+    var_cfg = RunConfig(mode="hybrid", k=top_k, label=f"variant ({var_label})")
+
+    base_report = run_eval(conn, eval_set, base_cfg, embedder=embedder, trace_path=trace_path)
+    var_report = run_eval(variant_conn, eval_set, var_cfg, embedder=embedder, trace_path=trace_path)
+    conn.close()
+    variant_conn.close()
+
+    reports = [base_report, var_report]
+    _render_matrix_table(reports, headline_k=top_k)
+    if json_out:
+        _dump_reports_json(reports, json_out)
+
+
+def _dump_reports_json(reports: list, path: Path) -> None:
+    import json as _json
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        _json.dumps([r.model_dump() for r in reports], indent=2, default=str),
+        encoding="utf-8",
+    )
+    console.print(f"[green]Reports JSON →[/] {path}")
+
+
+@eval_group.command("review")
+@click.option("--db", "db_path", type=click.Path(path_type=Path), default=None)
+@click.option("--set", "set_path", type=click.Path(exists=True, path_type=Path),
+              default=Path("eval/golden.jsonl"), help="Golden set JSONL to review.")
+@click.option("--port", default=0, type=int, help="Port (0 = pick a free one).")
+@click.option("-k", "top_k", default=5, type=int, help="Retrieval results to preview per item.")
+@click.option("--open/--no-open", "open_browser", default=True,
+              help="Open the review page in a browser.")
+def eval_review(
+    db_path: Path | None,
+    set_path: Path,
+    port: int,
+    top_k: int,
+    open_browser: bool,
+) -> None:
+    """Hand-review the golden set in a local web app (PDF page + page/chunk labels)."""
+    from aws_rag.eval.review import serve
+
+    serve(set_path, db_path=db_path, port=port, k=top_k, open_browser=open_browser)
