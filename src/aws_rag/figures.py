@@ -22,11 +22,10 @@ console = Console()
 
 @dataclass
 class FigureRegion:
-    """A detected figure region from Textract LAYOUT_FIGURE blocks."""
+    """A detected figure/formula region with normalised bounding box (0..1)."""
 
     block_id: str
     page: int  # 1-indexed
-    # Textract bounding box (normalised 0..1)
     left: float
     top: float
     width: float
@@ -35,6 +34,8 @@ class FigureRegion:
     caption: str = ""
     preceding_text: str = ""
     section_header: str = ""
+    # "figure" or "formula" — downstream can treat them differently
+    kind: str = "figure"
 
 
 @dataclass
@@ -288,6 +289,61 @@ def crop_figure(
 # ---------------------------------------------------------------------------
 
 
+def extract_figures_from_regions(
+    pdf_path: Path,
+    regions: list[FigureRegion],
+    doc_id: str,
+    *,
+    output_dir: Path | None = None,
+    dpi: int = 300,
+    image_format: str = "png",
+    padding_pct: float = 0.02,
+) -> FigureManifest:
+    """Crop and save figure regions to disk. Regions may come from Textract or Docling."""
+    if output_dir is None:
+        output_dir = Path("output").resolve() / "figures" / doc_id
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if not regions:
+        console.print("[yellow]No figures/formulas detected in this document.[/]")
+        return FigureManifest(doc_id=doc_id, source_pdf=str(pdf_path))
+
+    n_figs = sum(1 for r in regions if r.kind == "figure")
+    n_formulas = sum(1 for r in regions if r.kind == "formula")
+    console.print(
+        f"[blue]Found {len(regions)} regions[/] ({n_figs} figures, {n_formulas} formulas) "
+        f"across pages {sorted(set(r.page for r in regions))}"
+    )
+
+    needed_pages = sorted(set(r.page for r in regions))
+    page_images = render_pdf_pages(pdf_path, dpi=dpi, pages=needed_pages)
+
+    manifest = FigureManifest(doc_id=doc_id, source_pdf=str(pdf_path))
+
+    for i, region in enumerate(track(regions, description="Cropping figures…")):
+        page_img = page_images.get(region.page)
+        if page_img is None:
+            console.print(f"[red]Warning:[/] page {region.page} not rendered, skipping")
+            continue
+
+        cropped = crop_figure(page_img, region, padding_pct=padding_pct)
+        prefix = "formula" if region.kind == "formula" else "fig"
+        filename = f"p{region.page:03d}_{prefix}{i:03d}.{image_format}"
+        image_path = output_dir / filename
+        cropped.save(str(image_path), format=image_format.upper())
+
+        manifest.figures.append(ExtractedFigure(
+            region=region,
+            image_path=image_path,
+            width_px=cropped.width,
+            height_px=cropped.height,
+        ))
+
+    console.print(f"[green]Extracted {len(manifest.figures)} regions[/] → {output_dir}")
+    return manifest
+
+
 def extract_figures(
     pdf_path: Path,
     blocks: list[dict[str, Any]],
@@ -298,58 +354,13 @@ def extract_figures(
     image_format: str = "png",
     padding_pct: float = 0.02,
 ) -> FigureManifest:
-    """Extract all figures from a PDF using Textract layout blocks.
-
-    1. Find LAYOUT_FIGURE regions in the blocks
-    2. Render only the necessary PDF pages
-    3. Crop each figure with padding
-    4. Save to output_dir and build manifest
-
-    Returns a FigureManifest with paths and metadata for each figure.
-    """
-    if output_dir is None:
-        output_dir = Path("output").resolve() / "figures" / doc_id
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    # Step 1: Find figure regions
+    """Extract figures from a PDF using Textract layout blocks (Textract path)."""
     regions = find_figure_regions(blocks)
-    if not regions:
-        console.print("[yellow]No figures detected in this document.[/]")
-        return FigureManifest(doc_id=doc_id, source_pdf=str(pdf_path))
-
-    console.print(f"[blue]Found {len(regions)} figures[/] across pages "
-                  f"{sorted(set(r.page for r in regions))}")
-
-    # Step 2: Render only the pages that contain figures
-    needed_pages = sorted(set(r.page for r in regions))
-    page_images = render_pdf_pages(pdf_path, dpi=dpi, pages=needed_pages)
-
-    # Step 3: Crop and save each figure
-    manifest = FigureManifest(doc_id=doc_id, source_pdf=str(pdf_path))
-
-    for i, region in enumerate(track(regions, description="Cropping figures…")):
-        page_img = page_images.get(region.page)
-        if page_img is None:
-            console.print(f"[red]Warning:[/] page {region.page} not rendered, skipping figure")
-            continue
-
-        cropped = crop_figure(page_img, region, padding_pct=padding_pct)
-
-        filename = f"p{region.page:03d}_fig{i:03d}.{image_format}"
-        image_path = output_dir / filename
-        cropped.save(str(image_path), format=image_format.upper())
-
-        extracted = ExtractedFigure(
-            region=region,
-            image_path=image_path,
-            width_px=cropped.width,
-            height_px=cropped.height,
-        )
-        manifest.figures.append(extracted)
-
-    console.print(f"[green]Extracted {len(manifest.figures)} figures[/] → {output_dir}")
-    return manifest
+    return extract_figures_from_regions(
+        pdf_path, regions, doc_id,
+        output_dir=output_dir, dpi=dpi,
+        image_format=image_format, padding_pct=padding_pct,
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -756,6 +756,18 @@ def describe_figures_cmd(
 @click.option("--db", "db_path", type=click.Path(path_type=Path), default=None,
               help="SQLite DB path. Defaults to settings.sqlite_db_path.")
 @click.option("--dry-run", is_flag=True, help="Run all steps but do not write to the store.")
+@click.option(
+    "--backend",
+    type=click.Choice(["auto", "docling", "textract"], case_sensitive=False),
+    default="auto",
+    help=(
+        "Layout extraction backend. "
+        "'auto' detects native vs scanned and routes accordingly: "
+        "Docling for native PDFs (fast, free, handles tables/formulas/figures), "
+        "Textract for scanned PDFs (OCR). "
+        "Override with 'docling' or 'textract' to force a specific backend."
+    ),
+)
 def ingest(
     pdf_path: Path,
     doc_id: str | None,
@@ -773,94 +785,162 @@ def ingest(
     meso_tokens: int,
     db_path: Path | None,
     dry_run: bool,
+    backend: str,
 ) -> None:
-    """Full ingestion pipeline: upload → Textract → figures → chunk → embed.
+    """Full ingestion pipeline: analyse → figures → chunk → embed.
 
-    Orchestrates all individual `rag` sub-commands in one shot. Intermediate
-    artefacts (blocks JSON, chunk graph, figure manifest) are saved to
-    output_dir so you can re-run individual steps afterwards if needed.
+    Automatically routes between Docling (native PDFs: free, fast, handles
+    tables/formulas/figures) and Textract (scanned PDFs: OCR via AWS).
+    Use --backend to override auto-detection.
     """
     import time
 
-    from aws_rag.chunking.pipeline import run_chunking_pipeline, save_chunk_graph
+    from aws_rag.chunking.pipeline import (
+        run_chunking_pipeline,
+        run_chunking_pipeline_from_outline,
+        save_chunk_graph,
+    )
     from aws_rag.chunking.splitter import SplitterConfig
     from aws_rag.embedding import BedrockEmbedder, embed_chunk_graph
-    from aws_rag.figures import extract_figures
-    from aws_rag.storage import upload_pdf
-    from aws_rag.store import connect, insert_chunk_graph, set_metadata, apply_metadata_to_chunks
-    from aws_rag.textract import (
-        get_job_results,
-        save_blocks,
-        start_analysis,
-        wait_for_job,
-    )
+    from aws_rag.figures import extract_figures, extract_figures_from_regions
+    from aws_rag.store import apply_metadata_to_chunks, connect, insert_chunk_graph, set_metadata
 
     settings = get_settings()
     t0 = time.monotonic()
+    step_n = 0
 
-    def _step(n: int, total: int, label: str) -> None:
-        console.rule(f"[bold cyan]Step {n}/{total} — {label}[/]")
+    def _step(label: str) -> None:
+        nonlocal step_n
+        step_n += 1
+        console.rule(f"[bold cyan]Step {step_n} — {label}[/]")
 
-    total_steps = 4 if skip_figures else (5 if skip_describe else 6)
-
-    # ── 1. Upload ────────────────────────────────────────────────────────────
-    _step(1, total_steps, "Upload PDF to S3")
-    did, s3_key = upload_pdf(pdf_path, doc_id=doc_id)
-    console.print(f"  doc_id = [cyan]{did}[/]")
-    console.print(f"  s3_key = {s3_key}")
-
-    # ── 2. Textract ──────────────────────────────────────────────────────────
-    _step(2, total_steps, "Textract layout analysis")
-    job_id = start_analysis(did, s3_key)
-    console.print(f"  job_id = {job_id}  (waiting…)")
-    status = wait_for_job(job_id)
-    if status != "SUCCEEDED":
-        raise click.ClickException(f"Textract job failed with status: {status}")
-
-    blocks = get_job_results(job_id)
-    blocks_path = settings.output_dir / f"{did}_blocks.json"
-    save_blocks(blocks, blocks_path)
-    console.print(f"  {len(blocks)} blocks → [cyan]{blocks_path}[/]")
-
-    # ── 3. Figure extraction (optional) ──────────────────────────────────────
-    figure_manifest_dict = None
-    if not skip_figures:
-        _step(3, total_steps, "Extract figures")
-        figures_out = settings.output_dir / "figures" / did
-        manifest = extract_figures(
-            pdf_path=pdf_path,
-            blocks=blocks,
-            doc_id=did,
-            output_dir=figures_out,
-            dpi=dpi,
-            image_format="png",
-            padding_pct=0.02,
+    # ── 1. Detect backend ────────────────────────────────────────────────────
+    _step("Detect PDF type")
+    if backend == "auto":
+        from aws_rag.docling_parser import is_native_pdf
+        native = is_native_pdf(pdf_path)
+        resolved_backend = "docling" if native else "textract"
+        console.print(
+            f"  {'Native PDF' if native else 'Scanned PDF'} detected → "
+            f"using [cyan]{resolved_backend}[/] backend"
         )
-        manifest_path = figures_out / "manifest.json"
-        manifest.save(manifest_path)
-        figure_manifest_dict = manifest.to_dict()
-        console.print(f"  {len(manifest.figures)} figures → [cyan]{manifest_path}[/]")
+    else:
+        resolved_backend = backend
+        console.print(f"  Backend forced to [cyan]{resolved_backend}[/]")
 
-    # ── 4. Chunk ─────────────────────────────────────────────────────────────
-    step_n = 4
-    _step(step_n, total_steps, "Multi-scale chunking")
-    config = SplitterConfig(micro_max_tokens=micro_tokens, meso_max_tokens=meso_tokens)
-    graph = run_chunking_pipeline(
-        blocks,
-        doc_id=did,
-        figure_manifest=figure_manifest_dict,
-        config=config,
-        summarizer_mode="extractive",
-    )
-    chunks_path = settings.output_dir / f"{did}_chunks.json"
-    save_chunk_graph(graph, chunks_path)
-    stats = graph.stats()
-    console.print(
-        f"  {stats['total_chunks']} chunks "
-        f"(MACRO {stats['by_level']['MACRO']}, "
-        f"MESO {stats['by_level']['MESO']}, "
-        f"MICRO {stats['by_level']['MICRO']}) → [cyan]{chunks_path}[/]"
-    )
+    # ── 2a. Docling path (native PDFs) ───────────────────────────────────────
+    if resolved_backend == "docling":
+        from aws_rag.docling_parser import content_hash, convert_pdf
+
+        did = doc_id or content_hash(pdf_path)
+        console.print(f"  doc_id = [cyan]{did}[/]")
+
+        _step("Docling layout analysis")
+        outline, figure_regions = convert_pdf(pdf_path, doc_id=did)
+        summary = outline.summary()
+        console.print(
+            f"  {summary['top_level_sections']} chapters, "
+            f"{summary['total_sections']} sections, "
+            f"{summary['total_elements']} elements "
+            f"({summary['elements_by_type'].get('formula', 0)} formulas, "
+            f"{summary['elements_by_type'].get('table', 0)} tables, "
+            f"{summary['elements_by_type'].get('figure', 0)} figures)"
+        )
+
+        figure_manifest_dict = None
+        if not skip_figures:
+            _step("Extract figures & formulas")
+            figures_out = settings.output_dir / "figures" / did
+            manifest = extract_figures_from_regions(
+                pdf_path=pdf_path,
+                regions=figure_regions,
+                doc_id=did,
+                output_dir=figures_out,
+                dpi=dpi,
+                image_format="png",
+                padding_pct=0.02,
+            )
+            manifest_path = figures_out / "manifest.json"
+            manifest.save(manifest_path)
+            figure_manifest_dict = manifest.to_dict()
+            console.print(f"  {len(manifest.figures)} regions → [cyan]{manifest_path}[/]")
+
+        _step("Multi-scale chunking")
+        config = SplitterConfig(micro_max_tokens=micro_tokens, meso_max_tokens=meso_tokens)
+        graph = run_chunking_pipeline_from_outline(
+            outline,
+            figure_manifest=figure_manifest_dict,
+            config=config,
+            summarizer_mode="extractive",
+        )
+        chunks_path = settings.output_dir / f"{did}_chunks.json"
+        save_chunk_graph(graph, chunks_path)
+        stats = graph.stats()
+        console.print(
+            f"  {stats['total_chunks']} chunks "
+            f"(MACRO {stats['by_level']['MACRO']}, "
+            f"MESO {stats['by_level']['MESO']}, "
+            f"MICRO {stats['by_level']['MICRO']}) → [cyan]{chunks_path}[/]"
+        )
+
+    # ── 2b. Textract path (scanned PDFs) ─────────────────────────────────────
+    else:
+        from aws_rag.storage import upload_pdf
+        from aws_rag.textract import get_job_results, save_blocks, start_analysis, wait_for_job
+
+        _step("Upload PDF to S3")
+        did, s3_key = upload_pdf(pdf_path, doc_id=doc_id)
+        console.print(f"  doc_id = [cyan]{did}[/]")
+        console.print(f"  s3_key = {s3_key}")
+
+        _step("Textract layout analysis (OCR)")
+        job_id = start_analysis(did, s3_key)
+        console.print(f"  job_id = {job_id}  (waiting…)")
+        status = wait_for_job(job_id)
+        if status != "SUCCEEDED":
+            raise click.ClickException(f"Textract job failed with status: {status}")
+
+        blocks = get_job_results(job_id)
+        blocks_path = settings.output_dir / f"{did}_blocks.json"
+        save_blocks(blocks, blocks_path)
+        console.print(f"  {len(blocks)} blocks → [cyan]{blocks_path}[/]")
+
+        figure_manifest_dict = None
+        if not skip_figures:
+            _step("Extract figures")
+            figures_out = settings.output_dir / "figures" / did
+            manifest = extract_figures(
+                pdf_path=pdf_path,
+                blocks=blocks,
+                doc_id=did,
+                output_dir=figures_out,
+                dpi=dpi,
+                image_format="png",
+                padding_pct=0.02,
+            )
+            manifest_path = figures_out / "manifest.json"
+            manifest.save(manifest_path)
+            figure_manifest_dict = manifest.to_dict()
+            console.print(f"  {len(manifest.figures)} figures → [cyan]{manifest_path}[/]")
+
+        _step("Multi-scale chunking")
+        config = SplitterConfig(micro_max_tokens=micro_tokens, meso_max_tokens=meso_tokens)
+        graph = run_chunking_pipeline(
+            blocks,
+            doc_id=did,
+            figure_manifest=figure_manifest_dict,
+            config=config,
+            summarizer_mode="extractive",
+        )
+        chunks_path = settings.output_dir / f"{did}_chunks.json"
+        save_chunk_graph(graph, chunks_path)
+        stats = graph.stats()
+        console.print(
+            f"  {stats['total_chunks']} chunks "
+            f"(MACRO {stats['by_level']['MACRO']}, "
+            f"MESO {stats['by_level']['MESO']}, "
+            f"MICRO {stats['by_level']['MICRO']}) → [cyan]{chunks_path}[/]"
+        )
 
     # ── 5. Describe figures (optional) ───────────────────────────────────────
     if not skip_figures and not skip_describe:
