@@ -49,6 +49,9 @@ def start_analysis(doc_id: str, s3_key: str) -> str:
     settings = get_settings()
     client = textract_client()
 
+    # OutputConfig is intentionally omitted: it requires Textract to have
+    # s3:PutObject on the output prefix, which is hard to configure and not
+    # needed — GetDocumentAnalysis pagination returns all blocks regardless.
     params: dict[str, Any] = {
         "DocumentLocation": {
             "S3Object": {
@@ -57,10 +60,6 @@ def start_analysis(doc_id: str, s3_key: str) -> str:
             }
         },
         "FeatureTypes": settings.textract_features,
-        "OutputConfig": {
-            "S3Bucket": settings.s3_bucket,
-            "S3Prefix": f"{settings.s3_textract_prefix}{doc_id}/",
-        },
     }
 
     console.print(f"[blue]Starting async analysis[/] for {s3_key} …")
@@ -70,10 +69,11 @@ def start_analysis(doc_id: str, s3_key: str) -> str:
     return job_id
 
 
-def wait_for_job(job_id: str, poll_interval: int = 5, timeout: int = 600) -> str:
+def wait_for_job(job_id: str, poll_interval: int = 5, timeout: int = 900) -> str:
     """Poll until the Textract job completes. Returns final status."""
     client = textract_client()
-    elapsed = 0
+    deadline = time.monotonic() + timeout
+    pages: int | None = None
 
     with Progress(
         SpinnerColumn(),
@@ -82,16 +82,31 @@ def wait_for_job(job_id: str, poll_interval: int = 5, timeout: int = 600) -> str
     ) as progress:
         task = progress.add_task(f"Waiting for Textract job {job_id[:8]}…", total=None)
 
-        while elapsed < timeout:
+        while time.monotonic() < deadline:
             resp = client.get_document_analysis(JobId=job_id, MaxResults=1)
             status: str = resp["JobStatus"]
 
+            # Page count is available from the first response even while running.
+            if pages is None:
+                pages = resp.get("DocumentMetadata", {}).get("Pages")
+
             if status in ("SUCCEEDED", "FAILED", "PARTIAL_SUCCESS"):
                 progress.update(task, description=f"Job {job_id[:8]}… {status}")
+                if status == "FAILED":
+                    msg = resp.get("StatusMessage") or "no details"
+                    console.print(f"[red]Textract job failed:[/] {msg}")
                 return status
 
-            time.sleep(poll_interval)
-            elapsed += poll_interval
+            elapsed_s = int(time.monotonic() - (deadline - timeout))
+            pages_info = f", {pages}pp" if pages else ""
+            progress.update(
+                task,
+                description=(
+                    f"Textract {job_id[:8]}… {status}{pages_info} — {elapsed_s}s elapsed"
+                ),
+            )
+            remaining = deadline - time.monotonic()
+            time.sleep(min(poll_interval, max(remaining, 0)))
 
     raise TimeoutError(f"Textract job {job_id} did not complete within {timeout}s")
 
