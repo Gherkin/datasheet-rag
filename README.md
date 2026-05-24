@@ -204,6 +204,42 @@ back scoped to that project unless the agent explicitly overrides
 └─────────────────────────────────────────────────────────┘
 ```
 
+## Roadmap / Ideas
+
+### Relevance-feedback navigation — "more like this" / "less like these" (not implemented)
+
+A future MCP tool that lets the agent refine a result set *by example* instead
+of by rephrasing the query. The agent passes chunk IDs it judges relevant
+(`keep`) and/or irrelevant (`drop`); the tool returns a fresh ranking pulled
+toward the kept chunks and away from the dropped ones.
+
+- **Internally** this is classic Rocchio relevance feedback: build a modified
+  query vector `q' = α·q + β·centroid(keep) − γ·centroid(drop)`, renormalize
+  (Titan v2 vectors are L2-normalized), and re-run KNN. `vector_search()`
+  already accepts a raw `query_embedding`, so no new retrieval plumbing is
+  needed — only the vector-assembly step.
+- **Why a verb, not a knob:** an LLM agent has no way to choose a continuous α,
+  can't introspect the embedding geometry, and re-querying in natural language
+  is its native strength. So we deliberately do NOT expose vector arithmetic.
+  We expose a discrete semantic action ("more like these"), which is a judgment
+  the agent is genuinely good at making, and hide the math.
+- **Framework fit:** this is a third navigation axis. We already have
+  forward/back (`prev`/`next`) and up/down (`zoom_in`/`zoom_out`); "more like
+  this" is a *lateral / associative* jump to related material elsewhere in the
+  corpus by semantic similarity.
+- **Open questions before building:**
+  - Does it beat the baseline of the agent simply rephrasing and re-querying?
+    It should win for associative discovery ("more like these specific
+    results") but not for "make the query more specific" (just re-query).
+  - Tool-count discipline — every MCP tool competes for the agent's attention
+    and can degrade tool selection across the whole set. Only add if associative
+    cross-corpus jumps are a gap the agent actually hits.
+  - Titan v2 is contrastively trained, not linearly compositional, so treat the
+    centroid math as *steering*, not exact concept algebra. Mean-centering the
+    corpus may help if results look off.
+  - In `hybrid_search`, a steered vector only affects the KNN branch; the BM25
+    branch still needs text.
+
 ## AWS Services Used
 
 | Service              | Purpose                                 |
