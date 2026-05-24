@@ -82,7 +82,7 @@ class Settings(BaseSettings):
 
     # SQLite store
     sqlite_db_path: Path = Field(
-        default=Path("output/rag.sqlite"),
+        default=Path("test-project/output/rag.sqlite"),
         description="Path to the SQLite database file holding chunks + vectors.",
     )
 
