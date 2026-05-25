@@ -142,6 +142,12 @@ def save_blocks(blocks: list[dict[str, Any]], dest: Path) -> Path:
     return dest
 
 
+def load_blocks(path: Path) -> list[dict[str, Any]]:
+    """Load Textract blocks from a local JSON file saved by :func:`save_blocks`."""
+    with open(path) as f:
+        return json.load(f)
+
+
 # ---------------------------------------------------------------------------
 # Layout parsing helpers
 # ---------------------------------------------------------------------------

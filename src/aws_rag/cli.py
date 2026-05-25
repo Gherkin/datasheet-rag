@@ -756,6 +756,7 @@ def describe_figures_cmd(
 @click.option("--db", "db_path", type=click.Path(path_type=Path), default=None,
               help="SQLite DB path. Defaults to settings.sqlite_db_path.")
 @click.option("--dry-run", is_flag=True, help="Run all steps but do not write to the store.")
+@click.option("--force", is_flag=True, help="Ignore cached blocks/chunks and redo all steps.")
 def ingest(
     pdf_path: Path,
     doc_id: str | None,
@@ -773,6 +774,7 @@ def ingest(
     meso_tokens: int,
     db_path: Path | None,
     dry_run: bool,
+    force: bool,
 ) -> None:
     """Full ingestion pipeline: upload → Textract → figures → chunk → embed.
 
@@ -782,7 +784,7 @@ def ingest(
     """
     import time
 
-    from aws_rag.chunking.pipeline import run_chunking_pipeline, save_chunk_graph
+    from aws_rag.chunking.pipeline import load_chunk_graph, run_chunking_pipeline, save_chunk_graph
     from aws_rag.chunking.splitter import SplitterConfig
     from aws_rag.embedding import BedrockEmbedder, embed_chunk_graph
     from aws_rag.figures import extract_figures
@@ -790,6 +792,7 @@ def ingest(
     from aws_rag.store import connect, insert_chunk_graph, set_metadata, apply_metadata_to_chunks
     from aws_rag.textract import (
         get_job_results,
+        load_blocks,
         save_blocks,
         start_analysis,
         wait_for_job,
@@ -811,16 +814,20 @@ def ingest(
 
     # ── 2. Textract ──────────────────────────────────────────────────────────
     _step(2, total_steps, "Textract layout analysis")
-    job_id = start_analysis(did, s3_key)
-    console.print(f"  job_id = {job_id}  (waiting…)")
-    status = wait_for_job(job_id)
-    if status != "SUCCEEDED":
-        raise click.ClickException(f"Textract job failed with status: {status}")
-
-    blocks = get_job_results(job_id)
     blocks_path = settings.output_dir / f"{did}_blocks.json"
-    save_blocks(blocks, blocks_path)
-    console.print(f"  {len(blocks)} blocks → [cyan]{blocks_path}[/]")
+    if blocks_path.exists() and not force:
+        console.print(f"  [yellow]Resuming — loading cached blocks[/] → [cyan]{blocks_path}[/]")
+        blocks = load_blocks(blocks_path)
+        console.print(f"  {len(blocks)} blocks (cached)")
+    else:
+        job_id = start_analysis(did, s3_key)
+        console.print(f"  job_id = {job_id}  (waiting…)")
+        status = wait_for_job(job_id)
+        if status != "SUCCEEDED":
+            raise click.ClickException(f"Textract job failed with status: {status}")
+        blocks = get_job_results(job_id)
+        save_blocks(blocks, blocks_path)
+        console.print(f"  {len(blocks)} blocks → [cyan]{blocks_path}[/]")
 
     # ── 3. Figure extraction (optional) ──────────────────────────────────────
     figure_manifest_dict = None
@@ -844,23 +851,34 @@ def ingest(
     # ── 4. Chunk ─────────────────────────────────────────────────────────────
     step_n = 4
     _step(step_n, total_steps, "Multi-scale chunking")
-    config = SplitterConfig(micro_max_tokens=micro_tokens, meso_max_tokens=meso_tokens)
-    graph = run_chunking_pipeline(
-        blocks,
-        doc_id=did,
-        figure_manifest=figure_manifest_dict,
-        config=config,
-        summarizer_mode="extractive",
-    )
     chunks_path = settings.output_dir / f"{did}_chunks.json"
-    save_chunk_graph(graph, chunks_path)
-    stats = graph.stats()
-    console.print(
-        f"  {stats['total_chunks']} chunks "
-        f"(MACRO {stats['by_level']['MACRO']}, "
-        f"MESO {stats['by_level']['MESO']}, "
-        f"MICRO {stats['by_level']['MICRO']}) → [cyan]{chunks_path}[/]"
-    )
+    if chunks_path.exists() and not force:
+        console.print(f"  [yellow]Resuming — loading cached chunk graph[/] → [cyan]{chunks_path}[/]")
+        graph = load_chunk_graph(chunks_path)
+        stats = graph.stats()
+        console.print(
+            f"  {stats['total_chunks']} chunks "
+            f"(MACRO {stats['by_level']['MACRO']}, "
+            f"MESO {stats['by_level']['MESO']}, "
+            f"MICRO {stats['by_level']['MICRO']}) (cached)"
+        )
+    else:
+        config = SplitterConfig(micro_max_tokens=micro_tokens, meso_max_tokens=meso_tokens)
+        graph = run_chunking_pipeline(
+            blocks,
+            doc_id=did,
+            figure_manifest=figure_manifest_dict,
+            config=config,
+            summarizer_mode="extractive",
+        )
+        save_chunk_graph(graph, chunks_path)
+        stats = graph.stats()
+        console.print(
+            f"  {stats['total_chunks']} chunks "
+            f"(MACRO {stats['by_level']['MACRO']}, "
+            f"MESO {stats['by_level']['MESO']}, "
+            f"MICRO {stats['by_level']['MICRO']}) → [cyan]{chunks_path}[/]"
+        )
 
     # ── 5. Describe figures (optional) ───────────────────────────────────────
     if not skip_figures and not skip_describe:

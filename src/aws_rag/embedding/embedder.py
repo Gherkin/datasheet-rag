@@ -26,11 +26,13 @@ Retry strategy
 We rely on botocore's built-in *adaptive* retry mode (configured below
 in :func:`_bedrock_runtime_client`). Adaptive mode handles
 ``ThrottlingException`` with token-bucket-based backoff, which is the
-right thing for the bursty bedrock invoke pattern. We deliberately do
-NOT layer a tenacity retry on top to avoid double-counted backoff. If a
-future use case needs a hard outer safety net (e.g. transient
-``EndpointConnectionError`` during a long batch), add ``tenacity`` here
-explicitly — not as a default.
+right thing for the bursty bedrock invoke pattern.
+
+In addition, we layer a tenacity retry specifically for
+``ModelErrorException`` (Bedrock HTTP 500 "unexpected error during
+processing"), which botocore does not automatically retry. Up to
+``_MAX_INVOKE_ATTEMPTS`` attempts are made with exponential backoff
+(2 → 4 → 8 seconds). Any other exception escapes immediately.
 
 Cost
 ----
@@ -50,6 +52,7 @@ from typing import TYPE_CHECKING, Any
 import boto3
 from botocore.config import Config
 from rich.console import Console
+from tenacity import Retrying, retry_if_exception, stop_after_attempt, wait_exponential
 
 from aws_rag.config import get_settings
 from aws_rag.models.chunk import Chunk, ChunkGraph
@@ -71,6 +74,18 @@ _TITAN_MODEL_PREFIX = "amazon.titan-embed"
 
 # Cost reference, see module docstring.
 TITAN_V2_USD_PER_1M_INPUT_TOKENS = 0.02
+
+# Retry parameters for ModelErrorException (transient Bedrock internal error).
+_MAX_INVOKE_ATTEMPTS = 4
+_INVOKE_WAIT = wait_exponential(multiplier=1, min=2, max=8)
+
+
+def _is_transient_model_error(exc: BaseException) -> bool:
+    """True for Bedrock ModelErrorException — a transient internal error."""
+    resp = getattr(exc, "response", None)
+    if not isinstance(resp, dict):
+        return False
+    return resp.get("Error", {}).get("Code") == "ModelErrorException"
 
 
 # ---------------------------------------------------------------------------
@@ -287,18 +302,26 @@ class BedrockEmbedder:
         """Single Bedrock ``invoke_model`` call. Updates metrics in place.
 
         Botocore handles ``ThrottlingException`` / ``ServiceUnavailable``
-        via the adaptive retry config set on the client. Anything that
-        escapes that is treated as a hard error: we bump
-        ``total_errors`` and re-raise.
+        via the adaptive retry config set on the client. ``ModelErrorException``
+        (transient Bedrock internal error) is retried up to
+        ``_MAX_INVOKE_ATTEMPTS`` times with exponential backoff via tenacity.
+        Anything else is treated as a hard error.
         """
         body = self._build_request_body(text)
         try:
-            response = self.client.invoke_model(
-                modelId=self.model_id,
-                body=json.dumps(body),
-                contentType="application/json",
-                accept="application/json",
-            )
+            for attempt in Retrying(
+                retry=retry_if_exception(_is_transient_model_error),
+                stop=stop_after_attempt(_MAX_INVOKE_ATTEMPTS),
+                wait=_INVOKE_WAIT,
+                reraise=True,
+            ):
+                with attempt:
+                    response = self.client.invoke_model(
+                        modelId=self.model_id,
+                        body=json.dumps(body),
+                        contentType="application/json",
+                        accept="application/json",
+                    )
         except Exception:
             self.total_errors += 1
             raise
