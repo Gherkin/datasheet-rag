@@ -595,6 +595,40 @@ def _navigate_impl(
     return [_shape_chunk(target)] if target else []
 
 
+def _derived_doc_fields(conn: sqlite3.Connection, doc_id: str) -> dict[str, Any]:
+    """Query chunks to derive fields not stored in the metadata sidecar."""
+    row = conn.execute(
+        "SELECT doc_title FROM chunks WHERE doc_id = ? AND doc_title != '' LIMIT 1",
+        (doc_id,),
+    ).fetchone()
+    title = row["doc_title"] if row else None
+
+    page_row = conn.execute(
+        """
+        SELECT page_numbers FROM chunks
+         WHERE doc_id = ? AND page_numbers IS NOT NULL AND page_numbers != '[]'
+         ORDER BY rowid DESC
+         LIMIT 1
+        """,
+        (doc_id,),
+    ).fetchone()
+    page_count: int | None = None
+    if page_row:
+        try:
+            pages = json.loads(page_row["page_numbers"])
+            if pages:
+                page_count = max(pages)
+        except (ValueError, TypeError):
+            pass
+
+    out: dict[str, Any] = {}
+    if title:
+        out["doc_title"] = title
+    if page_count is not None:
+        out["page_count"] = page_count
+    return out
+
+
 def _list_documents_impl(
     *,
     project_id: str | None = None,
@@ -625,6 +659,7 @@ def _list_documents_impl(
             "subsystem": d.subsystem,
             "doc_type": d.doc_type,
             "tags": d.tags,
+            **_derived_doc_fields(conn, d.doc_id),
         }
         for d in docs
     ]
@@ -639,7 +674,38 @@ def _get_document_metadata_impl(
     meta = get_metadata(conn, doc_id)
     if meta is None:
         return None
-    return meta.model_dump(exclude_none=False)
+    result = meta.model_dump(exclude_none=False)
+    result.update(_derived_doc_fields(conn, doc_id))
+    return result
+
+
+_MCP_IMAGE_BYTE_LIMIT = 700_000  # base64 of this fits safely under the 1 MB MCP limit
+
+
+def _compress_for_mcp(image_bytes: bytes, fmt: str) -> tuple[bytes, str]:
+    """Re-encode image as JPEG if it would exceed the 1 MB MCP tool-result limit.
+
+    Base64 encoding inflates bytes by ~33%, so the safe ceiling for raw bytes
+    is ~750 KB.  We use 700 KB to leave room for JSON envelope overhead.
+    Returns (bytes, format) unchanged when already small enough.
+    """
+    if len(image_bytes) <= _MCP_IMAGE_BYTE_LIMIT:
+        return image_bytes, fmt
+
+    import io
+    from PIL import Image
+
+    img = Image.open(io.BytesIO(image_bytes))
+    if img.mode in ("RGBA", "LA", "P"):
+        bg = Image.new("RGB", img.size, (255, 255, 255))
+        bg.paste(img, mask=img.split()[-1] if img.mode in ("RGBA", "LA") else None)
+        img = bg
+    elif img.mode != "RGB":
+        img = img.convert("RGB")
+
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=85, optimize=True)
+    return buf.getvalue(), "jpg"
 
 
 def _figure_image_bytes(chunk: Any) -> tuple[bytes, str, Path | None]:
@@ -950,8 +1016,9 @@ def build_server() -> Any:
         """
         import base64
         result = _get_figure_impl(chunk_id)
-        mime = _FIGURE_MIME.get(result["format"], "image/png")
-        image_b64 = base64.b64encode(result["image_bytes"]).decode()
+        image_bytes, fmt = _compress_for_mcp(result["image_bytes"], result["format"])
+        mime = _FIGURE_MIME.get(fmt, "image/png")
+        image_b64 = base64.b64encode(image_bytes).decode()
         caption = result["caption"]
         description = result["description"]
         citation = result["citation"]
@@ -1005,8 +1072,9 @@ def build_server() -> Any:
         """
         import base64
         result = _get_figure_impl(chunk_id)
-        mime = _FIGURE_MIME.get(result["format"], "image/png")
-        image_b64 = base64.b64encode(result["image_bytes"]).decode()
+        image_bytes, fmt = _compress_for_mcp(result["image_bytes"], result["format"])
+        mime = _FIGURE_MIME.get(fmt, "image/png")
+        image_b64 = base64.b64encode(image_bytes).decode()
         caption = result["caption"]
         citation = result["citation"]
         return [
