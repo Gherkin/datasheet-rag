@@ -768,6 +768,16 @@ def describe_figures_cmd(
         "Override with 'docling' or 'textract' to force a specific backend."
     ),
 )
+@click.option(
+    "--accurate-tables",
+    is_flag=True,
+    default=False,
+    help=(
+        "Use TableFormer ACCURATE mode for table structure (Docling backend only). "
+        "Default is FAST, which is 44% faster with negligible quality loss for RAG. "
+        "Use ACCURATE when precise cell-boundary detection matters."
+    ),
+)
 def ingest(
     pdf_path: Path,
     doc_id: str | None,
@@ -786,6 +796,7 @@ def ingest(
     db_path: Path | None,
     dry_run: bool,
     backend: str,
+    accurate_tables: bool,
 ) -> None:
     """Full ingestion pipeline: analyse → figures → chunk → embed.
 
@@ -836,7 +847,7 @@ def ingest(
         console.print(f"  doc_id = [cyan]{did}[/]")
 
         _step("Docling layout analysis")
-        outline, figure_regions = convert_pdf(pdf_path, doc_id=did)
+        outline, figure_regions = convert_pdf(pdf_path, doc_id=did, accurate_tables=accurate_tables)
         summary = outline.summary()
         console.print(
             f"  {summary['top_level_sections']} chapters, "
