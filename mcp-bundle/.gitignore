@@ -1,0 +1,8 @@
+# Source snapshot copied at pack time — not committed
+server/src/
+
+# Generated lock file (commit if you want reproducible builds)
+# server/uv.lock
+
+# Built bundle
+*.mcpb

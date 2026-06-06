@@ -1,0 +1,132 @@
+{
+  "manifest_version": "0.3",
+  "name": "aws-rag-mcp",
+  "display_name": "AWS RAG – Electronics Datasheet Search",
+  "version": "1.0.0",
+  "description": "Search and navigate a multi-scale RAG database of electronics datasheets and reference manuals.",
+  "long_description": "Exposes a local SQLite-backed RAG store as MCP tools. Supports hybrid (BM25 + dense vector) search, hierarchical chunk navigation, figure retrieval, and document metadata lookup. Embeddings are computed via AWS Bedrock (Titan v2). Designed for scoped, per-project usage from Claude Code.",
+  "author": {
+    "name": "niyohn",
+    "email": "hector@stekligan.se"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/niyohn/aws-rag"
+  },
+  "license": "MIT",
+  "icon": "icon.png",
+  "server": {
+    "type": "python",
+    "entry_point": "server/main.py",
+    "mcp_config": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--project",
+        "${__dirname}/server",
+        "python",
+        "${__dirname}/server/main.py"
+      ],
+      "env": {
+        "RAG_SQLITE_DB_PATH": "${user_config.db_path}",
+        "RAG_S3_BUCKET": "${user_config.s3_bucket}",
+        "AWS_REGION": "${user_config.aws_region}",
+        "RAG_DEFAULT_PROJECT_ID": "${user_config.default_project_id}",
+        "RAG_FIGURES_DIR": "${user_config.figures_dir}"
+      }
+    }
+  },
+  "tools": [
+    {
+      "name": "search",
+      "description": "Hybrid (BM25 + dense vector), keyword-only, or vector-only search over RAG chunks"
+    },
+    {
+      "name": "get_chunk",
+      "description": "Fetch a single chunk by ID, optionally including its neighbours"
+    },
+    {
+      "name": "navigate",
+      "description": "Step through the chunk graph: parent, children, prev, next, or chapter_root"
+    },
+    {
+      "name": "zoom_in",
+      "description": "Get finer-grained child chunks (macro → meso, meso → micro)"
+    },
+    {
+      "name": "zoom_out",
+      "description": "Get the parent chunk for broader context (micro → meso, meso → macro)"
+    },
+    {
+      "name": "list_documents",
+      "description": "List documents in the current project, optionally filtered by group/MPN/manufacturer"
+    },
+    {
+      "name": "get_document_metadata",
+      "description": "Fetch the metadata sidecar for a document (MPN, manufacturer, tags, subsystem)"
+    },
+    {
+      "name": "stats",
+      "description": "Return chunk counts (total and by level) for the current scope"
+    },
+    {
+      "name": "get_figure",
+      "description": "Fetch the image for a figure chunk and return it for the user to see"
+    },
+    {
+      "name": "show_pdf",
+      "description": "Open the source PDF for a document in an interactive scrollable viewer (Claude Desktop)"
+    }
+  ],
+  "keywords": [
+    "rag",
+    "electronics",
+    "datasheet",
+    "search",
+    "aws",
+    "bedrock",
+    "mcp",
+    "vector-search"
+  ],
+  "compatibility": {
+    "claude_desktop": ">=0.10.0",
+    "platforms": ["darwin", "linux"],
+    "runtimes": {
+      "python": ">=3.11"
+    }
+  },
+  "user_config": {
+    "db_path": {
+      "type": "file",
+      "title": "SQLite Database Path",
+      "description": "Path to the RAG SQLite database file (output/rag.sqlite in your project directory).",
+      "required": true
+    },
+    "s3_bucket": {
+      "type": "string",
+      "title": "S3 Bucket",
+      "description": "S3 bucket name used for PDF storage and Textract output (RAG_S3_BUCKET).",
+      "required": true
+    },
+    "aws_region": {
+      "type": "string",
+      "title": "AWS Region",
+      "description": "AWS region for Bedrock and S3 (e.g. eu-west-1).",
+      "default": "eu-west-1",
+      "required": false
+    },
+    "default_project_id": {
+      "type": "string",
+      "title": "Default Project ID",
+      "description": "Scope all tool calls to this project by default. Leave blank to search globally.",
+      "required": false,
+      "default": ""
+    },
+    "figures_dir": {
+      "type": "directory",
+      "title": "Figures Directory",
+      "description": "Directory holding cropped figure PNGs. Used to serve images over a loopback HTTP server so Claude Desktop can render them inline (file:// is blocked by the renderer). Leave blank to use <db_path parent>/figures.",
+      "required": false
+    }
+  }
+}

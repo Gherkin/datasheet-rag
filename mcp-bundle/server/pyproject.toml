@@ -1,0 +1,26 @@
+[project]
+name = "aws-rag-mcp"
+version = "1.0.0"
+description = "MCP Bundle server for the aws-rag electronics datasheet RAG pipeline"
+requires-python = ">=3.11"
+dependencies = [
+    "boto3>=1.35.0",
+    "botocore[crt]>=1.35.0",
+    "click>=8.1.0",
+    "mcp>=1.2.0",
+    "numpy>=1.26.0",
+    "pdf2image>=1.16.0",
+    "Pillow>=10.0.0",
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    "rich>=13.0.0",
+    "sqlite-vec>=0.1.6",
+    "tenacity>=8.2.0",
+]
+
+[build-system]
+requires = ["setuptools>=68.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

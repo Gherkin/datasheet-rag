@@ -14,3 +14,10 @@ output/
 .git_commit_msg.txt
 example-pdfs/
 test-project/
+
+# MCP bundle build output
+*.mcpb
+
+# Eval run outputs (commit golden.jsonl only)
+eval/*.json
+eval/trace.jsonl
