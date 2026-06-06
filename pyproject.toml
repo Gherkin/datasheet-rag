@@ -28,6 +28,10 @@ dev = [
 tokens = [
     "tiktoken>=0.7.0",
 ]
+docling = [
+    "docling>=2.0.0",
+    "pymupdf>=1.24.0",
+]
 
 [project.scripts]
 rag = "aws_rag.cli:cli"

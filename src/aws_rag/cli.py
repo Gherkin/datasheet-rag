@@ -944,8 +944,7 @@ def ingest(
 
     # ── 5. Describe figures (optional) ───────────────────────────────────────
     if not skip_figures and not skip_describe:
-        step_n += 1
-        _step(step_n, total_steps, "AI figure descriptions")
+        _step("AI figure descriptions")
         # Need chunks in the store first so describe-figures can find them.
         # We do a provisional write, then describe, then the embed step below
         # will merge the descriptions into context_text.
@@ -993,8 +992,7 @@ def ingest(
             console.print("  [yellow]Dry run — skipping description and provisional embed.[/]")
 
     # ── 6. Embed + store ─────────────────────────────────────────────────────
-    step_n += 1
-    _step(step_n, total_steps, "Embed & store")
+    _step("Embed & store")
     console.print("  Embedding with Bedrock Titan v2…")
     embedder = BedrockEmbedder(verbose=True)
     vectors = embed_chunk_graph(graph, embedder=embedder)
