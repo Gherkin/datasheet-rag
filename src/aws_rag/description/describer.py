@@ -14,9 +14,9 @@ Cost notes (approximate, as of writing — verify in your console):
 * Claude 3.5 Sonnet v2 (vision) — ``$3 / 1M`` in, ``$15 / 1M`` out
   (~10× the cost; better on dense diagrams).
 
-The describer relies on boto's adaptive retry mode (set via the
-``botocore`` ``Config``) — no separate tenacity wrapper, matching the
-:class:`aws_rag.embedding.BedrockEmbedder` style.
+The describer uses botocore adaptive retry mode for throttling and a
+tenacity wrapper for ``ModelErrorException`` (transient Bedrock internal
+errors), matching the :class:`aws_rag.embedding.BedrockEmbedder` style.
 """
 
 from __future__ import annotations
@@ -30,14 +30,26 @@ from pathlib import Path
 from typing import Any
 
 import boto3
-from botocore.config import Config
+from botocore.config import Config as _BotocoreConfig
 from rich.console import Console
+from tenacity import Retrying, retry_if_exception, stop_after_attempt, wait_exponential
 
 from aws_rag.aws import s3_client
 from aws_rag.config import get_settings
 from aws_rag.models.chunk import Chunk, LayoutType
 
 console = Console()
+
+_MAX_INVOKE_ATTEMPTS = 4
+_INVOKE_WAIT = wait_exponential(multiplier=1, min=2, max=8)
+
+
+def _is_transient_model_error(exc: BaseException) -> bool:
+    resp = getattr(exc, "response", None)
+    if not isinstance(resp, dict):
+        return False
+    return resp.get("Error", {}).get("Code") == "ModelErrorException"
+
 
 # ---------------------------------------------------------------------------
 # Prompt
@@ -146,6 +158,9 @@ def _surrounding_text_from_store(
     char_limit: int = _NEIGHBOR_CHAR_LIMIT,
 ) -> str:
     """Concat the text of the chunk's prev and next siblings (trimmed)."""
+    # TODO: skip siblings that are just the figure's own caption — Textract
+    # emits the caption as its own chunk, so it reappears here as redundant
+    # surrounding text (e.g. next sibling == chunk.figure_caption).
     fragments: list[str] = []
     for nid in (chunk.prev_id, chunk.next_id):
         if not nid:
@@ -199,7 +214,14 @@ class FigureDescriber:
     def _get_client(self) -> Any:
         if self.client is None:
             from aws_rag.aws import _session
-            self.client = _session().client("bedrock-runtime", region_name=self.region)
+            config = _BotocoreConfig(
+                connect_timeout=60,
+                read_timeout=60,
+                retries={"max_attempts": 5, "mode": "adaptive"},
+            )
+            self.client = _session().client(
+                "bedrock-runtime", region_name=self.region, config=config
+            )
         return self.client
 
     # ---- public ---------------------------------------------------------
@@ -246,6 +268,8 @@ class FigureDescriber:
             )
         image_bytes, image_format = _load_figure_bytes(chunk)
         surrounding = _surrounding_text_from_store(conn, chunk)
+        # TODO: dedupe consecutive identical levels — when chapter_title ==
+        # section_title this emits "X > X" in the prompt. Collapse repeats.
         section_context = " > ".join(
             p for p in (chunk.metadata.chapter_title, chunk.metadata.section_title) if p
         )
@@ -306,12 +330,19 @@ class FigureDescriber:
     def _invoke(self, body: dict[str, Any]) -> str:
         self._get_client()
         try:
-            response = self.client.invoke_model(
-                modelId=self.model_id,
-                body=json.dumps(body),
-                contentType="application/json",
-                accept="application/json",
-            )
+            for attempt in Retrying(
+                retry=retry_if_exception(_is_transient_model_error),
+                stop=stop_after_attempt(_MAX_INVOKE_ATTEMPTS),
+                wait=_INVOKE_WAIT,
+                reraise=True,
+            ):
+                with attempt:
+                    response = self.client.invoke_model(
+                        modelId=self.model_id,
+                        body=json.dumps(body),
+                        contentType="application/json",
+                        accept="application/json",
+                    )
         except Exception:
             self._total_errors += 1
             raise

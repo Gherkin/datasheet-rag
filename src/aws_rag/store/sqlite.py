@@ -347,6 +347,14 @@ def update_figure_description(
     return cur.rowcount > 0
 
 
+def get_doc_titles(conn: sqlite3.Connection) -> dict[str, str]:
+    """Return a mapping of doc_id → doc_title from the chunks table."""
+    rows = conn.execute(
+        "SELECT doc_id, doc_title FROM chunks WHERE doc_title IS NOT NULL GROUP BY doc_id"
+    ).fetchall()
+    return {row["doc_id"]: row["doc_title"] for row in rows}
+
+
 def count_chunks(
     conn: sqlite3.Connection,
     *,

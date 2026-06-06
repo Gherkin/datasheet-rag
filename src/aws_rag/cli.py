@@ -132,21 +132,31 @@ def analyze(target: str, mode: str, wait: bool, output: Path | None) -> None:
 
 
 @cli.command("list")
-def list_docs() -> None:
+@click.option("--db", "db_path", type=click.Path(path_type=Path), default=None)
+def list_docs(db_path: Path | None) -> None:
     """List uploaded documents."""
     from aws_rag.storage import list_documents
+    from aws_rag.store import connect, get_doc_titles
 
     docs = list_documents()
     if not docs:
         console.print("[yellow]No documents found.[/]")
         return
 
+    settings = get_settings()
+    target = db_path or settings.sqlite_db_path
+    conn = connect(target)
+    titles = get_doc_titles(conn)
+    conn.close()
+
     table = Table(title="Uploaded Documents")
     table.add_column("doc_id", style="cyan")
+    table.add_column("title")
     table.add_column("S3 Prefix")
 
     for doc in docs:
-        table.add_row(doc["doc_id"], doc["prefix"])
+        doc_id = doc["doc_id"]
+        table.add_row(doc_id, titles.get(doc_id, "—"), doc["prefix"])
 
     console.print(table)
 

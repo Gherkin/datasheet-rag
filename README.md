@@ -206,6 +206,18 @@ back scoped to that project unless the agent explicitly overrides
 
 ## Roadmap / Ideas
 
+### `rag list` should show ingested documents, not S3 uploads (not implemented)
+
+`rag list` currently queries S3 and shows every uploaded PDF, regardless of
+whether it has been chunked or embedded. This is misleading — a document that
+only exists in S3 is not searchable and is not meaningfully "in the RAG
+database".
+
+- **TODO:** rewrite `rag list` to read from the SQLite `chunks` table (distinct
+  `doc_id` values) rather than S3. A document should only appear once it has
+  been ingested. The S3 check could be kept as a separate `rag list --s3` flag
+  for debugging upload state.
+
 ### Relevance-feedback navigation — "more like this" / "less like these" (not implemented)
 
 A future MCP tool that lets the agent refine a result set *by example* instead
@@ -239,6 +251,47 @@ toward the kept chunks and away from the dropped ones.
     corpus may help if results look off.
   - In `hybrid_search`, a steered vector only affects the KNN branch; the BM25
     branch still needs text.
+
+### AI-inferred document titles for untitled documents (not implemented)
+
+Some documents come through ingestion without a `doc_title` (e.g. PDFs whose
+Textract output lacks a detectable title block). These show as `—` in
+`rag list`.
+
+- **TODO:** when a chunk's `doc_title` is empty after chunking, run a small
+  LLM call (e.g. Bedrock Claude Haiku) against the first page's text to infer
+  a human-readable title, and backfill it on all chunks for that `doc_id`.
+- The call should happen at embed time (or as a standalone `rag fix-titles`
+  command) so it doesn't slow down the Textract/chunking steps.
+- The inferred title should be marked distinctly (e.g. stored with a
+  `title_inferred: true` attribute in the `doc_metadata` sidecar) so it can
+  be reviewed or overridden later with `rag metadata set`.
+
+### Switch MACRO summaries from extractive to abstractive (pending eval)
+
+The chunking pipeline defaults to the **extractive** summarizer for MACRO
+(chapter) chunks, and the main ingest path hardcodes it — the **abstractive**
+(Bedrock Claude) summarizer is currently opt-in only via
+`aws-rag chunk --summarizer abstractive`.
+
+Extractive is fast and free but crude: it concatenates the *leading* sentences
+of the most heavily content-weighted blocks and hard-truncates to a char
+budget. There's no notion of which sentence is most informative (position +
+layout-type weight only), so a section's key fact can be lost to truncation,
+and the output reads as fragments rather than a real description. Abstractive
+produces purpose-written descriptions tuned for semantic search.
+
+- **TODO:** make abstractive the default for MACRO summaries — but only after
+  an eval comparing the two on retrieval quality (does the abstractive macro
+  actually surface chapters better?) against its cost (Bedrock calls per
+  chapter, latency at ingest).
+- **Open questions before switching:**
+  - Does abstractive measurably improve MACRO-level retrieval / `zoom_out`
+    relevance, or is the extractive macro "good enough" as a search target?
+  - Cost/latency budget at ingest time — how many extra Claude calls per
+    document, and is that acceptable for the corpus size?
+  - If we switch the default, wire the choice through the main ingest path
+    (currently hardcoded), not just the standalone `chunk` command.
 
 ## AWS Services Used
 
