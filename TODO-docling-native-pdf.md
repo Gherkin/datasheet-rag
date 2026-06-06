@@ -52,6 +52,18 @@ two-column).
   appears with identical pixel content on ≥ 3 pages AND sits in the header/footer
   zone. Validated: 21 copies dropped, 58 real figures and 27 formulas kept.
 
+- **Adjacent-column figure crop bleed** — `crop_figure()` added 2 % padding on
+  all edges; the column gutter on two-column datasheets is only ~1 %, so the
+  padding bridged the gap and captured a sliver of the adjacent figure. Added
+  `_compute_adjacent_crop_caps()` and extended `crop_figure()` with per-edge cap
+  params. Only padding is constrained — bbox content is never removed. Validated
+  on MP6004: 25 edges capped, zero content loss.
+
+- **Table of Contents section creates ~110 useless MICRO chunks** — ToC entries
+  were parsed as TEXT elements producing a MESO with 110 MICRO children. Added
+  `_filter_toc_sections()` (title-match + trailing-number heuristic), applied
+  after `_build_outline`. Validated on TMC2208: 110-element ToC section dropped.
+
 ---
 
 ## Open issues
@@ -74,47 +86,53 @@ as `PICTURE` rather than `PAGE_HEADER`. Our `_SKIP` filter only drops
 **Validated on MP6004.pdf:** 21/23 logo copies dropped (21 out of 106 total
 regions); 58 real figures and 27 formulas remain. Chunk count: 250 (was 271).
 
-### 2. Adjacent-column bleed on two-column performance-characteristic charts (cosmetic)
+### 2. Adjacent-column bleed on two-column performance-characteristic charts — FIXED
 
-**Symptom:** In two-column datasheets (tested: MP6004), bounding boxes for
-left-column charts extend slightly past the column gutter, capturing a sliver
-of the right-column chart's Y-axis label. Visually the crop is still clearly
-the left-column chart, but the right edge is slightly contaminated.
+**Symptom:** In two-column datasheets (tested: MP6004), figure crop_figure()
+was adding 2 % padding on all edges. The column gutter between adjacent figures
+is typically only ~1 %, so the padding bridged the gap and captured a sliver of
+the neighbouring column.
 
-**Root cause:** Docling's layout detector does not model the column gutter
-explicitly; its bounding box for a left-column element may extend a few percent
-past the true column boundary.
+**Root cause:** The bboxes themselves did NOT overlap — the gap between adjacent-
+column figures is real but smaller than padding_pct. The bleed was padding-only.
 
-**Proposed fix:** After docling analysis, detect two-column pages (check whether
-any two figure bboxes on the same page are side-by-side with overlapping
-vertical ranges) and clip figure bboxes to the detected column midpoint before
-cropping. No fix needed in `_build_figure_regions` itself — this would be a
-post-processing step in `figures.extract_figures_from_regions`.
+**Fix:** `_compute_adjacent_crop_caps()` in `figures.py` detects adjacent-column
+pairs (same page, ≥ 30 % vertical co-occurrence, gap < padding_pct). For each
+pair it returns per-region crop-edge caps:
+- Left figure: `max_right = b.left` (no padding past neighbour's left bbox edge)
+- Right figure: `min_left = a.right` (no padding past neighbour's right bbox edge)
 
-### 3. Table of Contents page creates an oversized MESO with ~110 MICRO children (low)
+`crop_figure()` was extended with `max_right / min_left / max_bottom / min_top`
+params; caps are passed in by `extract_figures_from_regions`. Bboxes are never
+modified — only padding is constrained. Actual bbox overlap (gap < 0) is left
+alone with a log message.
 
-**Symptom:** The TMC2208 ToC page (page 4) is parsed as a single `SECTION_HEADER`
-block containing all ToC entries as individual TEXT elements. The splitter
-creates one MESO chunk for the entire ToC page, which ends up with 110 MICRO
-children (one per ToC entry: "Section title … page number"). These are not
-useful for retrieval — queries about document content should not land on ToC
-entries.
+**Validated on MP6004.pdf:** 25 region edges capped across pages 6/8/9/10.
+Example p8: fig_24 right=0.3596, fig_27 left=0.3706, gap=0.011; right crop now
+capped at 0.3706 (was 0.3796). Gap between crops = 0.011 (original gap preserved,
+no content removed).
 
-**Proposed fix:** Detect ToC sections (heuristic: section title is "Table of
-Contents" / "Contents" / "Index", or >50 % of text elements on the page match
-a "text … number" pattern) and skip them entirely in `_build_outline`, or
-assign them to a dedicated `LayoutType.TOC` so the search layer can filter
-them out.
+### 3. Table of Contents page creates an oversized MESO with ~110 MICRO children — FIXED
 
-### 4. Formulas stored as image-only with no text fallback (low)
+**Symptom:** The TMC2208 ToC page was parsed as a section with 110 TEXT children
+(one per "title … page_number" entry). The splitter produced a MESO with 110
+MICRO children that are useless for retrieval.
 
-**Symptom:** When docling cannot extract LaTeX/MathML source for a formula
-(common in older PDFs), the `ContentElement.text` is `"[Formula]"`. The crop
-image is correct and will be handled by describe-figures, but until that step
-runs the chunk text is uninformative. Vector search cannot find it by content
-before description.
+**Fix:** `_is_toc_section()` + `_filter_toc_sections()` in `docling_parser.py`,
+applied after `_flush` in `_build_outline`. Detects by title match
+(`_TOC_TITLES`: "table of contents", "contents", "index", "toc") or by content
+heuristic (≥ 10 TEXT elements, ≥ 60 % match `r"^.+[.\s]{2,}\d+\s*$"`).
 
-**Proposed fix:** Run a lightweight OCR pass on formula crops using PyMuPDF's
-own text extraction (it can often recover inline formula text that docling
-misses) and populate `text` with the result. Only applies when docling returns
-no formula text. Could be gated behind a `--formula-ocr` flag.
+**Validated on TMC2208:** "Table of Contents" section with 110 elements dropped.
+581 chunks remain (MESO 117, MICRO 463).
+
+### 4. Formula image description / text extraction (future)
+
+**Symptom:** When docling cannot extract LaTeX/MathML from a formula, the chunk
+`text` is `"[Formula]"` and vector search cannot find it before describe-figures
+runs.
+
+**Planned approach:** A vision model (describe-figures) that also attempts to
+output the formula as structured plaintext (LaTeX or readable notation), not just
+a prose description. This is a larger task involving the description prompt and
+possibly a post-processing normaliser. Not tackled yet.

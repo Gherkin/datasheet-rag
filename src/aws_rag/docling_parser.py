@@ -27,6 +27,12 @@ console = Console()
 
 _NATIVE_CHAR_THRESHOLD = 100  # total chars across sample pages to confirm native PDF
 _MULTI_SPACE_RE = re.compile(r" {2,}")
+_TOC_TITLES = frozenset({"table of contents", "contents", "index", "toc"})
+# "Section heading ........ 12" or "Section heading        12"
+_TOC_ENTRY_RE = re.compile(r"^.+[.\s]{2,}\d+\s*$")
+_TOC_TITLES = frozenset({"table of contents", "contents", "index", "toc"})
+# "Section heading ........ 12" or "Section heading        12"
+_TOC_ENTRY_RE = re.compile(r"^.+[.\s]{2,}\d+\s*$")
 
 
 def is_native_pdf(pdf_path: Path, sample_pages: int = 5) -> bool:
@@ -350,6 +356,7 @@ def _build_outline(
             current_section.page_end = page_no
 
     _flush(section_stack, sections)
+    sections = _filter_toc_sections(sections)
 
     return DocumentOutline(
         title=doc_title,
@@ -503,6 +510,31 @@ def _build_figure_regions(doc: Any) -> list[FigureRegion]:
         pending_region = region
 
     return regions
+
+
+def _is_toc_section(section: DocumentSection) -> bool:
+    if section.title.lower().strip() in _TOC_TITLES:
+        return True
+    text_els = [e for e in section.elements if e.element_type == ElementType.TEXT]
+    if len(text_els) < 10:
+        return False
+    matches = sum(1 for e in text_els if _TOC_ENTRY_RE.match(e.text))
+    return matches / len(text_els) >= 0.60
+
+
+def _filter_toc_sections(sections: list[DocumentSection]) -> list[DocumentSection]:
+    """Remove ToC sections at any nesting level. Applied after the outline is built."""
+    kept: list[DocumentSection] = []
+    for s in sections:
+        if _is_toc_section(s):
+            console.print(
+                f"[yellow]ToC filter:[/] dropped '{s.title}' "
+                f"({len(s.elements)} elements)"
+            )
+            continue
+        s.children = _filter_toc_sections(s.children)
+        kept.append(s)
+    return kept
 
 
 def _flush(stack: list[DocumentSection], sections: list[DocumentSection]) -> None:
