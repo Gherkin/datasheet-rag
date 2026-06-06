@@ -45,28 +45,34 @@ two-column).
   `re.sub(r" {2,}", " ", ...)` applied to all text fields in `_build_outline`.
   Result: 0 affected chunks.
 
+- **Page-header logo extracted as a figure on every page** — Docling classifies
+  the MPS logo (repeated on every page of MP6004.pdf) as `PICTURE` rather than
+  `PAGE_HEADER`, producing 21 spurious logo chunks. Added `_dedup_repeating_figures`
+  (size bucket → pixel hash → frequency+position gate): drops any PICTURE that
+  appears with identical pixel content on ≥ 3 pages AND sits in the header/footer
+  zone. Validated: 21 copies dropped, 58 real figures and 27 formulas kept.
+
 ---
 
 ## Open issues
 
-### 1. Page-header logo extracted as a figure on every page (medium)
+### 1. Page-header logo extracted as a figure on every page — FIXED
 
 **Symptom:** On multi-page datasheets with a repeated logo in the page header
 (e.g. the MPS logo on every page of MP6004.pdf), docling classifies the logo
 as `PICTURE` rather than `PAGE_HEADER`. Our `_SKIP` filter only drops
 `PAGE_HEADER`-labelled items, so the logo passes through as a figure.
-22 logo crops are generated for a 23-page document. Each becomes a `[Figure]`
-MICRO chunk that embeds as noise and will generate a useless "this is the
-company logo" description in describe-figures.
 
-**Proposed fix (option A — preferred):** In `_build_figure_regions` (and
-correspondingly in `_build_outline`), skip `PICTURE` items whose normalised
-bounding-box top is above a page-header threshold (e.g. `top < 0.08`). This
-reliably catches header-zone logos without affecting real content figures.
+**Fix:** Three-stage dedup in `_dedup_repeating_figures` (called from
+`convert_pdf` between `_build_figure_regions` and `_build_outline`):
+1. Size bucket — group regions by normalised (width, height) rounded to 2 dp.
+2. Pixel hash — crop each region via PyMuPDF at 72 dpi, take MD5 of samples.
+3. Frequency + position — if ≥ 3 hash-identical copies span different pages
+   AND each sits in the header (top < 0.10) or footer (top+height > 0.90),
+   all copies are dropped from both `figure_regions` and the outline.
 
-**Proposed fix (option B):** After extraction, detect near-duplicate crops
-across pages (e.g. perceptual hash or pixel diff) and drop all but the first
-occurrence. More robust but more complex.
+**Validated on MP6004.pdf:** 21/23 logo copies dropped (21 out of 106 total
+regions); 58 real figures and 27 formulas remain. Chunk count: 250 (was 271).
 
 ### 2. Adjacent-column bleed on two-column performance-characteristic charts (cosmetic)
 

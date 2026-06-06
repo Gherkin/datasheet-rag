@@ -90,8 +90,9 @@ def convert_pdf(
     doc = result.document
     console.print(f"[green]Docling done[/] — {len(doc.pages)} pages")
 
-    outline = _build_outline(doc, doc_id=doc_id)
     regions = _build_figure_regions(doc)
+    skip_figure_ids, regions = _dedup_repeating_figures(regions, pdf_path, len(doc.pages))
+    outline = _build_outline(doc, doc_id=doc_id, skip_figure_ids=skip_figure_ids)
     return outline, regions
 
 
@@ -179,7 +180,11 @@ def _ensure_section(
     return s
 
 
-def _build_outline(doc: Any, doc_id: str) -> DocumentOutline:
+def _build_outline(
+    doc: Any,
+    doc_id: str,
+    skip_figure_ids: set[str] | None = None,
+) -> DocumentOutline:
     """Walk the DoclingDocument in reading order and build a DocumentOutline."""
     try:
         from docling_core.types.doc import DocItemLabel
@@ -293,16 +298,21 @@ def _build_outline(doc: Any, doc_id: str) -> DocumentOutline:
         elif label == DocItemLabel.PICTURE:
             figure_counter += 1
             fig_block_id = f"docling_figure_{figure_counter}"
-            element = ContentElement(
-                element_type=ElementType.FIGURE,
-                text="[Figure]",
-                block_id=block_id,
-                page=page_no,
-                bbox=norm_bbox,
-                figure_block_id=fig_block_id,
-                figure_caption="",  # filled in when we hit the following CAPTION
-            )
-            pending_caption_element = element
+            if skip_figure_ids and fig_block_id in skip_figure_ids:
+                # Repeating header/footer image — drop it; clear pending so the
+                # following CAPTION (if any) is consumed without being attached.
+                pending_caption_element = None
+            else:
+                element = ContentElement(
+                    element_type=ElementType.FIGURE,
+                    text="[Figure]",
+                    block_id=block_id,
+                    page=page_no,
+                    bbox=norm_bbox,
+                    figure_block_id=fig_block_id,
+                    figure_caption="",  # filled in when we hit the following CAPTION
+                )
+                pending_caption_element = element
 
         elif label == DocItemLabel.FORMULA:
             formula_counter += 1
@@ -347,6 +357,81 @@ def _build_outline(doc: Any, doc_id: str) -> DocumentOutline:
         total_pages=len(doc.pages),
         sections=sections,
     )
+
+
+def _dedup_repeating_figures(
+    regions: list[FigureRegion],
+    pdf_path: Path,
+    total_pages: int,
+    min_repeat_pages: int = 3,
+    header_top_thresh: float = 0.10,
+    footer_top_thresh: float = 0.90,
+) -> tuple[set[str], list[FigureRegion]]:
+    """Detect figures that repeat across pages and are in the header/footer zone.
+
+    Strategy:
+      1. Size bucket — only compare regions with similar normalised dimensions.
+      2. Pixel hash — MD5 of a 72-dpi crop from PyMuPDF; identical images match.
+      3. Frequency + position — if >= min_repeat_pages occurrences share the same
+         hash AND each occurrence sits in the header (top < header_top_thresh) or
+         footer (top+height > footer_top_thresh), all are dropped.
+
+    Returns (skipped_block_ids, kept_regions).  skipped_block_ids contains the
+    figure_block_ids of dropped regions so _build_outline can omit them too.
+    """
+    import fitz
+    from collections import defaultdict
+
+    if not regions:
+        return set(), regions
+
+    # Stage 1: group by normalised size (rounded to 2 dp ≈ 1 % of page)
+    size_groups: dict[tuple[float, float], list[FigureRegion]] = defaultdict(list)
+    for r in regions:
+        size_groups[round(r.width, 2), round(r.height, 2)].append(r)
+
+    skip_ids: set[str] = set()
+    doc = fitz.open(str(pdf_path))
+
+    for group in size_groups.values():
+        if len(group) < min_repeat_pages:
+            continue  # too few to be a repeating logo
+
+        # Stage 2: pixel hash for each member of the size-matched group
+        hash_to_regions: dict[bytes, list[FigureRegion]] = defaultdict(list)
+        for r in group:
+            page = doc[r.page - 1]
+            pw, ph = page.rect.width, page.rect.height
+            rect = fitz.Rect(
+                r.left * pw,
+                r.top * ph,
+                (r.left + r.width) * pw,
+                (r.top + r.height) * ph,
+            )
+            pix = page.get_pixmap(clip=rect, dpi=72)
+            h = hashlib.md5(pix.samples).digest()
+            hash_to_regions[h].append(r)
+
+        # Stage 3: frequency + position gate
+        for matched in hash_to_regions.values():
+            pages_seen = {r.page for r in matched}
+            if len(pages_seen) < min_repeat_pages:
+                continue
+            for r in matched:
+                in_header = r.top < header_top_thresh
+                in_footer = (r.top + r.height) > footer_top_thresh
+                if in_header or in_footer:
+                    skip_ids.add(r.block_id)
+
+    doc.close()
+
+    if skip_ids:
+        console.print(
+            f"[yellow]Dedup:[/] dropped {len(skip_ids)} repeating header/footer "
+            f"figure(s) (out of {len(regions)} total, {total_pages} pages)"
+        )
+
+    return skip_ids, [r for r in regions if r.block_id not in skip_ids]
 
 
 def _build_figure_regions(doc: Any) -> list[FigureRegion]:
