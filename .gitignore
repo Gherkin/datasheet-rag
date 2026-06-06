@@ -14,3 +14,5 @@ output/
 .git_commit_msg.txt
 example-pdfs/
 test-project/
+*.mcpb
+eval/
