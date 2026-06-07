@@ -1004,6 +1004,18 @@ def describe_figures_cmd(
 @click.option("--db", "db_path", type=click.Path(path_type=Path), default=None,
               help="SQLite DB path. Defaults to settings.sqlite_db_path.")
 @click.option("--dry-run", is_flag=True, help="Run all steps but do not write to the store.")
+@click.option(
+    "--show-cost",
+    is_flag=True,
+    help=(
+        "Estimate AWS costs for this run instead of making the priced Bedrock/"
+        "Textract calls — a true dry run for budgeting before ingesting in "
+        "volume. Implies --dry-run. Skips embedding and figure-description "
+        "API calls (estimated from local chunk/figure counts instead); for "
+        "scanned PDFs without cached OCR results, only the Textract line item "
+        "can be estimated, since the rest of the pipeline depends on its output."
+    ),
+)
 @click.option("--force", is_flag=True, help="Ignore cached blocks/chunks and redo all steps.")
 @click.option(
     "--backend",
@@ -1048,6 +1060,7 @@ def ingest(
     meso_tokens: int,
     db_path: Path | None,
     dry_run: bool,
+    show_cost: bool,
     force: bool,
     backend: str,
     accurate_tables: bool,
@@ -1063,6 +1076,14 @@ def ingest(
     """
     import time
 
+    from aws_rag.costs import (
+        CostEstimate,
+        estimate_embedding_cost,
+        estimate_figure_description_cost,
+        estimate_textract_cost,
+        estimate_title_inference_cost,
+        pdf_page_count,
+    )
     from aws_rag.chunking.pipeline import (
         load_chunk_graph,
         run_chunking_pipeline,
@@ -1091,14 +1112,42 @@ def ingest(
         if not tags and proj_cfg.tags:
             tags = tuple(proj_cfg.tags)
 
+    if show_cost:
+        dry_run = True
+        console.print(
+            "[yellow]--show-cost: estimating AWS spend, skipping priced "
+            "Bedrock/Textract calls.[/]"
+        )
+
     settings = get_settings()
     t0 = time.monotonic()
     step_n = 0
+    cost = CostEstimate()
+    figure_count = 0
 
     def _step(label: str) -> None:
         nonlocal step_n
         step_n += 1
         console.rule(f"[bold cyan]Step {step_n} — {label}[/]")
+
+    def _print_cost_summary() -> None:
+        console.rule("[bold cyan]Estimated AWS cost[/]")
+        table = Table()
+        table.add_column("Item", style="cyan")
+        table.add_column("Detail")
+        table.add_column("Est. USD", justify="right")
+        for item in cost.items:
+            table.add_row(item.label, item.detail, f"${item.usd:.5f}")
+        if cost.items:
+            table.add_row("[bold]Total[/]", "", f"[bold]${cost.total_usd:.5f}[/]")
+        console.print(table)
+        for note in cost.notes:
+            console.print(f"  [yellow]Note:[/] {note}")
+        console.print(
+            "  [dim]Reference pricing only — hard-coded snapshots (see "
+            "aws_rag.costs), not live lookups. Verify in your AWS console "
+            "before budgeting at volume.[/]"
+        )
 
     # ── 1. Detect backend ────────────────────────────────────────────────────
     _step("Detect PDF type")
@@ -1180,6 +1229,7 @@ def ingest(
                 manifest_path = figures_out / "manifest.json"
                 manifest.save(manifest_path)
                 figure_manifest_dict = manifest.to_dict()
+                figure_count = len(manifest.figures)
                 console.print(f"  {len(manifest.figures)} regions → [cyan]{manifest_path}[/]")
 
             _step("Multi-scale chunking")
@@ -1201,7 +1251,6 @@ def ingest(
 
     # ── 2b. Textract path (scanned PDFs) ─────────────────────────────────────
     else:
-        from aws_rag.storage import upload_pdf
         from aws_rag.textract import (
             get_job_results,
             load_blocks,
@@ -1209,30 +1258,54 @@ def ingest(
             start_analysis,
             wait_for_job,
         )
-
-        _step("Upload PDF to S3")
-        did, s3_key = upload_pdf(pdf_path, doc_id=doc_id)
-        console.print(f"  doc_id = [cyan]{did}[/]")
-        console.print(f"  s3_key = {s3_key}")
-
         from aws_rag.storage import save_pdf_locally
-        save_pdf_locally(pdf_path, did)
 
-        _step("Textract layout analysis (OCR)")
-        blocks_path = settings.output_dir / f"{did}_blocks.json"
-        if blocks_path.exists() and not force:
-            console.print(f"  [yellow]Resuming — loading cached blocks[/] → [cyan]{blocks_path}[/]")
+        if show_cost:
+            from aws_rag.docling_parser import content_hash
+            did = doc_id or content_hash(pdf_path)
+            blocks_path = settings.output_dir / f"{did}_blocks.json"
+            cached = blocks_path.exists() and not force
+            console.print(f"  doc_id = [cyan]{did}[/]")
+            if not cached:
+                pages = pdf_page_count(pdf_path)
+                cost.items.append(estimate_textract_cost(pages))
+                cost.notes.append(
+                    "No cached Textract OCR results for this PDF — only the "
+                    "OCR line item could be estimated. Embedding/description "
+                    "costs depend on its output; run a real ingest once (or "
+                    "ingest with cached blocks present) to estimate the full "
+                    "pipeline without re-paying for OCR on every estimate."
+                )
+                _print_cost_summary()
+                return
+            console.print("  [yellow]Cached Textract blocks found — estimating full pipeline.[/]")
             blocks = load_blocks(blocks_path)
             console.print(f"  {len(blocks)} blocks (cached)")
         else:
-            job_id = start_analysis(did, s3_key)
-            console.print(f"  job_id = {job_id}  (waiting…)")
-            status = wait_for_job(job_id)
-            if status != "SUCCEEDED":
-                raise click.ClickException(f"Textract job failed with status: {status}")
-            blocks = get_job_results(job_id)
-            save_blocks(blocks, blocks_path)
-            console.print(f"  {len(blocks)} blocks → [cyan]{blocks_path}[/]")
+            from aws_rag.storage import upload_pdf
+
+            _step("Upload PDF to S3")
+            did, s3_key = upload_pdf(pdf_path, doc_id=doc_id)
+            console.print(f"  doc_id = [cyan]{did}[/]")
+            console.print(f"  s3_key = {s3_key}")
+
+            blocks_path = settings.output_dir / f"{did}_blocks.json"
+            _step("Textract layout analysis (OCR)")
+            if blocks_path.exists() and not force:
+                console.print(f"  [yellow]Resuming — loading cached blocks[/] → [cyan]{blocks_path}[/]")
+                blocks = load_blocks(blocks_path)
+                console.print(f"  {len(blocks)} blocks (cached)")
+            else:
+                job_id = start_analysis(did, s3_key)
+                console.print(f"  job_id = {job_id}  (waiting…)")
+                status = wait_for_job(job_id)
+                if status != "SUCCEEDED":
+                    raise click.ClickException(f"Textract job failed with status: {status}")
+                blocks = get_job_results(job_id)
+                save_blocks(blocks, blocks_path)
+                console.print(f"  {len(blocks)} blocks → [cyan]{blocks_path}[/]")
+
+        save_pdf_locally(pdf_path, did)
 
         figure_manifest_dict = None
         if not skip_figures:
@@ -1252,6 +1325,7 @@ def ingest(
             manifest_path = figures_out / "manifest.json"
             manifest.save(manifest_path)
             figure_manifest_dict = manifest.to_dict()
+            figure_count = len(manifest.figures)
             console.print(f"  {len(manifest.figures)} figures → [cyan]{manifest_path}[/]")
 
         chunks_path = settings.output_dir / f"{did}_chunks.json"
@@ -1291,7 +1365,14 @@ def ingest(
         # Need chunks in the store first so describe-figures can find them.
         # We do a provisional write, then describe, then the embed step below
         # will merge the descriptions into context_text.
-        if not dry_run:
+        if show_cost:
+            if figure_count == 0:
+                # Resumed from a cached chunk graph — figures weren't
+                # re-extracted, so count figure chunks already in the graph.
+                figure_count = sum(1 for c in graph.chunks.values() if c.figure_image_path)
+            cost.items.append(estimate_figure_description_cost(figure_count))
+            console.print(f"  [yellow]Estimating only — {figure_count} figures, no Bedrock calls made.[/]")
+        elif not dry_run:
             from aws_rag.description import FigureDescriber, describe_figures_in_store
 
             target = db_path or settings.sqlite_db_path
@@ -1336,6 +1417,15 @@ def ingest(
 
     # ── 6. Embed + store ─────────────────────────────────────────────────────
     _step("Embed & store")
+    if show_cost:
+        embed_item = estimate_embedding_cost(graph)
+        cost.items.append(embed_item)
+        console.print(f"  [yellow]Estimating only — {embed_item.detail}, no Bedrock calls made.[/]")
+        if infer_title:
+            cost.items.append(estimate_title_inference_cost())
+        _print_cost_summary()
+        return
+
     console.print("  Embedding with Bedrock Titan v2…")
     embedder = BedrockEmbedder(verbose=True)
     vectors = embed_chunk_graph(graph, embedder=embedder)
