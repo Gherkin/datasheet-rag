@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 import socket
 from pathlib import Path
 
@@ -28,6 +30,16 @@ def _resolve_doc_id(conn, doc_id: str) -> str:
         return resolve_doc_id(conn, doc_id)
     except ValueError as e:
         raise click.ClickException(str(e)) from e
+
+
+_SLUG_RE = re.compile(r"[^a-zA-Z0-9]+")
+
+
+def _slugify(text: str | None) -> str:
+    """Turn a doc title into a filesystem-safe filename stem, or '' if unusable."""
+    if not text or text == "—":
+        return ""
+    return _SLUG_RE.sub("-", text).strip("-")[:80]
 
 
 @click.group()
@@ -250,6 +262,41 @@ def _local_ips() -> list[str]:
 
     ips.discard("127.0.0.1")
     return ["127.0.0.1", *sorted(ips)]
+
+
+@cli.command("download")
+@click.argument("doc_id", type=str)
+@click.option("-o", "--output", "output_path", type=click.Path(path_type=Path), default=None,
+              help="Destination file or directory (default: ./<short_doc_id>.pdf).")
+@click.option("--db", "db_path", type=click.Path(path_type=Path), default=None)
+def download_doc(doc_id: str, output_path: Path | None, db_path: Path | None) -> None:
+    """Save a document's source PDF to disk (from S3, or the local scan fallback)."""
+    from aws_rag import pdf_viewer
+    from aws_rag.store import connect, get_doc_titles
+
+    settings = get_settings()
+    target = db_path or settings.sqlite_db_path
+    conn = connect(target)
+    doc_id = _resolve_doc_id(conn, doc_id)
+    title = get_doc_titles(conn).get(doc_id)
+    conn.close()
+
+    try:
+        data = pdf_viewer.load_pdf_bytes(doc_id)
+    except FileNotFoundError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    short_id = doc_id[:SHORT_DOC_ID_LEN]
+    default_name = f"{_slugify(title) or short_id}.pdf"
+    if output_path is None:
+        dest = Path(default_name)
+    elif output_path.is_dir() or str(output_path).endswith(("/", os.sep)):
+        dest = output_path / default_name
+    else:
+        dest = output_path
+
+    dest.write_bytes(data)
+    console.print(f"[green]Saved[/] {len(data):,} bytes → [cyan]{dest}[/]")
 
 
 @cli.command("open")

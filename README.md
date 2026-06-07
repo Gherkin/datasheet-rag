@@ -46,6 +46,12 @@ rag metadata set <doc_id> --mpn STM32H743VIT6 --manufacturer ST --subsystem mcu
 # Backfill AI-inferred titles for documents with blank/generic titles
 rag fix-titles
 
+# Save a document's source PDF to disk
+rag download <doc_id> [-o path/or/dir/]
+
+# Print clickable URLs to read a document's PDF in the browser
+rag open <doc_id>
+
 # Search the store (hybrid by default)
 rag search "I2C clock stretching" --project-id my-board -k 5
 rag search "ESD HBM rating" --mode keyword
