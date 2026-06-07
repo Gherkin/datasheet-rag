@@ -805,6 +805,11 @@ def describe_figures_cmd(
 @click.option("--tag", "tags", multiple=True, help="Repeatable --tag flag.")
 @click.option("--skip-figures", is_flag=True, help="Skip figure extraction and description steps.")
 @click.option("--skip-describe", is_flag=True, help="Skip AI figure description (but still extract).")
+@click.option("--infer-title", is_flag=True,
+              help="If the document has no usable title after chunking, infer one "
+                   "with a small Bedrock Claude call against the first page "
+                   "(one extra LLM call; off by default — see `rag fix-titles` "
+                   "to backfill existing documents).")
 @click.option("--dpi", default=300, type=int, help="Render DPI for figure extraction.")
 @click.option("--micro-tokens", default=128, type=int, help="Max tokens per MICRO chunk.")
 @click.option("--meso-tokens", default=512, type=int, help="Max tokens per MESO chunk.")
@@ -848,6 +853,7 @@ def ingest(
     tags: tuple[str, ...],
     skip_figures: bool,
     skip_describe: bool,
+    infer_title: bool,
     dpi: int,
     micro_tokens: int,
     meso_tokens: int,
@@ -877,7 +883,13 @@ def ingest(
     from aws_rag.chunking.splitter import SplitterConfig
     from aws_rag.embedding import BedrockEmbedder, embed_chunk_graph
     from aws_rag.figures import extract_figures, extract_figures_from_regions
-    from aws_rag.store import apply_metadata_to_chunks, connect, insert_chunk_graph, set_metadata
+    from aws_rag.store import (
+        apply_metadata_to_chunks,
+        connect,
+        get_doc_titles,
+        insert_chunk_graph,
+        set_metadata,
+    )
 
     settings = get_settings()
     t0 = time.monotonic()
@@ -1146,6 +1158,20 @@ def ingest(
             conn.commit()
             console.print("  Metadata sidecar saved.")
 
+        if infer_title:
+            current_title = get_doc_titles(conn).get(did)
+            if current_title in (None, "", "—"):
+                from aws_rag.titling import infer_and_backfill_title
+
+                console.print("  Inferring document title from page 1…")
+                inferred = infer_and_backfill_title(conn, did)
+                if inferred:
+                    console.print(f"  [green]Inferred title:[/] {inferred}")
+                else:
+                    console.print("  [yellow]Could not infer a title from the first page.[/]")
+            else:
+                console.print(f"  Title already set ({current_title!r}) — skipping inference.")
+
         conn.close()
 
     elapsed = time.monotonic() - t0
@@ -1272,6 +1298,85 @@ def metadata_list(
             d.manufacturer or "—", d.subsystem or "—",
         )
     console.print(table)
+    conn.close()
+
+
+# ---------------------------------------------------------------------------
+# fix-titles (AI-inferred document titles for poorly-titled documents)
+# ---------------------------------------------------------------------------
+
+_BLANK_TITLES = (None, "", "—")
+
+
+@cli.command("fix-titles")
+@click.option("--doc-id", default=None, help="Restrict to a single document.")
+@click.option("--force", is_flag=True,
+              help="Re-infer even for documents that already have a title "
+                   "(needed to replace generic titles like 'Contents').")
+@click.option("--model", "model_id", default=None,
+              help="Override settings.description_model_id for this run.")
+@click.option("--dry-run", is_flag=True,
+              help="Infer and print titles but do not persist them.")
+@click.option("--db", "db_path", type=click.Path(path_type=Path), default=None)
+def fix_titles_cmd(
+    doc_id: str | None,
+    force: bool,
+    model_id: str | None,
+    dry_run: bool,
+    db_path: Path | None,
+) -> None:
+    """Infer and backfill document titles with a small Bedrock Claude call.
+
+    Without --doc-id, scans every ingested document and infers a title for
+    those showing as "—" (blank) in `rag list`. Pass --doc-id to target one
+    document, and add --force to replace a generic-but-present title (e.g.
+    "Contents", "Disclaimer") that the heuristic above wouldn't flag.
+
+    Inferred titles are written to every chunk row for the document and
+    marked `title_inferred: true` in the metadata sidecar (`rag metadata get
+    <doc_id>`) so they're distinguishable from titles Docling extracted
+    directly. Re-run with --doc-id --force to overwrite an inferred title.
+    """
+    from aws_rag.store import connect, get_ingested_docs
+    from aws_rag.titling import TitleInferer, infer_and_backfill_title
+
+    settings = get_settings()
+    target = db_path or settings.sqlite_db_path
+    conn = connect(target)
+
+    if doc_id:
+        doc_id = _resolve_doc_id(conn, doc_id)
+        docs = [d for d in get_ingested_docs(conn) if d["doc_id"] == doc_id]
+    else:
+        docs = get_ingested_docs(conn)
+
+    if not force:
+        skipped = [d for d in docs if d["doc_title"] not in _BLANK_TITLES]
+        docs = [d for d in docs if d["doc_title"] in _BLANK_TITLES]
+        if skipped and len(skipped) == 1 and not docs:
+            console.print(
+                f"[yellow]{skipped[0]['doc_id'][:SHORT_DOC_ID_LEN]}[/] already has a title "
+                f"({skipped[0]['doc_title']!r}). Pass --force to re-infer it anyway."
+            )
+
+    if not docs:
+        console.print("[yellow]No documents need a title fix.[/]")
+        conn.close()
+        return
+
+    inferer = TitleInferer(model_id=model_id)
+    console.print(f"Inferring titles with [cyan]{inferer.model_id}[/] for {len(docs)} document(s)…")
+
+    for d in docs:
+        short_id = d["doc_id"][:SHORT_DOC_ID_LEN]
+        current = d["doc_title"]
+        title = infer_and_backfill_title(conn, d["doc_id"], inferer=inferer, dry_run=dry_run)
+        if title is None:
+            console.print(f"  [yellow]could not infer[/] {short_id} (was: {current!r})")
+            continue
+        verb = "would set" if dry_run else "set"
+        console.print(f"  [green]{verb}[/] {short_id}: {current!r} → {title!r}")
+
     conn.close()
 
 

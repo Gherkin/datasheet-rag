@@ -43,6 +43,9 @@ rag describe-figures --project-id my-board --missing-only
 # Tag the document (sidecar — no re-ingest needed)
 rag metadata set <doc_id> --mpn STM32H743VIT6 --manufacturer ST --subsystem mcu
 
+# Backfill AI-inferred titles for documents with blank/generic titles
+rag fix-titles
+
 # Search the store (hybrid by default)
 rag search "I2C clock stretching" --project-id my-board -k 5
 rag search "ESD HBM rating" --mode keyword
@@ -263,20 +266,22 @@ toward the kept chunks and away from the dropped ones.
   - In `hybrid_search`, a steered vector only affects the KNN branch; the BM25
     branch still needs text.
 
-### AI-inferred document titles for untitled documents (not implemented)
+### AI-inferred document titles for untitled documents (implemented)
 
-Some documents come through ingestion without a `doc_title` (e.g. PDFs whose
-Textract output lacks a detectable title block). These show as `—` in
-`rag list`.
+Some documents come through ingestion without a useful `doc_title` — either
+blank (`—` in `rag list`) or a generic heading like "Contents" or
+"Disclaimer" that Docling picked up as the title.
 
-- **TODO:** when a chunk's `doc_title` is empty after chunking, run a small
-  LLM call (e.g. Bedrock Claude Haiku) against the first page's text to infer
-  a human-readable title, and backfill it on all chunks for that `doc_id`.
-- The call should happen at embed time (or as a standalone `rag fix-titles`
-  command) so it doesn't slow down the Textract/chunking steps.
-- The inferred title should be marked distinctly (e.g. stored with a
-  `title_inferred: true` attribute in the `doc_metadata` sidecar) so it can
-  be reviewed or overridden later with `rag metadata set`.
+- `rag fix-titles` runs a small Bedrock Claude call (`aws_rag.titling`)
+  against each document's first page and backfills the inferred title onto
+  every chunk row, marking it `title_inferred: true` in the `doc_metadata`
+  sidecar (visible via `rag metadata get <doc_id>`).
+- Without `--doc-id`, it scans the whole store and only fixes documents whose
+  title is blank. Pass `--doc-id <id> --force` to replace a present-but-bad
+  title (e.g. "Contents").
+- `rag ingest --infer-title` runs the same inference inline for a freshly
+  ingested document if it comes out of chunking with no usable title — opt-in
+  since it costs one extra LLM call per document.
 
 ### Switch MACRO summaries from extractive to abstractive (pending eval)
 
