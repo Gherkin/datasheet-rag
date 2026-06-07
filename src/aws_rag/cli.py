@@ -1080,8 +1080,8 @@ def ingest(
         set_metadata,
     )
 
-    from aws_rag.project_config import get_project_config
-    proj_cfg = get_project_config()
+    from aws_rag.project_config import get_project_config_for
+    proj_cfg = get_project_config_for(pdf_path.parent)
     if proj_cfg is not None:
         project_id = project_id or proj_cfg.project_id
         group_name = group_name or proj_cfg.group
