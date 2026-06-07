@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import socket
 from pathlib import Path
 
 import click
@@ -198,6 +199,113 @@ def list_docs(db_path: Path | None, show_s3: bool) -> None:
         )
 
     console.print(table)
+
+
+# ---------------------------------------------------------------------------
+# Open (loopback PDF.js viewer URL — same server the MCP show_pdf tool uses)
+# ---------------------------------------------------------------------------
+
+
+def _local_ips() -> list[str]:
+    """Best-effort discovery of this host's IPv4 addresses.
+
+    Used to print every URL that might reach the loopback PDF server —
+    handy when you're SSH'd into the machine and `127.0.0.1` in the
+    terminal isn't `127.0.0.1` in your browser. Always includes
+    ``127.0.0.1`` first (works when running locally / port-forwarded).
+    """
+    import subprocess
+
+    ips: set[str] = set()
+
+    # The address this host would use to reach the outside world — a UDP
+    # "connect" just picks a route, no packets are actually sent.
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            ips.add(s.getsockname()[0])
+    except OSError:
+        pass
+
+    # Every IP the hostname resolves to.
+    try:
+        for ip in socket.gethostbyname_ex(socket.gethostname())[2]:
+            ips.add(ip)
+    except OSError:
+        pass
+
+    # `ip -4 -o addr show` catches interfaces the above can miss (Tailscale,
+    # Docker bridges, extra NICs, …) — Linux-only, best-effort.
+    try:
+        out = subprocess.run(
+            ["ip", "-4", "-o", "addr", "show"],
+            capture_output=True, text=True, timeout=2,
+        ).stdout
+        for line in out.splitlines():
+            parts = line.split()
+            if "inet" in parts:
+                ips.add(parts[parts.index("inet") + 1].split("/")[0])
+    except (OSError, ValueError):
+        pass
+
+    ips.discard("127.0.0.1")
+    return ["127.0.0.1", *sorted(ips)]
+
+
+@cli.command("open")
+@click.argument("doc_id", type=str)
+@click.option("--page", default=1, type=int, help="1-based page to open to.")
+@click.option("--db", "db_path", type=click.Path(path_type=Path), default=None)
+@click.option("--launch/--no-launch", default=True,
+              help="Open the 127.0.0.1 URL in your default browser (default on — "
+                   "skip this if you're connecting from a different machine).")
+def open_doc(doc_id: str, page: int, db_path: Path | None, launch: bool) -> None:
+    """Print browser URLs to read a document's source PDF.
+
+    Starts the PDF.js viewer server — the same one the MCP `show_pdf` tool
+    uses, bound to every interface — and prints one URL per local IP address
+    (including 127.0.0.1) so you can pick whichever one your browser can
+    reach: localhost if you're on the machine directly, the LAN/Tailscale/SSH
+    address if you're remote. The server runs in this process, so the link
+    only works while this command stays alive — Ctrl+C to stop serving.
+    """
+    import time
+    import webbrowser
+
+    from aws_rag import pdf_viewer
+    from aws_rag.store import connect
+
+    settings = get_settings()
+    target = db_path or settings.sqlite_db_path
+    conn = connect(target)
+    doc_id = _resolve_doc_id(conn, doc_id)
+    conn.close()
+
+    try:
+        pdf_viewer.load_pdf_bytes(doc_id)  # validate + warm cache before printing URLs
+    except FileNotFoundError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    port = pdf_viewer.ensure_pdf_server()
+    local_url = f"http://127.0.0.1:{port}/viewer/{doc_id}#page={page}"
+
+    console.print("[green]PDF viewer running — pick whichever URL your browser can reach:[/]")
+    for ip in _local_ips():
+        console.print(
+            f"  http://{ip}:{port}/viewer/{doc_id}#page={page}", soft_wrap=True
+        )
+
+    if launch:
+        webbrowser.open(local_url)
+        console.print("[dim]Opened the 127.0.0.1 link in your default browser "
+                      "(use --no-launch to skip this if you're connecting remotely).[/]")
+    console.print("[dim]Serving from this process — keep it running to keep the link alive. Ctrl+C to stop.[/]")
+
+    try:
+        while True:
+            time.sleep(3600)
+    except KeyboardInterrupt:
+        console.print("\n[dim]Stopped.[/]")
 
 
 # ---------------------------------------------------------------------------
