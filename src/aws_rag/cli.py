@@ -976,6 +976,26 @@ def describe_figures_cmd(
 # ---------------------------------------------------------------------------
 
 
+def _print_cost_table(cost: CostEstimate, heading: str = "Estimated AWS cost") -> None:
+    console.rule(f"[bold cyan]{heading}[/]")
+    table = Table()
+    table.add_column("Item", style="cyan")
+    table.add_column("Detail")
+    table.add_column("Est. USD", justify="right")
+    for item in cost.items:
+        table.add_row(item.label, item.detail, f"${item.usd:.5f}")
+    if cost.items:
+        table.add_row("[bold]Total[/]", "", f"[bold]${cost.total_usd:.5f}[/]")
+    console.print(table)
+    for note in cost.notes:
+        console.print(f"  [yellow]Note:[/] {note}")
+    console.print(
+        "  [dim]Reference pricing only — hard-coded snapshots (see "
+        "aws_rag.costs), not live lookups. Verify in your AWS console "
+        "before budgeting at volume.[/]"
+    )
+
+
 @cli.command()
 @click.argument("pdf_path", type=click.Path(exists=True, path_type=Path))
 @click.option("--doc-id", default=None, help="Explicit document ID (default: content hash).")
@@ -1073,7 +1093,116 @@ def ingest(
     scanned PDF, or --backend auto to route automatically between the two.
     Intermediate artefacts (blocks/chunk graph) are cached in output_dir;
     pass --force to ignore the cache and redo all steps.
+
+    PDF_PATH may also be a directory, in which case every *.pdf found
+    under it (recursively) is ingested one by one with the same options.
+    Documents already in the store under their content-hash doc_id are
+    skipped unless --force is given, and --show-cost prints a combined
+    estimate across all of them in addition to each document's breakdown.
     """
+    common = dict(
+        project_id=project_id, group_name=group_name, mpn=mpn, manufacturer=manufacturer,
+        subsystem=subsystem, doc_type=doc_type, tags=tags, skip_figures=skip_figures,
+        upload_figures=upload_figures, skip_describe=skip_describe, infer_title=infer_title,
+        dpi=dpi, micro_tokens=micro_tokens, meso_tokens=meso_tokens, db_path=db_path,
+        dry_run=dry_run, show_cost=show_cost, force=force, backend=backend,
+        accurate_tables=accurate_tables,
+    )
+
+    if not pdf_path.is_dir():
+        _ingest_one(pdf_path, doc_id=doc_id, **common)
+        return
+
+    if doc_id:
+        raise click.ClickException(
+            "--doc-id can't be used with a directory — each PDF gets its own "
+            "content-hash doc_id. Drop --doc-id for bulk ingestion."
+        )
+
+    from aws_rag.costs import CostEstimate, CostLineItem
+    from aws_rag.docling_parser import content_hash
+    from aws_rag.store import connect, get_ingested_docs
+
+    pdf_files = sorted(p for p in pdf_path.rglob("*") if p.is_file() and p.suffix.lower() == ".pdf")
+    if not pdf_files:
+        raise click.ClickException(f"No PDFs found under {pdf_path}")
+
+    settings = get_settings()
+    target = db_path or settings.sqlite_db_path
+    ingested_ids: set[str] = set()
+    if target.exists():
+        conn = connect(target)
+        ingested_ids = {d["doc_id"] for d in get_ingested_docs(conn)}
+        conn.close()
+
+    console.rule(f"[bold magenta]Bulk ingest — {len(pdf_files)} PDFs under {pdf_path}[/]")
+    total_cost = CostEstimate()
+    skipped = 0
+    for i, pdf in enumerate(pdf_files, 1):
+        console.rule(f"[bold cyan]({i}/{len(pdf_files)}) {pdf.relative_to(pdf_path)}[/]")
+        did = content_hash(pdf)
+        if did in ingested_ids and not force:
+            console.print(
+                f"  [dim]Already ingested and up to date (doc_id={did}) — "
+                "skipping. Pass --force to re-ingest.[/]"
+            )
+            skipped += 1
+            continue
+        result = _ingest_one(pdf, doc_id=None, **common)
+        if result is not None:
+            total_cost.items.extend(result.items)
+            total_cost.notes.extend(result.notes)
+
+    if show_cost:
+        by_label: dict[str, list[CostLineItem]] = {}
+        for item in total_cost.items:
+            by_label.setdefault(item.label, []).append(item)
+        merged = CostEstimate(notes=total_cost.notes)
+        for label, line_items in by_label.items():
+            merged.items.append(CostLineItem(
+                label=label,
+                detail=f"summed across {len(line_items)} documents",
+                usd=sum(li.usd for li in line_items),
+            ))
+        _print_cost_table(
+            merged,
+            heading=(
+                f"Estimated AWS cost — combined across "
+                f"{len(pdf_files) - skipped} of {len(pdf_files)} documents"
+            ),
+        )
+    console.rule(
+        f"[bold green]Bulk ingest done[/] — {len(pdf_files)} PDFs, "
+        f"{len(pdf_files) - skipped} processed, {skipped} skipped"
+    )
+
+
+def _ingest_one(
+    pdf_path: Path,
+    *,
+    doc_id: str | None,
+    project_id: str | None,
+    group_name: str | None,
+    mpn: str | None,
+    manufacturer: str | None,
+    subsystem: str | None,
+    doc_type: str | None,
+    tags: tuple[str, ...],
+    skip_figures: bool,
+    upload_figures: bool,
+    skip_describe: bool,
+    infer_title: bool,
+    dpi: int,
+    micro_tokens: int,
+    meso_tokens: int,
+    db_path: Path | None,
+    dry_run: bool,
+    show_cost: bool,
+    force: bool,
+    backend: str,
+    accurate_tables: bool,
+) -> CostEstimate | None:
+    """Ingest a single PDF; returns the cost estimate when --show-cost is set."""
     import time
 
     from aws_rag.costs import (
@@ -1129,25 +1258,6 @@ def ingest(
         nonlocal step_n
         step_n += 1
         console.rule(f"[bold cyan]Step {step_n} — {label}[/]")
-
-    def _print_cost_summary() -> None:
-        console.rule("[bold cyan]Estimated AWS cost[/]")
-        table = Table()
-        table.add_column("Item", style="cyan")
-        table.add_column("Detail")
-        table.add_column("Est. USD", justify="right")
-        for item in cost.items:
-            table.add_row(item.label, item.detail, f"${item.usd:.5f}")
-        if cost.items:
-            table.add_row("[bold]Total[/]", "", f"[bold]${cost.total_usd:.5f}[/]")
-        console.print(table)
-        for note in cost.notes:
-            console.print(f"  [yellow]Note:[/] {note}")
-        console.print(
-            "  [dim]Reference pricing only — hard-coded snapshots (see "
-            "aws_rag.costs), not live lookups. Verify in your AWS console "
-            "before budgeting at volume.[/]"
-        )
 
     # ── 1. Detect backend ────────────────────────────────────────────────────
     _step("Detect PDF type")
@@ -1276,8 +1386,8 @@ def ingest(
                     "ingest with cached blocks present) to estimate the full "
                     "pipeline without re-paying for OCR on every estimate."
                 )
-                _print_cost_summary()
-                return
+                _print_cost_table(cost)
+                return cost
             console.print("  [yellow]Cached Textract blocks found — estimating full pipeline.[/]")
             blocks = load_blocks(blocks_path)
             console.print(f"  {len(blocks)} blocks (cached)")
@@ -1423,8 +1533,8 @@ def ingest(
         console.print(f"  [yellow]Estimating only — {embed_item.detail}, no Bedrock calls made.[/]")
         if infer_title:
             cost.items.append(estimate_title_inference_cost())
-        _print_cost_summary()
-        return
+        _print_cost_table(cost)
+        return cost
 
     console.print("  Embedding with Bedrock Titan v2…")
     embedder = BedrockEmbedder(verbose=True)
@@ -1492,6 +1602,7 @@ def ingest(
     elapsed = time.monotonic() - t0
     console.rule(f"[bold green]Done[/] — {elapsed:.0f}s")
     console.print(f"  doc_id = [cyan]{did}[/]")
+    return None
 
 
 # ---------------------------------------------------------------------------
