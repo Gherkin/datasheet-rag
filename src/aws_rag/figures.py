@@ -388,7 +388,8 @@ def extract_figures_from_regions(
 ) -> FigureManifest:
     """Crop and save figure regions to disk. Regions may come from Textract or Docling."""
     if output_dir is None:
-        output_dir = Path("output").resolve() / "figures" / doc_id
+        from aws_rag.config import get_settings
+        output_dir = get_settings().figures_dir / doc_id
 
     output_dir.mkdir(parents=True, exist_ok=True)
 

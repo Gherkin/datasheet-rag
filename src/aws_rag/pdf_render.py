@@ -1,9 +1,10 @@
 """Resolve and render source PDFs by ``doc_id``.
 
-``doc_id`` is the SHA-256 content hash assigned at upload (see
-``aws_rag.storage.upload_pdf``). This module turns that id back into PDF
-bytes — trying the in-process cache, then S3, then a local filesystem
-scan — and renders individual pages to PNG via poppler/pdf2image.
+``doc_id`` is the SHA-256 content hash assigned at ingestion (see
+``aws_rag.storage.save_pdf_locally`` / ``upload_pdf``). This module turns
+that id back into PDF bytes — trying the in-process cache, then the local
+PDF store, then S3 — and renders individual pages to PNG via
+poppler/pdf2image.
 
 It is intentionally standalone (no MCP / FastMCP imports) so the eval
 review tool can depend on it without dragging in the server. The MCP
@@ -13,7 +14,6 @@ two import graphs independent.
 
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
 from threading import Lock
 
@@ -23,14 +23,15 @@ _pdf_cache_lock = Lock()
 _pdf_cache: dict[str, bytes] = {}
 
 
-def _project_root() -> Path:
-    """Project root — the parent of the ``output/`` dir holding rag.sqlite."""
-    settings = get_settings()
-    return Path(settings.sqlite_db_path).resolve().parent.parent
-
-
 def load_pdf_bytes(doc_id: str) -> bytes:
-    """Return raw PDF bytes for ``doc_id`` (cache → S3 → local hash scan)."""
+    """Return raw PDF bytes for ``doc_id`` (cache → local store → S3).
+
+    ``doc_id`` is the content hash, and ingestion saves the source PDF as
+    ``<pdf_dir>/<doc_id>.pdf`` (see ``storage.save_pdf_locally``), so the
+    local lookup is a direct path join — no scanning or re-hashing needed.
+    S3 (``s3_pdf_prefix/{doc_id}/*.pdf``) is a fallback for stores that were
+    explicitly uploaded remotely.
+    """
     with _pdf_cache_lock:
         cached = _pdf_cache.get(doc_id)
     if cached is not None:
@@ -38,47 +39,36 @@ def load_pdf_bytes(doc_id: str) -> bytes:
 
     settings = get_settings()
 
-    # ── S3: s3_pdf_prefix/{doc_id}/*.pdf ──────────────────────────────────
-    try:
-        from aws_rag.aws import s3_client
+    local_path = settings.pdf_dir / f"{doc_id}.pdf"
+    if local_path.is_file():
+        body = local_path.read_bytes()
+        with _pdf_cache_lock:
+            _pdf_cache[doc_id] = body
+        return body
 
-        client = s3_client()
-        resp = client.list_objects_v2(
-            Bucket=settings.s3_bucket,
-            Prefix=f"{settings.s3_pdf_prefix}{doc_id}/",
-        )
-        for obj in resp.get("Contents", []):
-            if obj["Key"].lower().endswith(".pdf"):
-                body = client.get_object(
-                    Bucket=settings.s3_bucket, Key=obj["Key"]
-                )["Body"].read()
-                with _pdf_cache_lock:
-                    _pdf_cache[doc_id] = body
-                return body
-    except Exception:
-        pass  # fall through to local scan
+    if settings.s3_bucket:
+        try:
+            from aws_rag.aws import s3_client
 
-    # ── Local filesystem: scan for a .pdf whose content hash matches ──────
-    try:
-        for pdf_path in _project_root().rglob("*.pdf"):
-            try:
-                h = hashlib.sha256()
-                with open(pdf_path, "rb") as fh:
-                    for chunk in iter(lambda: fh.read(1 << 20), b""):
-                        h.update(chunk)
-                if h.hexdigest() == doc_id:
-                    body = pdf_path.read_bytes()
+            client = s3_client()
+            resp = client.list_objects_v2(
+                Bucket=settings.s3_bucket,
+                Prefix=f"{settings.s3_pdf_prefix}{doc_id}/",
+            )
+            for obj in resp.get("Contents", []):
+                if obj["Key"].lower().endswith(".pdf"):
+                    body = client.get_object(
+                        Bucket=settings.s3_bucket, Key=obj["Key"]
+                    )["Body"].read()
                     with _pdf_cache_lock:
                         _pdf_cache[doc_id] = body
                     return body
-            except OSError:
-                continue
-    except Exception:
-        pass
+        except Exception:
+            pass
 
     raise FileNotFoundError(
-        f"PDF not found for doc_id={doc_id!r}. Check that it was uploaded to "
-        "S3 or that the original PDF is accessible under the project directory."
+        f"PDF not found for doc_id={doc_id!r}. Expected it at {local_path} "
+        "(or in S3 if RAG_S3_BUCKET is configured)."
     )
 
 

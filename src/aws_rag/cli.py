@@ -161,10 +161,17 @@ def analyze(target: str, mode: str, wait: bool, output: Path | None) -> None:
 
 @cli.command("list")
 @click.option("--db", "db_path", type=click.Path(path_type=Path), default=None)
+@click.option("--project-id", default=None,
+              help="Restrict to a project (default: scoped by .rag.toml if present).")
+@click.option("--global", "-g", "is_global", is_flag=True,
+              help="Show every project, ignoring any .rag.toml scoping.")
 @click.option("--s3", "show_s3", is_flag=True,
               help="List raw S3 uploads instead (debug — includes documents not yet ingested).")
-def list_docs(db_path: Path | None, show_s3: bool) -> None:
+def list_docs(db_path: Path | None, project_id: str | None, is_global: bool, show_s3: bool) -> None:
     """List ingested documents (searchable in the store)."""
+    from aws_rag.project_config import resolve_cli_project_id
+    project_id = resolve_cli_project_id(project_id, is_global=is_global)
+
     if show_s3:
         from aws_rag.storage import list_documents
 
@@ -186,7 +193,7 @@ def list_docs(db_path: Path | None, show_s3: bool) -> None:
     settings = get_settings()
     target = db_path or settings.sqlite_db_path
     conn = connect(target)
-    docs = get_ingested_docs(conn)
+    docs = get_ingested_docs(conn, project_id=project_id)
     conn.close()
 
     if not docs:
@@ -434,7 +441,9 @@ def inspect_layout(blocks_json: Path) -> None:
 @click.option("--dpi", default=300, type=int, help="Render DPI for PDF pages.")
 @click.option("--format", "image_format", default="png", type=click.Choice(["png", "jpg", "webp"]))
 @click.option("--padding", default=0.02, type=float, help="Padding around figures (fraction of page).")
-@click.option("--upload/--no-upload", default=False, help="Upload figures to S3 after extraction.")
+@click.option("--upload/--no-upload", default=False,
+              help="Also upload figures to S3 (opt-in — the local store under "
+                   "~/.rag/figures/ is the default and MCP reads from it directly).")
 @click.option("--output-dir", "-o", type=click.Path(path_type=Path), default=None)
 def extract_figures_cmd(
     blocks_json: Path,
@@ -622,7 +631,13 @@ def embed(
     """Embed a chunk graph (produced by `rag chunk`) and store it in SQLite."""
     from aws_rag.chunking.pipeline import load_chunk_graph
     from aws_rag.embedding import BedrockEmbedder, embed_chunk_graph
+    from aws_rag.project_config import get_project_config
     from aws_rag.store import connect, insert_chunk_graph
+
+    proj_cfg = get_project_config()
+    if proj_cfg is not None:
+        project_id = project_id or proj_cfg.project_id
+        group_name = group_name or proj_cfg.group
 
     console.print(f"Loading chunk graph from [cyan]{chunks_json}[/]…")
     graph = load_chunk_graph(chunks_json)
@@ -703,7 +718,10 @@ def embed(
 @click.option("-k", "top_k", default=10, type=int, help="Number of results.")
 @click.option("--db", "db_path", type=click.Path(path_type=Path), default=None,
               help="SQLite DB path. Defaults to settings.sqlite_db_path.")
-@click.option("--project-id", default=None)
+@click.option("--project-id", default=None,
+              help="Restrict to a project (default: scoped by .rag.toml if present).")
+@click.option("--global", "-g", "is_global", is_flag=True,
+              help="Search every project, ignoring any .rag.toml scoping.")
 @click.option("--group", "group_name", default=None)
 @click.option("--doc-id", "doc_ids", multiple=True, help="Restrict to one or more doc IDs.")
 @click.option("--level", type=click.Choice(["macro", "meso", "micro"]),
@@ -716,6 +734,7 @@ def search(
     top_k: int,
     db_path: Path | None,
     project_id: str | None,
+    is_global: bool,
     group_name: str | None,
     doc_ids: tuple[str, ...],
     level: str | None,
@@ -723,6 +742,7 @@ def search(
 ) -> None:
     """Search the local SQLite store with hybrid / vector / keyword retrieval."""
     from aws_rag.models.chunk import ChunkLevel
+    from aws_rag.project_config import resolve_cli_project_id
     from aws_rag.store import (
         SearchFilters,
         connect,
@@ -730,6 +750,8 @@ def search(
         keyword_search,
         vector_search,
     )
+
+    project_id = resolve_cli_project_id(project_id, is_global=is_global)
 
     settings = get_settings()
     target = db_path or settings.sqlite_db_path
@@ -799,18 +821,25 @@ def search(
 
 @cli.command("list-figures")
 @click.option("--doc-id", default=None)
-@click.option("--project-id", default=None)
+@click.option("--project-id", default=None,
+              help="Restrict to a project (default: scoped by .rag.toml if present).")
+@click.option("--global", "-g", "is_global", is_flag=True,
+              help="List figures across every project, ignoring any .rag.toml scoping.")
 @click.option("--db", "db_path", type=click.Path(path_type=Path), default=None)
 @click.option("--missing-description-only", is_flag=True,
               help="Only show figure chunks whose figure_description is empty.")
 def list_figures_cmd(
     doc_id: str | None,
     project_id: str | None,
+    is_global: bool,
     db_path: Path | None,
     missing_description_only: bool,
 ) -> None:
     """List figure chunks in the store (those with a usable image)."""
+    from aws_rag.project_config import resolve_cli_project_id
     from aws_rag.store import connect, list_figure_chunks
+
+    project_id = resolve_cli_project_id(project_id, is_global=is_global)
 
     settings = get_settings()
     target = db_path or settings.sqlite_db_path
@@ -959,6 +988,10 @@ def describe_figures_cmd(
               help="datasheet | reference-manual | errata | app-note | …")
 @click.option("--tag", "tags", multiple=True, help="Repeatable --tag flag.")
 @click.option("--skip-figures", is_flag=True, help="Skip figure extraction and description steps.")
+@click.option("--upload-figures/--no-upload-figures", default=False,
+              help="Also upload extracted figures to S3 (opt-in — figures live "
+                   "locally under ~/.rag/figures/ by default, which is what MCP "
+                   "reads from; only useful for sharing a store across machines).")
 @click.option("--skip-describe", is_flag=True, help="Skip AI figure description (but still extract).")
 @click.option("--infer-title", is_flag=True,
               help="If the document has no usable title after chunking, infer one "
@@ -1007,6 +1040,7 @@ def ingest(
     doc_type: str | None,
     tags: tuple[str, ...],
     skip_figures: bool,
+    upload_figures: bool,
     skip_describe: bool,
     infer_title: bool,
     dpi: int,
@@ -1037,7 +1071,7 @@ def ingest(
     )
     from aws_rag.chunking.splitter import SplitterConfig
     from aws_rag.embedding import BedrockEmbedder, embed_chunk_graph
-    from aws_rag.figures import extract_figures, extract_figures_from_regions
+    from aws_rag.figures import extract_figures, extract_figures_from_regions, upload_figures_to_s3
     from aws_rag.store import (
         apply_metadata_to_chunks,
         connect,
@@ -1045,6 +1079,17 @@ def ingest(
         insert_chunk_graph,
         set_metadata,
     )
+
+    from aws_rag.project_config import get_project_config
+    proj_cfg = get_project_config()
+    if proj_cfg is not None:
+        project_id = project_id or proj_cfg.project_id
+        group_name = group_name or proj_cfg.group
+        mpn = mpn or proj_cfg.mpn
+        manufacturer = manufacturer or proj_cfg.manufacturer
+        subsystem = subsystem or proj_cfg.subsystem
+        if not tags and proj_cfg.tags:
+            tags = tuple(proj_cfg.tags)
 
     settings = get_settings()
     t0 = time.monotonic()
@@ -1085,6 +1130,9 @@ def ingest(
         did = doc_id or content_hash(pdf_path)
         console.print(f"  doc_id = [cyan]{did}[/]")
 
+        from aws_rag.storage import save_pdf_locally
+        save_pdf_locally(pdf_path, did)
+
         chunks_path = settings.output_dir / f"{did}_chunks.json"
         running_header = ""
         pdf_meta_title = ""
@@ -1117,7 +1165,7 @@ def ingest(
             figure_manifest_dict = None
             if not skip_figures:
                 _step("Extract figures & formulas")
-                figures_out = settings.output_dir / "figures" / did
+                figures_out = settings.figures_dir / did
                 manifest = extract_figures_from_regions(
                     pdf_path=pdf_path,
                     regions=figure_regions,
@@ -1127,6 +1175,8 @@ def ingest(
                     image_format="png",
                     padding_pct=0.02,
                 )
+                if upload_figures and manifest.figures:
+                    manifest = upload_figures_to_s3(manifest)
                 manifest_path = figures_out / "manifest.json"
                 manifest.save(manifest_path)
                 figure_manifest_dict = manifest.to_dict()
@@ -1165,6 +1215,9 @@ def ingest(
         console.print(f"  doc_id = [cyan]{did}[/]")
         console.print(f"  s3_key = {s3_key}")
 
+        from aws_rag.storage import save_pdf_locally
+        save_pdf_locally(pdf_path, did)
+
         _step("Textract layout analysis (OCR)")
         blocks_path = settings.output_dir / f"{did}_blocks.json"
         if blocks_path.exists() and not force:
@@ -1184,7 +1237,7 @@ def ingest(
         figure_manifest_dict = None
         if not skip_figures:
             _step("Extract figures")
-            figures_out = settings.output_dir / "figures" / did
+            figures_out = settings.figures_dir / did
             manifest = extract_figures(
                 pdf_path=pdf_path,
                 blocks=blocks,
@@ -1194,6 +1247,8 @@ def ingest(
                 image_format="png",
                 padding_pct=0.02,
             )
+            if upload_figures and manifest.figures:
+                manifest = upload_figures_to_s3(manifest)
             manifest_path = figures_out / "manifest.json"
             manifest.save(manifest_path)
             figure_manifest_dict = manifest.to_dict()
@@ -1388,7 +1443,18 @@ def metadata_set(
     apply_to_chunks: bool,
 ) -> None:
     """Upsert document metadata. Only fields you pass are updated."""
+    from aws_rag.project_config import get_project_config
     from aws_rag.store import apply_metadata_to_chunks, connect, set_doc_title, set_metadata
+
+    proj_cfg = get_project_config()
+    if proj_cfg is not None:
+        project_id = project_id or proj_cfg.project_id
+        group_name = group_name or proj_cfg.group
+        mpn = mpn or proj_cfg.mpn
+        manufacturer = manufacturer or proj_cfg.manufacturer
+        subsystem = subsystem or proj_cfg.subsystem
+        if not tags and proj_cfg.tags:
+            tags = tuple(proj_cfg.tags)
 
     settings = get_settings()
     target = db_path or settings.sqlite_db_path
@@ -1439,18 +1505,25 @@ def metadata_get(doc_id: str, db_path: Path | None) -> None:
 
 
 @metadata.command("list")
-@click.option("--project-id", default=None)
+@click.option("--project-id", default=None,
+              help="Restrict to a project (default: scoped by .rag.toml if present).")
+@click.option("--global", "-g", "is_global", is_flag=True,
+              help="List documents across every project, ignoring any .rag.toml scoping.")
 @click.option("--group", "group_name", default=None)
 @click.option("--mpn", default=None)
 @click.option("--db", "db_path", type=click.Path(path_type=Path), default=None)
 def metadata_list(
     project_id: str | None,
+    is_global: bool,
     group_name: str | None,
     mpn: str | None,
     db_path: Path | None,
 ) -> None:
     """List documents in the sidecar, optionally filtered."""
+    from aws_rag.project_config import resolve_cli_project_id
     from aws_rag.store import connect, list_docs
+
+    project_id = resolve_cli_project_id(project_id, is_global=is_global)
 
     settings = get_settings()
     target = db_path or settings.sqlite_db_path

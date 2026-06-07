@@ -454,14 +454,17 @@ def test_get_figure_on_non_figure_chunk_raises(conn: Any) -> None:
         _get_figure_impl("c1", conn=conn)
 
 
-def test_get_figure_missing_local_file_raises(conn: Any, tmp_path: Any) -> None:
+def test_get_figure_missing_local_file_falls_through_to_s3_error(conn: Any, tmp_path: Any) -> None:
+    """A stale local path (ingestion ran elsewhere) isn't fatal by itself —
+    it just means there's no local shortcut, so we fall through to S3. With
+    no S3 key either, the chunk genuinely has nothing to serve."""
     from aws_rag.mcp.server import _get_figure_impl
 
     _seed_figure_chunk(
         conn, "fig:gone",
         image_path=str(tmp_path / "does-not-exist.png"),
     )
-    with pytest.raises(FileNotFoundError, match="missing"):
+    with pytest.raises(ValueError, match="no usable figure source"):
         _get_figure_impl("fig:gone", conn=conn)
 
 
@@ -470,5 +473,5 @@ def test_get_figure_no_source_raises(conn: Any) -> None:
     from aws_rag.mcp.server import _get_figure_impl
 
     _seed_figure_chunk(conn, "fig:bare", image_path=None, s3_key=None)
-    with pytest.raises(ValueError, match="no figure_image_path or figure_s3_key"):
+    with pytest.raises(ValueError, match="no usable figure source"):
         _get_figure_impl("fig:bare", conn=conn)

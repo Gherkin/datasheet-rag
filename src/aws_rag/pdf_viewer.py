@@ -190,75 +190,54 @@ def _build_viewer_html(doc_id: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _project_root() -> Path:
-    """Project root — parent of the ``output/`` dir that holds rag.sqlite."""
-    settings = get_settings()
-    return Path(settings.sqlite_db_path).resolve().parent.parent
-
-
 def load_pdf_bytes(doc_id: str) -> bytes:
     """Return the raw PDF bytes for *doc_id*, using a process-level cache.
 
     Lookup order:
     1. In-process cache (instant on repeat calls).
-    2. S3 — ``s3_pdf_prefix/{doc_id}/*.pdf``.
-    3. Local filesystem — scans ``_project_root()`` recursively for any
-       ``.pdf`` whose SHA-256 content hash equals ``doc_id`` (handles the
-       common case where PDFs are indexed locally but not yet uploaded to S3).
+    2. Local PDF store — ``<pdf_dir>/<doc_id>.pdf`` (doc_id is a content
+       hash, so the filename doubles as the lookup key — direct path join,
+       no scanning or hashing).
+    3. S3 — ``s3_pdf_prefix/{doc_id}/*.pdf``, for stores that were
+       explicitly uploaded remotely.
     """
     with _pdf_cache_lock:
         cached = _pdf_cache.get(doc_id)
     if cached is not None:
         return cached
 
-    # ── Try S3 ──────────────────────────────────────────────────────────────
-    try:
-        settings = get_settings()
-        from aws_rag.aws import s3_client as _s3_client
+    settings = get_settings()
 
-        client = _s3_client()
-        resp = client.list_objects_v2(
-            Bucket=settings.s3_bucket,
-            Prefix=f"{settings.s3_pdf_prefix}{doc_id}/",
-        )
-        for obj in resp.get("Contents", []):
-            if obj["Key"].lower().endswith(".pdf"):
-                body = client.get_object(
-                    Bucket=settings.s3_bucket, Key=obj["Key"]
-                )["Body"].read()
-                with _pdf_cache_lock:
-                    _pdf_cache[doc_id] = body
-                return body
-    except Exception:
-        pass  # fall through to local scan
+    local_path = settings.pdf_dir / f"{doc_id}.pdf"
+    if local_path.is_file():
+        body = local_path.read_bytes()
+        with _pdf_cache_lock:
+            _pdf_cache[doc_id] = body
+        return body
 
-    # ── Local filesystem fallback ────────────────────────────────────────────
-    # doc_id is a SHA-256 content hash (see storage.upload_pdf).  Scan the
-    # project root (parent of the output/ dir) for any .pdf whose hash matches.
-    import hashlib
+    if settings.s3_bucket:
+        try:
+            from aws_rag.aws import s3_client as _s3_client
 
-    try:
-        root = _project_root()
-        for pdf_path in root.rglob("*.pdf"):
-            try:
-                h = hashlib.sha256()
-                with open(pdf_path, "rb") as fh:
-                    for chunk in iter(lambda: fh.read(1 << 20), b""):
-                        h.update(chunk)
-                if h.hexdigest() == doc_id:
-                    body = pdf_path.read_bytes()
+            client = _s3_client()
+            resp = client.list_objects_v2(
+                Bucket=settings.s3_bucket,
+                Prefix=f"{settings.s3_pdf_prefix}{doc_id}/",
+            )
+            for obj in resp.get("Contents", []):
+                if obj["Key"].lower().endswith(".pdf"):
+                    body = client.get_object(
+                        Bucket=settings.s3_bucket, Key=obj["Key"]
+                    )["Body"].read()
                     with _pdf_cache_lock:
                         _pdf_cache[doc_id] = body
                     return body
-            except OSError:
-                continue
-    except Exception:
-        pass
+        except Exception:
+            pass
 
     raise FileNotFoundError(
-        f"PDF not found for doc_id={doc_id!r}. "
-        "Check that the document was uploaded to S3 or that the original "
-        "PDF file is accessible in the project directory."
+        f"PDF not found for doc_id={doc_id!r}. Expected it at {local_path} "
+        "(or in S3 if RAG_S3_BUCKET is configured)."
     )
 
 

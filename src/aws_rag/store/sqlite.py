@@ -392,23 +392,30 @@ def resolve_doc_id(conn: sqlite3.Connection, doc_id: str) -> str:
     )
 
 
-def get_ingested_docs(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+def get_ingested_docs(
+    conn: sqlite3.Connection,
+    *,
+    project_id: str | None = None,
+) -> list[dict[str, Any]]:
     """Return one summary row per ingested document.
 
     A document only appears here once it has actually been chunked and
     embedded into the store — unlike S3, which lists every upload regardless
-    of ingestion status.
+    of ingestion status. Pass ``project_id`` to scope the listing to chunks
+    tagged with that project.
     """
-    rows = conn.execute(
-        """
+    sql = """
         SELECT doc_id,
                COUNT(*) AS chunk_count,
                MIN(created_at) AS ingested_at
           FROM chunks
-         GROUP BY doc_id
-         ORDER BY doc_id
         """
-    ).fetchall()
+    params: list[Any] = []
+    if project_id:
+        sql += " WHERE project_id = ?"
+        params.append(project_id)
+    sql += " GROUP BY doc_id ORDER BY doc_id"
+    rows = conn.execute(sql, params).fetchall()
 
     titles = get_doc_titles(conn)
     docs: list[dict[str, Any]] = []

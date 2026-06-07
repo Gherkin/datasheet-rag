@@ -62,6 +62,25 @@ def upload_pdf(pdf_path: Path, *, doc_id: str | None = None) -> tuple[str, str]:
     return doc_id, s3_key
 
 
+def save_pdf_locally(pdf_path: Path, doc_id: str) -> Path:
+    """Copy *pdf_path* into the local PDF store as ``<pdf_dir>/<doc_id>.pdf``.
+
+    ``doc_id`` is a content hash, so the filename doubles as the lookup key —
+    ``pdf_render``/``pdf_viewer`` can fetch bytes with a direct path join,
+    no scanning or re-hashing required. No-op if already present.
+    """
+    import shutil
+
+    settings = get_settings()
+    dest = settings.pdf_dir / f"{doc_id}.pdf"
+    if dest.resolve() == pdf_path.resolve():
+        return dest
+    if not dest.is_file():
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(pdf_path, dest)
+    return dest
+
+
 def download_json(s3_key: str, dest: Path) -> Path:
     """Download a Textract JSON result from S3 to a local file."""
     settings = get_settings()

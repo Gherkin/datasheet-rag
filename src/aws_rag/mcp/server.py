@@ -431,28 +431,20 @@ def _compress_for_mcp(image_bytes: bytes, fmt: str) -> tuple[bytes, str]:
 def _figure_image_bytes(chunk: Any) -> tuple[bytes, str, Path | None]:
     """Read a figure chunk's image, returning ``(bytes, format, resolved_path)``.
 
-    Prefers the local cropped file (``figure_image_path``). Falls back to
-    S3 (``figure_s3_key``) using the configured bucket. Raises if neither
-    is available or the file is missing. ``resolved_path`` is the absolute
-    filesystem path when read from disk, ``None`` for S3-sourced figures.
+    Reads from the local cropped file (``figure_image_path``) when it's
+    actually present on disk — avoiding a network round-trip during local
+    development — and otherwise falls back to S3 (``figure_s3_key``).
+    Ingestion may run on a different machine than the MCP server, so a
+    stale or missing local path is expected, not an error: it just means
+    S3 is the source of truth. Raises only if neither yields bytes.
+    ``resolved_path`` is the absolute filesystem path when read from disk,
+    ``None`` for S3-sourced figures.
     """
     if chunk.figure_image_path:
         path = Path(chunk.figure_image_path)
-        if not path.is_absolute():
-            # Stored as relative path (old ingestion runs). Resolve relative to
-            # the project root, which is two directories above the sqlite db
-            # (e.g. <root>/output/rag.sqlite → <root>/).
-            settings = get_settings()
-            project_root = Path(settings.sqlite_db_path).resolve().parent.parent
-            path = project_root / path
-        path = path.resolve()
-        if not path.is_file():
-            raise FileNotFoundError(
-                f"figure_image_path on chunk {chunk.id} points to a missing "
-                f"file: {path}"
-            )
-        fmt = path.suffix.lstrip(".").lower() or "png"
-        return path.read_bytes(), fmt, path
+        if path.is_file():
+            fmt = path.suffix.lstrip(".").lower() or "png"
+            return path.read_bytes(), fmt, path
 
     if chunk.figure_s3_key:
         from aws_rag.aws import s3_client
@@ -465,8 +457,8 @@ def _figure_image_bytes(chunk: Any) -> tuple[bytes, str, Path | None]:
         return data, ext, None
 
     raise ValueError(
-        f"chunk {chunk.id} has no figure_image_path or figure_s3_key — "
-        f"nothing to fetch."
+        f"chunk {chunk.id} has no usable figure source — "
+        f"figure_image_path is missing locally and figure_s3_key is unset."
     )
 
 
