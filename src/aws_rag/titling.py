@@ -131,12 +131,34 @@ def infer_and_backfill_title(
     and records `title_inferred: true` in the `doc_metadata` sidecar
     attributes. Returns the inferred title, or None if no title could be
     inferred (in which case nothing is written).
+
+    Two extra hints captured at ingest time (`doc_metadata.attributes`,
+    see `ingest --infer-title`/the Docling path) are passed alongside the
+    first-page text when present, since cover pages are often mostly
+    imagery and leave the model with very little to go on:
+
+    - `running_header`: text repeated at the top of every page — often
+      carries the title even when the cover page itself doesn't.
+    - `pdf_meta_title`: the PDF's own embedded `/Title` + `/Subject`
+      metadata — publishers sometimes split the real title across these
+      two fields (e.g. Title="Programmer's Guide", Subject="CC Linux"),
+      information Docling never sees since it isn't page content.
     """
-    from aws_rag.store.metadata import set_metadata
+    from aws_rag.store.metadata import get_metadata, set_metadata
 
     text = _first_page_text(conn, doc_id)
     if not text:
         return None
+
+    meta = get_metadata(conn, doc_id)
+    attributes = meta.attributes if meta else {}
+    hints = []
+    if attributes.get("running_header"):
+        hints.append(f"Running page header (appears on every page): {attributes['running_header']}")
+    if attributes.get("pdf_meta_title"):
+        hints.append(f"PDF embedded title metadata: {attributes['pdf_meta_title']}")
+    if hints:
+        text = "\n".join(hints) + "\n\n" + text
 
     inferer = inferer or TitleInferer()
     title = inferer.infer(text)

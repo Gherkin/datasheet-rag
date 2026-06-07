@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +52,31 @@ def is_native_pdf(pdf_path: Path, sample_pages: int = 5) -> bool:
         total_chars += len(doc[i].get_text().strip())
     doc.close()
     return total_chars > _NATIVE_CHAR_THRESHOLD
+
+
+def _pdf_embedded_title(pdf_path: Path) -> str:
+    """Combine the PDF's embedded ``/Title`` and ``/Subject`` metadata, if any.
+
+    Some publishers split a document's real name across these two fields
+    (e.g. Title="Programmer's Guide", Subject="CC Linux") — Docling never
+    sees this, since it isn't part of the rendered page content. Returned
+    as a single hint string, or "" if neither field is usable.
+    """
+    try:
+        import fitz  # pymupdf
+
+        with fitz.open(str(pdf_path)) as doc:
+            meta = doc.metadata or {}
+    except Exception:
+        return ""
+
+    title = (meta.get("title") or "").strip()
+    subject = (meta.get("subject") or "").strip()
+    parts = [p for p in (subject, title) if p and p.lower() not in ("untitled", "")]
+    # Drop an exact duplicate (Subject == Title) rather than repeating it.
+    if len(parts) == 2 and parts[0].lower() == parts[1].lower():
+        parts = parts[:1]
+    return " ".join(parts)
 
 
 def content_hash(pdf_path: Path) -> str:
@@ -117,6 +143,7 @@ def convert_pdf(
     regions = _build_figure_regions(doc)
     skip_figure_ids, regions = _dedup_repeating_figures(regions, pdf_path, len(doc.pages))
     outline = _build_outline(doc, doc_id=doc_id, skip_figure_ids=skip_figure_ids)
+    outline.pdf_meta_title = _pdf_embedded_title(pdf_path)
     return outline, regions
 
 
@@ -222,6 +249,7 @@ def _build_outline(
         pass
 
     doc_title = ""
+    header_texts: Counter[str] = Counter()
     sections: list[DocumentSection] = []
     current_section: DocumentSection | None = None
     section_stack: list[DocumentSection] = []
@@ -247,6 +275,10 @@ def _build_outline(
             continue  # do not add caption as a content element
 
         if label in _SKIP:
+            if label == DocItemLabel.PAGE_HEADER:
+                text = _clean_text(getattr(item, "text", ""))
+                if text:
+                    header_texts[text] += 1
             continue
 
         page_no, raw_bbox = _item_prov(item)
@@ -376,10 +408,17 @@ def _build_outline(
     _flush(section_stack, sections)
     sections = _filter_toc_sections(sections)
 
+    running_header = ""
+    if header_texts:
+        text, count = header_texts.most_common(1)[0]
+        if count >= 2:
+            running_header = text
+
     return DocumentOutline(
         title=doc_title,
         doc_id=doc_id,
         total_pages=len(doc.pages),
+        running_header=running_header,
         sections=sections,
     )
 

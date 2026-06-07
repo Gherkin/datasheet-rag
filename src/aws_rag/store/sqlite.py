@@ -356,6 +356,17 @@ def get_doc_titles(conn: sqlite3.Connection) -> dict[str, str]:
     return {row["doc_id"]: row["doc_title"] for row in rows}
 
 
+def set_doc_title(conn: sqlite3.Connection, doc_id: str, title: str) -> int:
+    """Overwrite ``doc_title`` on every chunk row for *doc_id*.
+
+    Returns the number of rows updated. Caller is responsible for committing.
+    """
+    cur = conn.execute(
+        "UPDATE chunks SET doc_title = ? WHERE doc_id = ?", (title, doc_id)
+    )
+    return cur.rowcount
+
+
 def resolve_doc_id(conn: sqlite3.Connection, doc_id: str) -> str:
     """Resolve a possibly-abbreviated doc_id (à la `git` short SHAs) to its full form.
 

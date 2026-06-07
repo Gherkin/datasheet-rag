@@ -282,6 +282,16 @@ blank (`—` in `rag list`) or a generic heading like "Contents" or
 - `rag ingest --infer-title` runs the same inference inline for a freshly
   ingested document if it comes out of chunking with no usable title — opt-in
   since it costs one extra LLM call per document.
+- Cover pages are often mostly imagery, leaving the model little to read.
+  Two extra hints are captured at Docling-ingest time and fed to the model
+  alongside the first-page text when present (`doc_metadata.attributes`):
+  `running_header` (text repeated at the top of every page) and
+  `pdf_meta_title` (the PDF's own embedded `/Title` + `/Subject` metadata —
+  publishers sometimes split the real title across the two, e.g.
+  Title="Programmer's Guide", Subject="CC Linux", which Docling never sees
+  since it isn't page content).
+- `rag metadata set <doc_id> --title "..."` overrides `doc_title` directly
+  for the rare case the inferred/extracted signals still aren't enough.
 
 ### Switch MACRO summaries from extractive to abstractive (pending eval)
 

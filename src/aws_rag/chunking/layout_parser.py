@@ -147,6 +147,8 @@ class DocumentOutline:
     title: str = ""
     doc_id: str = ""
     total_pages: int = 0
+    running_header: str = ""
+    pdf_meta_title: str = ""
     sections: list[DocumentSection] = field(default_factory=list)
 
     @property

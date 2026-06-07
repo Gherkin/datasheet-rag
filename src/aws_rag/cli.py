@@ -1039,6 +1039,8 @@ def ingest(
         console.print(f"  doc_id = [cyan]{did}[/]")
 
         chunks_path = settings.output_dir / f"{did}_chunks.json"
+        running_header = ""
+        pdf_meta_title = ""
         if chunks_path.exists() and not force:
             _step("Multi-scale chunking")
             console.print(f"  [yellow]Resuming — loading cached chunk graph[/] → [cyan]{chunks_path}[/]")
@@ -1053,6 +1055,8 @@ def ingest(
         else:
             _step("Docling layout analysis")
             outline, figure_regions = convert_pdf(pdf_path, doc_id=did, accurate_tables=accurate_tables)
+            running_header = outline.running_header
+            pdf_meta_title = outline.pdf_meta_title
             summary = outline.summary()
             console.print(
                 f"  {summary['top_level_sections']} chapters, "
@@ -1266,6 +1270,17 @@ def ingest(
             conn.commit()
             console.print("  Metadata sidecar saved.")
 
+        title_hints = {}
+        if running_header:
+            title_hints["running_header"] = running_header
+        if pdf_meta_title:
+            title_hints["pdf_meta_title"] = pdf_meta_title
+        if title_hints:
+            set_metadata(conn, did, attributes=title_hints)
+            conn.commit()
+            for key, value in title_hints.items():
+                console.print(f"  {key} captured: [dim]{value!r}[/]")
+
         if infer_title:
             current_title = get_doc_titles(conn).get(did)
             if current_title in (None, "", "—"):
@@ -1299,6 +1314,8 @@ def metadata() -> None:
 
 @metadata.command("set")
 @click.argument("doc_id", type=str)
+@click.option("--title", "doc_title", default=None,
+              help="Override doc_title on every chunk row (manual title fix).")
 @click.option("--project-id", default=None)
 @click.option("--group", "group_name", default=None)
 @click.option("--mpn", default=None, help="Manufacturer part number, e.g. STM32H743VIT6.")
@@ -1312,6 +1329,7 @@ def metadata() -> None:
               help="Propagate project_id and group_name into the chunks table.")
 def metadata_set(
     doc_id: str,
+    doc_title: str | None,
     project_id: str | None,
     group_name: str | None,
     mpn: str | None,
@@ -1323,12 +1341,17 @@ def metadata_set(
     apply_to_chunks: bool,
 ) -> None:
     """Upsert document metadata. Only fields you pass are updated."""
-    from aws_rag.store import apply_metadata_to_chunks, connect, set_metadata
+    from aws_rag.store import apply_metadata_to_chunks, connect, set_doc_title, set_metadata
 
     settings = get_settings()
     target = db_path or settings.sqlite_db_path
     conn = connect(target)
     doc_id = _resolve_doc_id(conn, doc_id)
+
+    if doc_title is not None:
+        updated = set_doc_title(conn, doc_id, doc_title)
+        conn.commit()
+        console.print(f"[green]Title set[/] on {updated} chunk rows: {doc_title!r}")
 
     meta = set_metadata(
         conn, doc_id,
