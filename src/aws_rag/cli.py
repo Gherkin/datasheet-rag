@@ -1821,12 +1821,17 @@ def eval_run(
 @click.option("-k", "top_k", default=5, type=int, help="Headline k for the comparison.")
 @click.option("--trace", "trace_path", type=click.Path(path_type=Path), default=None)
 @click.option("--json-out", type=click.Path(path_type=Path), default=None)
-@click.option("--index-ablation", type=click.Choice(["context-vs-raw", "figure-desc"]),
+@click.option("--index-ablation",
+              type=click.Choice(["context-vs-raw", "figure-desc", "macro-summarizer"]),
               default=None, help="Heavy re-embedding ablation (incurs Bedrock cost).")
 @click.option("--variant-db", type=click.Path(path_type=Path),
               default=Path("test-project/output/rag-variant.sqlite"),
               help="Where to build the variant store for an index ablation.")
 @click.option("--limit", default=None, type=int, help="Cap chunks re-embedded (index ablation).")
+@click.option("--doc-id", default=None,
+              help="Document to re-summarize (required for --index-ablation macro-summarizer).")
+@click.option("--summarizer-model", default="anthropic.claude-3-haiku-20240307-v1:0",
+              help="Bedrock model id for the macro-summarizer ablation.")
 @click.option("--verbose/--quiet", default=True)
 def eval_ablate(
     db_path: Path | None,
@@ -1837,11 +1842,14 @@ def eval_ablate(
     index_ablation: str | None,
     variant_db: Path,
     limit: int | None,
+    doc_id: str | None,
+    summarizer_model: str,
     verbose: bool,
 ) -> None:
     """Run the ablation matrix and print which concepts move the needle."""
     from aws_rag.embedding import BedrockEmbedder
     from aws_rag.eval.ablation import (
+        build_macro_summarizer_variant_store,
         build_variant_store,
         default_matrix,
         run_matrix,
@@ -1862,6 +1870,54 @@ def eval_ablate(
         )
         conn.close()
         _render_matrix_table(reports, headline_k=top_k)
+        if json_out:
+            _dump_reports_json(reports, json_out)
+        return
+
+    if index_ablation == "macro-summarizer":
+        if not doc_id:
+            raise click.ClickException(
+                "--index-ablation macro-summarizer requires --doc-id "
+                "(it re-summarizes one document's chapters with Bedrock Claude)."
+            )
+        from aws_rag.chunking.summarizer import AbstractiveSummarizer
+        from aws_rag.config import get_settings as _get_settings
+
+        console.print(
+            f"[yellow]Index ablation[/] 'macro-summarizer': re-summarizing "
+            f"{doc_id} chapters abstractively (model={summarizer_model}) "
+            f"and re-embedding — this calls Bedrock Claude per chapter."
+        )
+        summarizer = AbstractiveSummarizer(
+            model_id=summarizer_model, region=_get_settings().aws_region,
+        )
+        variant_conn = build_macro_summarizer_variant_store(
+            conn, variant_db, doc_id, summarizer, embedder, verbose=verbose,
+        )
+
+        # The variant store only contains doc_id's chunks (by design — see
+        # build_macro_summarizer_variant_store), so items targeting other
+        # docs would score 0 by construction. Scope the eval set to match.
+        scoped_set = EvalSet(items=[i for i in eval_set.items if i.doc_id == doc_id])
+
+        base_cfg = RunConfig(mode="hybrid", k=top_k, level="macro", label="baseline (extractive macro)")
+        var_cfg = RunConfig(mode="hybrid", k=top_k, level="macro", label="variant (abstractive macro)")
+
+        base_report = run_eval(conn, scoped_set, base_cfg, embedder=embedder, trace_path=trace_path)
+        var_report = run_eval(variant_conn, scoped_set, var_cfg, embedder=embedder, trace_path=trace_path)
+        conn.close()
+        variant_conn.close()
+
+        reports = [base_report, var_report]
+        _render_matrix_table(reports, headline_k=top_k)
+        stats = summarizer.stats
+        console.print(
+            f"\n[bold]Cost/latency (abstractive macro re-summarization):[/] "
+            f"{stats.calls} Bedrock calls over {stats.chapters} chapters "
+            f"({stats.avg_calls_per_chapter:.1f} calls/chapter, "
+            f"{stats.avg_latency_ms_per_chapter / 1000:.1f} s/chapter, "
+            f"{stats.total_latency_ms / 1000:.1f} s total)"
+        )
         if json_out:
             _dump_reports_json(reports, json_out)
         return

@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import json
 import re
+import time
+from dataclasses import dataclass, field
 from typing import Any
 
 from rich.console import Console
@@ -213,6 +215,30 @@ def _truncate_word_boundary(text: str, max_chars: int) -> str:
 # ---------------------------------------------------------------------------
 
 
+@dataclass
+class SummarizerStats:
+    """Cost/latency tally for one ``summarize_graph`` run.
+
+    Lets the eval answer "how many extra Bedrock calls per chapter, and
+    what's the latency budget" without instrumenting Bedrock itself.
+    """
+
+    calls: int = 0
+    total_latency_ms: float = 0.0
+    input_chars: int = 0
+    output_chars: int = 0
+    chapters: int = 0
+    per_chapter_calls: list[int] = field(default_factory=list)
+
+    @property
+    def avg_calls_per_chapter(self) -> float:
+        return self.calls / self.chapters if self.chapters else 0.0
+
+    @property
+    def avg_latency_ms_per_chapter(self) -> float:
+        return self.total_latency_ms / self.chapters if self.chapters else 0.0
+
+
 class AbstractiveSummarizer:
     """Bottom-up LLM-based summarizer using Bedrock Claude.
 
@@ -236,6 +262,7 @@ class AbstractiveSummarizer:
         self.macro_summary_max_tokens = macro_summary_max_tokens
         self.region = region
         self._client: Any = None
+        self.stats = SummarizerStats()
 
     def _get_client(self) -> Any:
         if self._client is None:
@@ -244,7 +271,12 @@ class AbstractiveSummarizer:
         return self._client
 
     def _invoke(self, prompt: str, max_tokens: int) -> str:
-        """Call Bedrock Claude and return the response text."""
+        """Call Bedrock Claude and return the response text.
+
+        Tallies call count, latency, and char volume into ``self.stats`` —
+        the substrate for the cost/latency side of the extractive-vs-
+        abstractive eval (see README "Switch MACRO summaries…" TODO).
+        """
         client = self._get_client()
 
         body = json.dumps({
@@ -268,15 +300,24 @@ class AbstractiveSummarizer:
             "temperature": 0.0,
         })
 
+        t0 = time.perf_counter()
         response = client.invoke_model(
             modelId=self.model_id,
             body=body,
             contentType="application/json",
             accept="application/json",
         )
+        latency_ms = (time.perf_counter() - t0) * 1000.0
 
         result = json.loads(response["body"].read())
-        return result["content"][0]["text"].strip()
+        text = result["content"][0]["text"].strip()
+
+        self.stats.calls += 1
+        self.stats.total_latency_ms += latency_ms
+        self.stats.input_chars += len(prompt)
+        self.stats.output_chars += len(text)
+
+        return text
 
     def summarize_graph(self, graph: ChunkGraph) -> ChunkGraph:
         """Fill in MACRO chunk text via multi-pass LLM summarization."""
@@ -287,6 +328,8 @@ class AbstractiveSummarizer:
             if not meso_children:
                 continue
 
+            calls_before = self.stats.calls
+            self.stats.chapters += 1
             meso_summaries: list[tuple[str, float]] = []
 
             for meso in meso_children:
@@ -340,6 +383,8 @@ class AbstractiveSummarizer:
             macro.text = macro_text
             macro.token_count = len(macro_text) // 4
             macro.context_text = build_macro_context(macro, graph)
+
+            self.stats.per_chapter_calls.append(self.stats.calls - calls_before)
 
         return graph
 
@@ -425,6 +470,11 @@ def _macro_summary_prompt(
         f"you do not have access to the original document text, only these summaries. "
         f"Higher-weight sections are more information-dense.\n\n"
         f"{summaries_text}\n\n"
+        f"Open by stating what is DISTINCT or UNIQUE about this chapter — "
+        f"the specific topic, procedure, or specification it covers — not by "
+        f"restating the document title or device family (the reader already "
+        f"knows what document this is; your job is to differentiate this "
+        f"chapter from the others). "
         f"Describe what this chapter contains in 4-8 sentences. "
         f"If the chapter is short, a short accurate description is correct — do not pad. "
         f"Only use facts present in the section descriptions above. "

@@ -287,12 +287,12 @@ toward the kept chunks and away from the dropped ones.
   - In `hybrid_search`, a steered vector only affects the KNN branch; the BM25
     branch still needs text.
 
-### Switch MACRO summaries from extractive to abstractive (pending eval)
+### Switch MACRO summaries from extractive to abstractive (evaluated — not switching yet)
 
 The chunking pipeline defaults to the **extractive** summarizer for MACRO
 (chapter) chunks, and the main ingest path hardcodes it — the **abstractive**
-(Bedrock Claude) summarizer is currently opt-in only via
-`aws-rag chunk --summarizer abstractive`.
+(Bedrock Claude) summarizer is opt-in only via `aws-rag chunk --summarizer
+abstractive`.
 
 Extractive is fast and free but crude: it concatenates the *leading* sentences
 of the most heavily content-weighted blocks and hard-truncates to a char
@@ -301,17 +301,43 @@ layout-type weight only), so a section's key fact can be lost to truncation,
 and the output reads as fragments rather than a real description. Abstractive
 produces purpose-written descriptions tuned for semantic search.
 
-- **TODO:** make abstractive the default for MACRO summaries — but only after
-  an eval comparing the two on retrieval quality (does the abstractive macro
-  actually surface chapters better?) against its cost (Bedrock calls per
-  chapter, latency at ingest).
-- **Open questions before switching:**
-  - Does abstractive measurably improve MACRO-level retrieval / `zoom_out`
-    relevance, or is the extractive macro "good enough" as a search target?
-  - Cost/latency budget at ingest time — how many extra Claude calls per
-    document, and is that acceptable for the corpus size?
-  - If we switch the default, wire the choice through the main ingest path
-    (currently hardcoded), not just the standalone `chunk` command.
+**Eval result (2026-06-07):** ran `rag eval ablate --index-ablation
+macro-summarizer` (Claude Haiku 4.5, re-embedded, queried at `hybrid @macro`)
+on two docs with very different structures:
+
+| doc | extractive MRR/nDCG | abstractive MRR/nDCG | `synthesis` ranks (extractive → abstractive) |
+|---|---|---|---|
+| MAX40025 datasheet (13 chapters, all describing the same 2-3 near-identical comparator variants) | 0.650 / 0.635 | 0.806 / 0.720 | 1,1,1 → 1,2,1 |
+| CC Linux Software Guide (9 chapters, each on a distinct subsystem) | 0.812 / 0.744 | 1.000 / 0.851 | 1,1,4,1 → 1,1,1,1 |
+
+Abstractive is a clean win on the heterogeneous guide (one query goes from
+rank 4 to rank 1, zero regressions) but causes a small `synthesis`-category
+regression on the datasheet (one query rank 1 → 2). Root cause: when every
+chapter genuinely describes the same handful of devices, the LLM tends to
+open each summary with similar device-level framing, which raises
+inter-chapter similarity and slightly hurts discriminability — a structural
+property of single-product-family datasheets that prompt tuning only
+partially escapes (tried two opposing tunings; both plateaued around the same
+MRR). One line in `_macro_summary_prompt` ("open with what's distinct about
+this chapter") recovered about half the regression at no cost and is now in
+place.
+
+Cost/latency scales with how much each chapter has to say: ~8-10 s/chapter on
+the sparse datasheet vs. ~33-36 s/chapter on the content-rich guide — a real
+addition to ingest latency worth weighing once the quality question is
+settled.
+
+- **Verdict: don't flip the default yet.** The quality delta is
+  document-structure-dependent — abstractive clearly wins on documents with
+  long, topically-distinct sections, but can mildly regress single-product
+  datasheets where every chapter overlaps. The golden set (3 + 4 `synthesis`
+  items across 2 docs) is too small to set policy on; growing it — especially
+  with more single-product datasheets — would clarify whether that regression
+  generalizes or is a one-off.
+- Wiring abstractive through the main ingest path (currently hardcoded to
+  `summarizer_mode="extractive"` at the two `ingest` call sites in `cli.py`)
+  is a 10-minute change whenever we do flip the default — not worth doing
+  speculatively.
 
 ## AWS Services Used
 
