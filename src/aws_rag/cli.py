@@ -133,30 +133,54 @@ def analyze(target: str, mode: str, wait: bool, output: Path | None) -> None:
 
 @cli.command("list")
 @click.option("--db", "db_path", type=click.Path(path_type=Path), default=None)
-def list_docs(db_path: Path | None) -> None:
-    """List uploaded documents."""
-    from aws_rag.storage import list_documents
-    from aws_rag.store import connect, get_doc_titles
+@click.option("--s3", "show_s3", is_flag=True,
+              help="List raw S3 uploads instead (debug — includes documents not yet ingested).")
+def list_docs(db_path: Path | None, show_s3: bool) -> None:
+    """List ingested documents (searchable in the store)."""
+    if show_s3:
+        from aws_rag.storage import list_documents
 
-    docs = list_documents()
-    if not docs:
-        console.print("[yellow]No documents found.[/]")
+        docs = list_documents()
+        if not docs:
+            console.print("[yellow]No documents found in S3.[/]")
+            return
+
+        table = Table(title="S3 Uploads")
+        table.add_column("doc_id", style="cyan")
+        table.add_column("S3 Prefix")
+        for doc in docs:
+            table.add_row(doc["doc_id"], doc["prefix"])
+        console.print(table)
         return
+
+    from aws_rag.store import connect, get_ingested_docs
 
     settings = get_settings()
     target = db_path or settings.sqlite_db_path
     conn = connect(target)
-    titles = get_doc_titles(conn)
+    docs = get_ingested_docs(conn)
     conn.close()
 
-    table = Table(title="Uploaded Documents")
+    if not docs:
+        console.print("[yellow]No ingested documents found.[/] Run [cyan]rag ingest[/] first "
+                      "(or pass --s3 to see raw uploads).")
+        return
+
+    table = Table(title="Ingested Documents")
     table.add_column("doc_id", style="cyan")
     table.add_column("title")
-    table.add_column("S3 Prefix")
+    table.add_column("chunks", justify="right")
+    table.add_column("pages", justify="right")
+    table.add_column("ingested")
 
     for doc in docs:
-        doc_id = doc["doc_id"]
-        table.add_row(doc_id, titles.get(doc_id, "—"), doc["prefix"])
+        table.add_row(
+            doc["doc_id"],
+            doc["doc_title"],
+            str(doc["chunk_count"]),
+            str(doc["page_count"]) if doc["page_count"] is not None else "—",
+            doc["ingested_at"] or "—",
+        )
 
     console.print(table)
 

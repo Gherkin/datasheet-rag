@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Iterable, Mapping, Sequence
+from typing import Any
 
 import numpy as np
 
@@ -353,6 +354,56 @@ def get_doc_titles(conn: sqlite3.Connection) -> dict[str, str]:
         "SELECT doc_id, doc_title FROM chunks WHERE doc_title IS NOT NULL GROUP BY doc_id"
     ).fetchall()
     return {row["doc_id"]: row["doc_title"] for row in rows}
+
+
+def get_ingested_docs(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Return one summary row per ingested document.
+
+    A document only appears here once it has actually been chunked and
+    embedded into the store — unlike S3, which lists every upload regardless
+    of ingestion status.
+    """
+    rows = conn.execute(
+        """
+        SELECT doc_id,
+               COUNT(*) AS chunk_count,
+               MIN(created_at) AS ingested_at
+          FROM chunks
+         GROUP BY doc_id
+         ORDER BY doc_id
+        """
+    ).fetchall()
+
+    titles = get_doc_titles(conn)
+    docs: list[dict[str, Any]] = []
+    for row in rows:
+        doc_id = row["doc_id"]
+        page_row = conn.execute(
+            """
+            SELECT page_numbers FROM chunks
+             WHERE doc_id = ? AND page_numbers IS NOT NULL AND page_numbers != '[]'
+             ORDER BY rowid DESC
+             LIMIT 1
+            """,
+            (doc_id,),
+        ).fetchone()
+        page_count: int | None = None
+        if page_row:
+            try:
+                pages = json.loads(page_row["page_numbers"])
+                if pages:
+                    page_count = max(pages)
+            except (ValueError, TypeError):
+                pass
+
+        docs.append({
+            "doc_id": doc_id,
+            "doc_title": titles.get(doc_id, "—"),
+            "chunk_count": row["chunk_count"],
+            "page_count": page_count,
+            "ingested_at": row["ingested_at"],
+        })
+    return docs
 
 
 def count_chunks(
