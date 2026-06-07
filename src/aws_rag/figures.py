@@ -22,11 +22,10 @@ console = Console()
 
 @dataclass
 class FigureRegion:
-    """A detected figure region from Textract LAYOUT_FIGURE blocks."""
+    """A detected figure/formula region with normalised bounding box (0..1)."""
 
     block_id: str
     page: int  # 1-indexed
-    # Textract bounding box (normalised 0..1)
     left: float
     top: float
     width: float
@@ -35,6 +34,8 @@ class FigureRegion:
     caption: str = ""
     preceding_text: str = ""
     section_header: str = ""
+    # "figure" or "formula" — downstream can treat them differently
+    kind: str = "figure"
 
 
 @dataclass
@@ -263,18 +264,25 @@ def crop_figure(
     region: FigureRegion,
     *,
     padding_pct: float = 0.02,
+    max_right: float = 1.0,
+    min_left: float = 0.0,
+    max_bottom: float = 1.0,
+    min_top: float = 0.0,
 ) -> Image.Image:
     """Crop a figure region from a rendered page image.
 
     Textract bounding boxes are normalised (0..1), so we scale to pixel
     coordinates. Adds a small padding to avoid cutting off edges.
+
+    max_right / min_left / max_bottom / min_top (all normalised) cap the
+    padded crop edges so they don't bleed into adjacent figures.
     """
     w, h = page_image.size
 
-    left = max(0, int((region.left - padding_pct) * w))
-    top = max(0, int((region.top - padding_pct) * h))
-    right = min(w, int((region.left + region.width + padding_pct) * w))
-    bottom = min(h, int((region.top + region.height + padding_pct) * h))
+    left = max(0, int(max(min_left, region.left - padding_pct) * w))
+    top = max(0, int(max(min_top, region.top - padding_pct) * h))
+    right = min(w, int(min(max_right, region.left + region.width + padding_pct) * w))
+    bottom = min(h, int(min(max_bottom, region.top + region.height + padding_pct) * h))
 
     return page_image.crop((left, top, right, bottom))
 
@@ -282,6 +290,154 @@ def crop_figure(
 # ---------------------------------------------------------------------------
 # Full extraction pipeline
 # ---------------------------------------------------------------------------
+
+
+def _compute_adjacent_crop_caps(
+    regions: list[FigureRegion],
+    padding_pct: float,
+    vert_overlap_thresh: float = 0.30,
+) -> dict[str, dict[str, float]]:
+    """Return per-region crop-edge caps that prevent padding from bleeding into neighbours.
+
+    The bleed problem is NOT about bbox overlap — docling's bboxes for adjacent-
+    column figures typically have a small gap (~1 %) that is narrower than the
+    default padding (2 %). crop_figure then adds padding on both sides, bridging
+    the gap and capturing a sliver of the neighbouring figure.
+
+    Fix: for each pair of figures on the same page with significant vertical
+    co-occurrence, cap the right-edge crop of the left figure at the right
+    figure's left bbox edge, and the left-edge crop of the right figure at the
+    left figure's right bbox edge. The bboxes themselves are never modified.
+
+    Cases:
+    - Gap >= padding_pct: padding fits comfortably — no cap needed.
+    - 0 <= gap < padding_pct: cap so padding stops exactly at neighbour's edge.
+    - gap < 0 (actual bbox overlap): skip; don't guess, leave it to the vision model.
+
+    Returns {block_id: {'max_right': x, 'min_left': x}} for affected regions.
+    """
+    from collections import defaultdict
+
+    by_page: dict[int, list[FigureRegion]] = defaultdict(list)
+    for r in regions:
+        by_page[r.page].append(r)
+
+    caps: dict[str, dict[str, float]] = {}
+
+    for page_regions in by_page.values():
+        if len(page_regions) < 2:
+            continue
+
+        for a in page_regions:
+            a_right = a.left + a.width
+            for b in page_regions:
+                if a is b or a.left >= b.left:
+                    continue  # only A-left-of-B pairs
+
+                # Require significant vertical co-occurrence
+                a_top, a_bot = a.top, a.top + a.height
+                b_top, b_bot = b.top, b.top + b.height
+                vert_overlap = max(0.0, min(a_bot, b_bot) - max(a_top, b_top))
+                min_h = min(a.height, b.height)
+                if min_h <= 0 or vert_overlap / min_h < vert_overlap_thresh:
+                    continue
+
+                b_left = b.left
+                gap = b_left - a_right
+
+                if gap < 0:
+                    # Actual bbox overlap — we can't safely pick a split point;
+                    # leave both untouched and let the vision model handle the sliver.
+                    console.print(
+                        f"[dim]Column bleed:[/] page {a.page} {a.block_id}↔{b.block_id} "
+                        f"bbox overlap {-gap:.3f} — leaving for vision model"
+                    )
+                    continue
+
+                if gap >= padding_pct:
+                    continue  # padding fits in the gap, no action needed
+
+                # Gap exists but is smaller than padding — cap at the neighbour's edge.
+                # This is safe: we only prevent over-padding, never cut actual content.
+                caps.setdefault(a.block_id, {})
+                caps[a.block_id]["max_right"] = min(
+                    caps[a.block_id].get("max_right", 1.0), b_left
+                )
+                caps.setdefault(b.block_id, {})
+                caps[b.block_id]["min_left"] = max(
+                    caps[b.block_id].get("min_left", 0.0), a_right
+                )
+                console.print(
+                    f"[yellow]Column cap:[/] page {a.page} "
+                    f"{a.block_id}↔{b.block_id} gap={gap:.4f} < padding {padding_pct:.3f}; "
+                    f"capping right at {b_left:.4f}, left at {a_right:.4f}"
+                )
+
+    return caps
+
+
+def extract_figures_from_regions(
+    pdf_path: Path,
+    regions: list[FigureRegion],
+    doc_id: str,
+    *,
+    output_dir: Path | None = None,
+    dpi: int = 300,
+    image_format: str = "png",
+    padding_pct: float = 0.02,
+) -> FigureManifest:
+    """Crop and save figure regions to disk. Regions may come from Textract or Docling."""
+    if output_dir is None:
+        output_dir = Path("output").resolve() / "figures" / doc_id
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if not regions:
+        console.print("[yellow]No figures/formulas detected in this document.[/]")
+        return FigureManifest(doc_id=doc_id, source_pdf=str(pdf_path))
+
+    n_figs = sum(1 for r in regions if r.kind == "figure")
+    n_formulas = sum(1 for r in regions if r.kind == "formula")
+    console.print(
+        f"[blue]Found {len(regions)} regions[/] ({n_figs} figures, {n_formulas} formulas) "
+        f"across pages {sorted(set(r.page for r in regions))}"
+    )
+
+    needed_pages = sorted(set(r.page for r in regions))
+    page_images = render_pdf_pages(pdf_path, dpi=dpi, pages=needed_pages)
+
+    crop_caps = _compute_adjacent_crop_caps(regions, padding_pct)
+    if crop_caps:
+        console.print(f"[yellow]Column caps:[/] padding capped on {len(crop_caps)} regions")
+
+    manifest = FigureManifest(doc_id=doc_id, source_pdf=str(pdf_path))
+
+    for i, region in enumerate(track(regions, description="Cropping figures…")):
+        page_img = page_images.get(region.page)
+        if page_img is None:
+            console.print(f"[red]Warning:[/] page {region.page} not rendered, skipping")
+            continue
+
+        caps = crop_caps.get(region.block_id, {})
+        cropped = crop_figure(
+            page_img, region, padding_pct=padding_pct,
+            max_right=caps.get("max_right", 1.0),
+            min_left=caps.get("min_left", 0.0),
+        )
+        prefix = "formula" if region.kind == "formula" else "fig"
+        filename = f"p{region.page:03d}_{prefix}{i:03d}.{image_format}"
+        image_path = output_dir / filename
+        cropped.save(str(image_path), format=image_format.upper())
+
+        manifest.figures.append(ExtractedFigure(
+            region=region,
+            image_path=image_path,
+            width_px=cropped.width,
+            height_px=cropped.height,
+        ))
+
+    console.print(f"[green]Extracted {len(manifest.figures)} regions[/] → {output_dir}")
+    return manifest
 
 
 def extract_figures(
@@ -294,58 +450,13 @@ def extract_figures(
     image_format: str = "png",
     padding_pct: float = 0.02,
 ) -> FigureManifest:
-    """Extract all figures from a PDF using Textract layout blocks.
-
-    1. Find LAYOUT_FIGURE regions in the blocks
-    2. Render only the necessary PDF pages
-    3. Crop each figure with padding
-    4. Save to output_dir and build manifest
-
-    Returns a FigureManifest with paths and metadata for each figure.
-    """
-    if output_dir is None:
-        output_dir = Path("output").resolve() / "figures" / doc_id
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    # Step 1: Find figure regions
+    """Extract figures from a PDF using Textract layout blocks (Textract path)."""
     regions = find_figure_regions(blocks)
-    if not regions:
-        console.print("[yellow]No figures detected in this document.[/]")
-        return FigureManifest(doc_id=doc_id, source_pdf=str(pdf_path))
-
-    console.print(f"[blue]Found {len(regions)} figures[/] across pages "
-                  f"{sorted(set(r.page for r in regions))}")
-
-    # Step 2: Render only the pages that contain figures
-    needed_pages = sorted(set(r.page for r in regions))
-    page_images = render_pdf_pages(pdf_path, dpi=dpi, pages=needed_pages)
-
-    # Step 3: Crop and save each figure
-    manifest = FigureManifest(doc_id=doc_id, source_pdf=str(pdf_path))
-
-    for i, region in enumerate(track(regions, description="Cropping figures…")):
-        page_img = page_images.get(region.page)
-        if page_img is None:
-            console.print(f"[red]Warning:[/] page {region.page} not rendered, skipping figure")
-            continue
-
-        cropped = crop_figure(page_img, region, padding_pct=padding_pct)
-
-        filename = f"p{region.page:03d}_fig{i:03d}.{image_format}"
-        image_path = output_dir / filename
-        cropped.save(str(image_path), format=image_format.upper())
-
-        extracted = ExtractedFigure(
-            region=region,
-            image_path=image_path,
-            width_px=cropped.width,
-            height_px=cropped.height,
-        )
-        manifest.figures.append(extracted)
-
-    console.print(f"[green]Extracted {len(manifest.figures)} figures[/] → {output_dir}")
-    return manifest
+    return extract_figures_from_regions(
+        pdf_path, regions, doc_id,
+        output_dir=output_dir, dpi=dpi,
+        image_format=image_format, padding_pct=padding_pct,
+    )
 
 
 # ---------------------------------------------------------------------------

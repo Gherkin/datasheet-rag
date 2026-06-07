@@ -23,6 +23,7 @@ class ElementType(str, Enum):
     TEXT = "text"
     TABLE = "table"
     FIGURE = "figure"
+    FORMULA = "formula"
     KEY_VALUE = "key_value"
     LIST = "list"
     HEADER = "header"
