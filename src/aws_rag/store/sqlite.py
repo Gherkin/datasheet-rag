@@ -356,6 +356,31 @@ def get_doc_titles(conn: sqlite3.Connection) -> dict[str, str]:
     return {row["doc_id"]: row["doc_title"] for row in rows}
 
 
+def resolve_doc_id(conn: sqlite3.Connection, doc_id: str) -> str:
+    """Resolve a possibly-abbreviated doc_id (à la `git` short SHAs) to its full form.
+
+    doc_ids are full SHA-256 content hashes (64 hex chars) — too long to
+    read or copy comfortably. Any unambiguous prefix that matches exactly
+    one ingested document resolves to that document's full doc_id.
+
+    Raises ``ValueError`` if the prefix matches zero or more than one document.
+    """
+    rows = conn.execute(
+        "SELECT DISTINCT doc_id FROM chunks WHERE doc_id LIKE ? || '%'",
+        (doc_id,),
+    ).fetchall()
+    matches = [row["doc_id"] for row in rows]
+
+    if len(matches) == 1:
+        return matches[0]
+    if not matches:
+        raise ValueError(f"No ingested document matches doc_id '{doc_id}'.")
+    raise ValueError(
+        f"doc_id '{doc_id}' is ambiguous — matches {len(matches)} documents: "
+        + ", ".join(m[:12] for m in matches)
+    )
+
+
 def get_ingested_docs(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     """Return one summary row per ingested document.
 

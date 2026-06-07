@@ -13,6 +13,21 @@ from aws_rag.config import get_settings
 
 console = Console()
 
+# doc_ids are full SHA-256 content hashes (64 hex chars). We display and
+# accept abbreviated forms — like `git log --oneline` short SHAs — and
+# resolve unambiguous prefixes to the full hash via `resolve_doc_id`.
+SHORT_DOC_ID_LEN = 12
+
+
+def _resolve_doc_id(conn, doc_id: str) -> str:
+    """CLI wrapper around `resolve_doc_id`: turns ambiguity/misses into ClickException."""
+    from aws_rag.store import resolve_doc_id
+
+    try:
+        return resolve_doc_id(conn, doc_id)
+    except ValueError as e:
+        raise click.ClickException(str(e)) from e
+
 
 @click.group()
 @click.option("--bucket", envvar="RAG_S3_BUCKET", default=None, help="Override S3 bucket name.")
@@ -175,7 +190,7 @@ def list_docs(db_path: Path | None, show_s3: bool) -> None:
 
     for doc in docs:
         table.add_row(
-            doc["doc_id"],
+            doc["doc_id"][:SHORT_DOC_ID_LEN],
             doc["doc_title"],
             str(doc["chunk_count"]),
             str(doc["page_count"]) if doc["page_count"] is not None else "—",
@@ -565,13 +580,15 @@ def search(
     target = db_path or settings.sqlite_db_path
     conn = connect(target)
 
+    resolved_doc_ids = [_resolve_doc_id(conn, d) for d in doc_ids]
+
     level_enum = None
     if level:
         level_enum = {"macro": ChunkLevel.MACRO, "meso": ChunkLevel.MESO,
                       "micro": ChunkLevel.MICRO}[level]
 
     filters = SearchFilters(
-        doc_ids=list(doc_ids) if doc_ids else None,
+        doc_ids=resolved_doc_ids if resolved_doc_ids else None,
         project_id=project_id,
         group_name=group_name,
         level=level_enum,
@@ -611,7 +628,7 @@ def search(
             str(i),
             f"{r.score:.4f}",
             r.chunk.level.name,
-            r.chunk.doc_id[:10],
+            r.chunk.doc_id[:SHORT_DOC_ID_LEN],
             (r.chunk.metadata.section_title or r.chunk.metadata.chapter_title or "")[:40],
             preview,
         )
@@ -643,6 +660,8 @@ def list_figures_cmd(
     settings = get_settings()
     target = db_path or settings.sqlite_db_path
     conn = connect(target)
+    if doc_id:
+        doc_id = _resolve_doc_id(conn, doc_id)
     figs = list_figure_chunks(conn, doc_id=doc_id, project_id=project_id)
     if missing_description_only:
         figs = [c for c in figs if not c.figure_description]
@@ -667,7 +686,7 @@ def list_figures_cmd(
         src = "local" if c.figure_image_path else ("s3" if c.figure_s3_key else "—")
         table.add_row(
             c.id[-14:],
-            c.doc_id[:10],
+            c.doc_id[:SHORT_DOC_ID_LEN],
             page,
             (c.metadata.section_title or "")[:30],
             (c.figure_caption or "")[:40],
@@ -726,6 +745,8 @@ def describe_figures_cmd(
     settings = get_settings()
     target = db_path or settings.sqlite_db_path
     conn = connect(target)
+    if doc_id:
+        doc_id = _resolve_doc_id(conn, doc_id)
 
     describer = FigureDescriber(model_id=model_id, verbose=verbose)
     console.print(
@@ -1173,6 +1194,7 @@ def metadata_set(
     settings = get_settings()
     target = db_path or settings.sqlite_db_path
     conn = connect(target)
+    doc_id = _resolve_doc_id(conn, doc_id)
 
     meta = set_metadata(
         conn, doc_id,
@@ -1203,6 +1225,7 @@ def metadata_get(doc_id: str, db_path: Path | None) -> None:
     settings = get_settings()
     target = db_path or settings.sqlite_db_path
     conn = connect(target)
+    doc_id = _resolve_doc_id(conn, doc_id)
     meta = get_metadata(conn, doc_id)
     if meta is None:
         console.print(f"[yellow]No metadata recorded for[/] {doc_id}")
@@ -1244,7 +1267,7 @@ def metadata_list(
 
     for d in docs:
         table.add_row(
-            d.doc_id[:14], d.project_id or "—",
+            d.doc_id[:SHORT_DOC_ID_LEN], d.project_id or "—",
             d.group_name or "—", d.mpn or "—",
             d.manufacturer or "—", d.subsystem or "—",
         )
@@ -1353,6 +1376,8 @@ def eval_generate(
 
     settings = get_settings()
     conn = connect(db_path or settings.sqlite_db_path)
+    if doc_id:
+        doc_id = _resolve_doc_id(conn, doc_id)
     eval_set = generate_golden_set(
         conn,
         per_category=per_category,
