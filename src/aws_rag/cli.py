@@ -759,13 +759,15 @@ def describe_figures_cmd(
 @click.option(
     "--backend",
     type=click.Choice(["auto", "docling", "textract"], case_sensitive=False),
-    default="auto",
+    default="docling",
     help=(
         "Layout extraction backend. "
-        "'auto' detects native vs scanned and routes accordingly: "
-        "Docling for native PDFs (fast, free, handles tables/formulas/figures), "
-        "Textract for scanned PDFs (OCR). "
-        "Override with 'docling' or 'textract' to force a specific backend."
+        "'docling' (default) handles native PDFs for free and fails verbosely "
+        "on scanned PDFs, telling you to pass --backend textract if you want "
+        "to pay for AWS OCR. "
+        "'auto' detects native vs scanned and silently routes scanned PDFs to "
+        "Textract. "
+        "'textract' forces AWS OCR for any PDF."
     ),
 )
 @click.option(
@@ -800,9 +802,10 @@ def ingest(
 ) -> None:
     """Full ingestion pipeline: analyse → figures → chunk → embed.
 
-    Automatically routes between Docling (native PDFs: free, fast, handles
-    tables/formulas/figures) and Textract (scanned PDFs: OCR via AWS).
-    Use --backend to override auto-detection.
+    Defaults to Docling (free, fast, handles tables/formulas/figures on
+    native PDFs) and fails verbosely on scanned PDFs rather than silently
+    incurring AWS Textract OCR costs. Pass --backend textract to OCR a
+    scanned PDF, or --backend auto to route automatically between the two.
     """
     import time
 
@@ -827,14 +830,23 @@ def ingest(
 
     # ── 1. Detect backend ────────────────────────────────────────────────────
     _step("Detect PDF type")
-    if backend == "auto":
+    if backend in ("auto", "docling"):
         from aws_rag.docling_parser import is_native_pdf
         native = is_native_pdf(pdf_path)
-        resolved_backend = "docling" if native else "textract"
-        console.print(
-            f"  {'Native PDF' if native else 'Scanned PDF'} detected → "
-            f"using [cyan]{resolved_backend}[/] backend"
-        )
+        if native:
+            resolved_backend = "docling"
+            console.print("  Native PDF detected → using [cyan]docling[/] backend")
+        elif backend == "auto":
+            resolved_backend = "textract"
+            console.print("  Scanned PDF detected → using [cyan]textract[/] backend")
+        else:
+            raise click.ClickException(
+                f"{pdf_path.name} looks like a scanned PDF — Docling needs a "
+                "native text layer and cannot OCR it.\n"
+                "  Re-run with --backend textract to use AWS Textract OCR "
+                "instead (this incurs AWS costs), or --backend auto to route "
+                "automatically based on PDF type."
+            )
     else:
         resolved_backend = backend
         console.print(f"  Backend forced to [cyan]{resolved_backend}[/]")

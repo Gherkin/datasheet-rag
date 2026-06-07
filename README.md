@@ -206,6 +206,17 @@ back scoped to that project unless the agent explicitly overrides
 
 ## Roadmap / Ideas
 
+### Formula extraction / description (not implemented)
+
+When Docling cannot extract LaTeX/MathML from a formula region, the chunk
+`text` falls back to a placeholder (`"[Formula]"`) and is effectively
+unsearchable until `describe-figures` runs on it.
+
+- **TODO:** teach the vision-LLM description step to output formulas as
+  structured plaintext (LaTeX or readable notation) rather than a prose
+  description, so formula chunks become searchable on their mathematical
+  content, not just a caption-level summary.
+
 ### Relevance-feedback navigation — "more like this" / "less like these" (not implemented)
 
 A future MCP tool that lets the agent refine a result set *by example* instead
