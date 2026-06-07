@@ -242,18 +242,6 @@ Re-run the generation step whenever subcommands or options change.
 
 ## Roadmap / Ideas
 
-### `rag list` should show ingested documents, not S3 uploads (not implemented)
-
-`rag list` currently queries S3 and shows every uploaded PDF, regardless of
-whether it has been chunked or embedded. This is misleading — a document that
-only exists in S3 is not searchable and is not meaningfully "in the RAG
-database".
-
-- **TODO:** rewrite `rag list` to read from the SQLite `chunks` table (distinct
-  `doc_id` values) rather than S3. A document should only appear once it has
-  been ingested. The S3 check could be kept as a separate `rag list --s3` flag
-  for debugging upload state.
-
 ### Formula extraction / description (not implemented)
 
 When Docling cannot extract LaTeX/MathML from a formula region, the chunk
@@ -298,33 +286,6 @@ toward the kept chunks and away from the dropped ones.
     corpus may help if results look off.
   - In `hybrid_search`, a steered vector only affects the KNN branch; the BM25
     branch still needs text.
-
-### AI-inferred document titles for untitled documents (implemented)
-
-Some documents come through ingestion without a useful `doc_title` — either
-blank (`—` in `rag list`) or a generic heading like "Contents" or
-"Disclaimer" that Docling picked up as the title.
-
-- `rag fix-titles` runs a small Bedrock Claude call (`aws_rag.titling`)
-  against each document's first page and backfills the inferred title onto
-  every chunk row, marking it `title_inferred: true` in the `doc_metadata`
-  sidecar (visible via `rag metadata get <doc_id>`).
-- Without `--doc-id`, it scans the whole store and only fixes documents whose
-  title is blank. Pass `--doc-id <id> --force` to replace a present-but-bad
-  title (e.g. "Contents").
-- `rag ingest --infer-title` runs the same inference inline for a freshly
-  ingested document if it comes out of chunking with no usable title — opt-in
-  since it costs one extra LLM call per document.
-- Cover pages are often mostly imagery, leaving the model little to read.
-  Two extra hints are captured at Docling-ingest time and fed to the model
-  alongside the first-page text when present (`doc_metadata.attributes`):
-  `running_header` (text repeated at the top of every page) and
-  `pdf_meta_title` (the PDF's own embedded `/Title` + `/Subject` metadata —
-  publishers sometimes split the real title across the two, e.g.
-  Title="Programmer's Guide", Subject="CC Linux", which Docling never sees
-  since it isn't page content).
-- `rag metadata set <doc_id> --title "..."` overrides `doc_title` directly
-  for the rare case the inferred/extracted signals still aren't enough.
 
 ### Switch MACRO summaries from extractive to abstractive (pending eval)
 
