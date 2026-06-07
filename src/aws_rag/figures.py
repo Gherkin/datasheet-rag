@@ -242,19 +242,30 @@ def render_pdf_pages(
     """Render PDF pages to PIL Images. Returns {page_number: Image}.
 
     Page numbers are 1-indexed to match Textract conventions.
+
+    Pages are rendered one at a time rather than as a single batch. On
+    documents where figures are scattered across thousands of pages,
+    rendering the whole min(pages)..max(pages) span in one
+    convert_from_path() call would materialise every page in that span as
+    an in-memory PIL Image simultaneously (~40 MB/page at 300 DPI) — for a
+    2,000+ page datasheet that is enough to exhaust system RAM and crash
+    the machine. Rendering page-by-page bounds memory to a single page and
+    gives per-page progress instead of one long, silent blocking call.
     """
-    console.print(f"[blue]Rendering PDF[/] at {dpi} DPI …")
+    if not pages:
+        console.print(f"[blue]Rendering PDF[/] at {dpi} DPI …")
+        images = convert_from_path(str(pdf_path), dpi=dpi)
+        result = {i + 1: img for i, img in enumerate(images)}
+        console.print(f"[green]Rendered[/] {len(result)} pages")
+        return result
 
-    kwargs: dict[str, Any] = {"dpi": dpi}
-    if pages:
-        # pdf2image uses 1-indexed pages
-        kwargs["first_page"] = min(pages)
-        kwargs["last_page"] = max(pages)
-
-    images = convert_from_path(str(pdf_path), **kwargs)
-
-    start_page = min(pages) if pages else 1
-    result = {start_page + i: img for i, img in enumerate(images)}
+    result: dict[int, Image.Image] = {}
+    for page in track(sorted(set(pages)), description=f"Rendering PDF at {dpi} DPI…"):
+        page_images = convert_from_path(
+            str(pdf_path), dpi=dpi, first_page=page, last_page=page
+        )
+        if page_images:
+            result[page] = page_images[0]
     console.print(f"[green]Rendered[/] {len(result)} pages")
     return result
 

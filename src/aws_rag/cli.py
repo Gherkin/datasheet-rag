@@ -1284,7 +1284,11 @@ def _ingest_one(
 
     # ── 2a. Docling path (native PDFs) ───────────────────────────────────────
     if resolved_backend == "docling":
+        import dataclasses
+
+        from aws_rag.chunking.layout_parser import DocumentOutline
         from aws_rag.docling_parser import content_hash, convert_pdf
+        from aws_rag.figures import FigureRegion
 
         did = doc_id or content_hash(pdf_path)
         console.print(f"  doc_id = [cyan]{did}[/]")
@@ -1308,7 +1312,30 @@ def _ingest_one(
             )
         else:
             _step("Docling layout analysis")
-            outline, figure_regions = convert_pdf(pdf_path, doc_id=did, accurate_tables=accurate_tables)
+            outline_path = settings.output_dir / f"{did}_outline.json"
+            if outline_path.exists() and not force:
+                console.print(
+                    f"  [yellow]Resuming — loading cached layout analysis[/] → [cyan]{outline_path}[/]"
+                )
+                with open(outline_path) as f:
+                    cached = json.load(f)
+                outline = DocumentOutline.from_dict(cached["outline"])
+                figure_regions = [FigureRegion(**r) for r in cached["figure_regions"]]
+            else:
+                outline, figure_regions = convert_pdf(
+                    pdf_path, doc_id=did, accurate_tables=accurate_tables
+                )
+                outline_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(outline_path, "w") as f:
+                    json.dump(
+                        {
+                            "outline": outline.to_dict(),
+                            "figure_regions": [dataclasses.asdict(r) for r in figure_regions],
+                        },
+                        f,
+                    )
+                console.print(f"  Layout analysis cached → [cyan]{outline_path}[/]")
+
             running_header = outline.running_header
             pdf_meta_title = outline.pdf_meta_title
             summary = outline.summary()

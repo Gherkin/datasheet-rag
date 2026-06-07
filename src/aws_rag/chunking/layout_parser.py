@@ -165,6 +165,31 @@ class DocumentOutline:
             _walk(s)
         return result
 
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a JSON-able dict (used to cache Docling's output —
+        layout analysis is the slowest step on large PDFs, so persisting its
+        result lets a crash during figure extraction or chunking resume
+        without re-running it)."""
+        return {
+            "title": self.title,
+            "doc_id": self.doc_id,
+            "total_pages": self.total_pages,
+            "running_header": self.running_header,
+            "pdf_meta_title": self.pdf_meta_title,
+            "sections": [_section_to_dict(s) for s in self.sections],
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> DocumentOutline:
+        return cls(
+            title=data.get("title", ""),
+            doc_id=data.get("doc_id", ""),
+            total_pages=data.get("total_pages", 0),
+            running_header=data.get("running_header", ""),
+            pdf_meta_title=data.get("pdf_meta_title", ""),
+            sections=[_section_from_dict(s) for s in data.get("sections", [])],
+        )
+
     def summary(self) -> dict[str, Any]:
         all_sections = self.all_sections_flat
         all_elements: list[ContentElement] = []
@@ -183,6 +208,82 @@ class DocumentOutline:
                 if any(e.element_type == et for e in all_elements)
             },
         }
+
+
+# ---------------------------------------------------------------------------
+# (De)serialization helpers for DocumentOutline.to_dict / from_dict
+# ---------------------------------------------------------------------------
+
+
+def _bbox_to_dict(bbox: BoundingBox) -> dict[str, float]:
+    return {"left": bbox.left, "top": bbox.top, "width": bbox.width, "height": bbox.height}
+
+
+def _bbox_from_dict(data: dict[str, Any]) -> BoundingBox:
+    return BoundingBox(
+        left=data.get("left", 0.0),
+        top=data.get("top", 0.0),
+        width=data.get("width", 0.0),
+        height=data.get("height", 0.0),
+    )
+
+
+def _element_to_dict(element: ContentElement) -> dict[str, Any]:
+    return {
+        "element_type": element.element_type.value,
+        "text": element.text,
+        "block_id": element.block_id,
+        "page": element.page,
+        "bbox": _bbox_to_dict(element.bbox),
+        "table_cells": element.table_cells,
+        "table_title": element.table_title,
+        "figure_block_id": element.figure_block_id,
+        "figure_caption": element.figure_caption,
+        "kv_key": element.kv_key,
+        "kv_value": element.kv_value,
+        "child_block_ids": element.child_block_ids,
+    }
+
+
+def _element_from_dict(data: dict[str, Any]) -> ContentElement:
+    return ContentElement(
+        element_type=ElementType(data["element_type"]),
+        text=data.get("text", ""),
+        block_id=data.get("block_id", ""),
+        page=data.get("page", 1),
+        bbox=_bbox_from_dict(data.get("bbox", {})),
+        table_cells=data.get("table_cells", []),
+        table_title=data.get("table_title", ""),
+        figure_block_id=data.get("figure_block_id", ""),
+        figure_caption=data.get("figure_caption", ""),
+        kv_key=data.get("kv_key", ""),
+        kv_value=data.get("kv_value", ""),
+        child_block_ids=data.get("child_block_ids", []),
+    )
+
+
+def _section_to_dict(section: DocumentSection) -> dict[str, Any]:
+    return {
+        "title": section.title,
+        "level": section.level,
+        "page_start": section.page_start,
+        "page_end": section.page_end,
+        "header_block_id": section.header_block_id,
+        "elements": [_element_to_dict(e) for e in section.elements],
+        "children": [_section_to_dict(c) for c in section.children],
+    }
+
+
+def _section_from_dict(data: dict[str, Any]) -> DocumentSection:
+    return DocumentSection(
+        title=data.get("title", ""),
+        level=data.get("level", 0),
+        page_start=data.get("page_start", 1),
+        page_end=data.get("page_end", 1),
+        header_block_id=data.get("header_block_id", ""),
+        elements=[_element_from_dict(e) for e in data.get("elements", [])],
+        children=[_section_from_dict(c) for c in data.get("children", [])],
+    )
 
 
 # ---------------------------------------------------------------------------
