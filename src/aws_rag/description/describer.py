@@ -204,7 +204,7 @@ class FigureDescriber:
         self.verbose = verbose
         self.region = region or settings.aws_region
 
-        self.client: Any = None
+        self.client: Any = client
 
         self._total_invocations = 0
         self._total_errors = 0
