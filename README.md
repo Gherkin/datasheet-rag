@@ -84,6 +84,33 @@ Claude Code will launch one `rag-mcp` process per project; tools come
 back scoped to that project unless the agent explicitly overrides
 `project_id` in a tool call.
 
+## Shell completion
+
+`rag` is a Click CLI, which ships built-in tab completion for bash, zsh,
+and fish — no extra packages needed. Add one of the following to your
+shell's startup file:
+
+```bash
+# ~/.bashrc
+eval "$(_RAG_COMPLETE=bash_source rag)"
+
+# ~/.zshrc
+eval "$(_RAG_COMPLETE=zsh_source rag)"
+
+# ~/.config/fish/completions/rag.fish
+_RAG_COMPLETE=fish_source rag | source
+```
+
+`eval` re-invokes Python on every shell startup. For a snappier shell,
+generate the script once and source the file instead:
+
+```bash
+_RAG_COMPLETE=bash_source rag > ~/.rag-complete.bash
+echo 'source ~/.rag-complete.bash' >> ~/.bashrc
+```
+
+Re-run the generation step whenever subcommands or options change.
+
 ## Architecture
 
 ```
