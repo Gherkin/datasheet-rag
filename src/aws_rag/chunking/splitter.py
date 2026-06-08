@@ -41,6 +41,17 @@ from aws_rag.models.chunk import (
 # are computed later with the model's tokenizer.
 _CHARS_PER_TOKEN = 4
 
+# Bedrock Titan embeddings reject input over 50,000 characters
+# (`ValidationException: maxLength: 50000`). Tables are atomic — we never
+# split them — so this is the one place a single chunk can still blow past
+# that limit despite the compact-rendering and garbled-header fixes (e.g. a
+# table whose structure Docling genuinely cannot recover, see
+# docling_parser._detect_garbled_header and the "Table parsing warning"
+# messages it emits). Rather than silently truncate (and ship a chunk that's
+# missing whoever-knows-what) or let Bedrock's stack trace surface deep in
+# the embedding pipeline, we fail loudly here with enough context to act on.
+_EMBEDDING_MAX_CHARS = 50_000
+
 
 def _estimate_tokens(text: str) -> int:
     """Estimate token count from text length."""
@@ -237,7 +248,40 @@ def _create_micro_chunks(
             counter += 1
 
         elif elem.element_type == ElementType.TABLE:
-            # Tables are atomic — never split
+            # Tables are atomic — never split. But that means a table whose
+            # structure Docling has genuinely mangled beyond what our
+            # rendering/detection safety nets can recover (see
+            # docling_parser._table_cells_to_compact_text and
+            # _detect_garbled_header) can still produce text too large for
+            # Bedrock's embedding input limit. Truncating would silently ship
+            # an incomplete table — worse than an error, for a RAG system
+            # whose whole point is trustworthy answers about these tables.
+            # Fail loudly with enough context to act on instead.
+            #
+            # TODO(table-structure-repair): once LLM-assisted introspective
+            # table repair exists (see docs/table-structure-repair/plan.md,
+            # local/untracked), this is the natural place to invoke it —
+            # detect the still-oversized/untrustworthy table here and attempt
+            # repair before falling back to this hard failure.
+            if len(elem.text) > _EMBEDDING_MAX_CHARS:
+                raise ValueError(
+                    f"Table on page {elem.page} "
+                    f"({elem.table_title or 'untitled'!r}) renders to "
+                    f"{len(elem.text):,} characters, which exceeds the "
+                    f"{_EMBEDDING_MAX_CHARS:,}-character Bedrock embedding "
+                    f"limit even after compact rendering and garbled-header "
+                    f"suppression. Docling's table-structure recognition has "
+                    f"likely produced a structure too broken to render "
+                    f"sensibly (see the 'Table parsing warning' messages "
+                    f"logged during conversion for this page). Tables are "
+                    f"never split, so this can't be auto-resolved — inspect "
+                    f"page {elem.page}, consider `rag reconvert-tables "
+                    f"--pages {elem.page}` with --accurate-tables (not "
+                    f"guaranteed to help — see README → Table parsing mode), "
+                    f"or wait for LLM-assisted table repair "
+                    f"(docs/table-structure-repair/plan.md)."
+                )
+
             chunk = _make_chunk(
                 doc_id=doc_id,
                 level=ChunkLevel.MICRO,

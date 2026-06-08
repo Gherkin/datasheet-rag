@@ -295,6 +295,12 @@ class FigureDescriber:
         if not targets:
             return {}
 
+        # Resolve the client (and its credential chain) here, single-threaded —
+        # concurrent first-use from the worker pool below races through
+        # botocore's AssumeRoleProvider and can trip its spurious
+        # "Infinite loop in credential configuration detected" check.
+        self._get_client()
+
         results: dict[str, str] = {}
 
         def _one(c: Chunk) -> tuple[str, str | None]:

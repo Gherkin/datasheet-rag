@@ -61,6 +61,64 @@ rag search "thermal resistance junction-to-ambient" --mode vector
 rag list
 ```
 
+## Global config options
+
+Settings live in `aws_rag.config.Settings`, read as `RAG_*` environment
+variables. The single shared RAG store — db, PDFs, figures, caches, and
+config — lives at `~/.rag` (or `$RAG_HOME` if overridden), so the global
+config file is `~/.rag/config.env`. Set `RAG_TABLE_STRUCTURE_MODE` and
+friends there once and every project pointed at this RAG instance picks
+them up (a cwd-local `.env` can still layer per-checkout overrides on top,
+but for one shared instance `~/.rag/config.env` is the place to reach for).
+Most settings are self-explanatory (AWS region/profile, model IDs, batch
+sizes); this section covers the ones with real tradeoffs worth
+understanding before you change them.
+
+### Table parsing mode (`RAG_TABLE_STRUCTURE_MODE`)
+
+Docling recognises table structure with its TableFormer model, which has two
+modes:
+
+- **`fast`** (default) — roughly **2.4x faster**. Good enough for the vast
+  majority of tables. Known weakness: it can misparse complex multi-level
+  headers, producing a single header cell's text duplicated across many
+  columns (a "garbled header"). When that happens, `rag ingest` prints a
+  loud `Table parsing warning` and the chunking pipeline automatically drops
+  the garbled header from the embedded text — see
+  `aws_rag.docling_parser._detect_garbled_header`.
+- **`accurate`** — slower, more precise cell-boundary detection. **It is not
+  a guaranteed fix**: on a real-world complex nested header (a 64-pin
+  TQFP/VQFN pin-mux table), re-running it in ACCURATE mode produced a
+  *smaller* table but a *differently* garbled header (`'MUXEN=1 PMUX
+  Values'` repeated 15x instead of the FAST-mode garble). The garbled-header
+  safety net therefore applies — and matters — in both modes.
+
+Set the global default with `RAG_TABLE_STRUCTURE_MODE=fast|accurate` in your
+env file, or override it for one ingest with `rag ingest --accurate-tables`
+/ `--fast-tables`.
+
+If you only need to fix a handful of tables flagged by a parsing warning,
+don't pay for a full re-ingest of a multi-thousand-page document — use:
+
+```bash
+# Re-run just pages 36-38 with ACCURATE tables, geometrically match the
+# results onto the cached layout outline, and patch only those tables in.
+rag reconvert-tables path/to/datasheet.pdf --pages 36-38
+
+# Preview the size/garbled-header delta without writing anything
+rag reconvert-tables path/to/datasheet.pdf --pages 36 --dry-run
+```
+
+This converts only the given page range (Docling's native `page_range`
+support keeps true PDF page numbers in the result), matches each fresh table
+to its cached counterpart by page number + bounding-box overlap (tables are
+geometrically self-contained leaf elements, unlike sections/headings which
+can't be safely tree-merged across two independent conversions), patches
+just the matched tables' cells/text, and invalidates the cached chunk graph
+so the next `rag ingest` re-derives chunks and embeddings from the patched
+outline — without re-running Docling layout analysis on the rest of the
+document.
+
 ## Wiring Claude Code to a project
 
 Copy `.mcp.json.example` to `.mcp.json` in your electronics project's repo

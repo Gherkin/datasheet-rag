@@ -31,9 +31,15 @@ _MULTI_SPACE_RE = re.compile(r" {2,}")
 _TOC_TITLES = frozenset({"table of contents", "contents", "index", "toc"})
 # "Section heading ........ 12" or "Section heading        12"
 _TOC_ENTRY_RE = re.compile(r"^.+[.\s]{2,}\d+\s*$")
-_TOC_TITLES = frozenset({"table of contents", "contents", "index", "toc"})
-# "Section heading ........ 12" or "Section heading        12"
-_TOC_ENTRY_RE = re.compile(r"^.+[.\s]{2,}\d+\s*$")
+
+# Dotted numeric heading prefixes, e.g. "2." / "2.10." / "2.10.1.2." — used to
+# recover chapter structure when Docling emits no TITLE items and flattens
+# every heading to the same SECTION_HEADER level (see _restructure_flat_chapter).
+_NUMBERED_HEADING_RE = re.compile(r"^(\d+(?:\.\d+)*)\.?\s+\S")
+# A flat chapter is only a candidate for restructuring once it's this large —
+# small flat chapters are just... small chapters.
+_FLAT_CHAPTER_MIN_CHILDREN = 50
+_FLAT_CHAPTER_MIN_NUMBERED = 5
 
 
 def is_native_pdf(pdf_path: Path, sample_pages: int = 5) -> bool:
@@ -93,6 +99,7 @@ def convert_pdf(
     *,
     doc_id: str = "",
     accurate_tables: bool = False,
+    page_range: tuple[int, int] | None = None,
 ) -> tuple[DocumentOutline, list[FigureRegion]]:
     """Run Docling on a native PDF and return (DocumentOutline, figure_regions).
 
@@ -104,6 +111,12 @@ def convert_pdf(
       FAST (default) is 44% faster with negligible quality loss for RAG use;
       ACCURATE adds precise cell-boundary detection useful for post-processing
       table structure but costs ~2.4× the total pipeline time.
+
+    page_range: optional 1-based inclusive ``(start, end)`` to convert only
+      part of the PDF — used by ``reconvert_tables_in_range`` to selectively
+      re-run a few pages with ACCURATE tables instead of the whole document.
+      Page numbers in the resulting outline are the PDF's true page numbers
+      (Docling's provenance tracks absolute page numbers regardless of range).
     """
     try:
         from docling.datamodel.base_models import InputFormat
@@ -135,8 +148,12 @@ def convert_pdf(
     )
 
     mode_label = "accurate tables" if accurate_tables else "fast tables"
-    console.print(f"[blue]Docling analysing[/] {pdf_path.name} ({mode_label}) …")
-    result = converter.convert(str(pdf_path))
+    range_label = f", pages {page_range[0]}-{page_range[1]}" if page_range else ""
+    console.print(f"[blue]Docling analysing[/] {pdf_path.name} ({mode_label}{range_label}) …")
+    convert_kwargs: dict[str, Any] = {}
+    if page_range is not None:
+        convert_kwargs["page_range"] = page_range
+    result = converter.convert(str(pdf_path), **convert_kwargs)
     doc = result.document
     console.print(f"[green]Docling done[/] — {len(doc.pages)} pages")
 
@@ -145,6 +162,105 @@ def convert_pdf(
     outline = _build_outline(doc, doc_id=doc_id, skip_figure_ids=skip_figure_ids)
     outline.pdf_meta_title = _pdf_embedded_title(pdf_path)
     return outline, regions
+
+
+def _bbox_overlap(a: BoundingBox, b: BoundingBox) -> float:
+    """Intersection-over-union of two normalised (0..1) bounding boxes."""
+    ix = max(0.0, min(a.right, b.right) - max(a.left, b.left))
+    iy = max(0.0, min(a.bottom, b.bottom) - max(a.top, b.top))
+    inter = ix * iy
+    if inter <= 0:
+        return 0.0
+    union = a.area + b.area - inter
+    return inter / union if union > 0 else 0.0
+
+
+def reconvert_tables_in_range(
+    pdf_path: Path,
+    outline: DocumentOutline,
+    *,
+    doc_id: str,
+    page_range: tuple[int, int],
+    accurate_tables: bool = True,
+) -> list[dict[str, Any]]:
+    """Re-run Docling table-structure recognition for a page range and patch
+    matching TABLE elements into ``outline`` in place.
+
+    Re-running layout analysis on an entire multi-thousand-page document just
+    to fix one or two misparsed tables is wasteful — this instead converts
+    only ``page_range`` (via Docling's native ``page_range`` support, which
+    keeps true PDF page numbers in the resulting provenance) and patches the
+    TABLE elements it finds onto their counterparts in ``outline``, matched by
+    page number plus bounding-box overlap (tables are leaf elements with a
+    clear geometric identity, unlike sections/headings — matching at that
+    granularity avoids the coordinate-frame and tree-merge guesswork that
+    made whole-section reconciliation infeasible, see the multi-page-table
+    warning in _build_outline).
+
+    Returns a report: one dict per cached table in range, each noting whether
+    a geometric match was found and how its size/garbled-header status changed
+    — so the caller can decide whether to keep the patch (e.g. abort a dry run
+    if nothing actually improved).
+    """
+    target_pages = set(range(page_range[0], page_range[1] + 1))
+
+    cached_tables: list[ContentElement] = [
+        el
+        for section in outline.all_sections_flat
+        for el in section.elements
+        if el.element_type == ElementType.TABLE and el.page in target_pages
+    ]
+
+    partial_outline, _regions = convert_pdf(
+        pdf_path, doc_id=doc_id, accurate_tables=accurate_tables, page_range=page_range
+    )
+    fresh_tables: list[ContentElement] = [
+        el
+        for section in partial_outline.all_sections_flat
+        for el in section.elements
+        if el.element_type == ElementType.TABLE
+    ]
+
+    report: list[dict[str, Any]] = []
+    used_fresh: set[int] = set()
+    for cached in cached_tables:
+        candidates = [
+            (i, fresh)
+            for i, fresh in enumerate(fresh_tables)
+            if i not in used_fresh and fresh.page == cached.page
+        ]
+        best_idx, best_overlap = None, 0.0
+        for i, fresh in candidates:
+            overlap = _bbox_overlap(cached.bbox, fresh.bbox)
+            if overlap > best_overlap:
+                best_idx, best_overlap = i, overlap
+
+        entry: dict[str, Any] = {
+            "page": cached.page,
+            "caption": cached.table_title,
+            "old_chars": len(cached.text),
+            "old_garbled": _detect_garbled_header(cached.table_cells) is not None,
+        }
+        if best_idx is None or best_overlap < 0.1:
+            entry["matched"] = False
+            report.append(entry)
+            continue
+
+        fresh = fresh_tables[best_idx]
+        used_fresh.add(best_idx)
+        cached.table_cells = fresh.table_cells
+        cached.table_title = fresh.table_title
+        cached.text = fresh.text
+        cached.bbox = fresh.bbox
+        entry.update(
+            matched=True,
+            overlap=best_overlap,
+            new_chars=len(fresh.text),
+            new_garbled=_detect_garbled_header(fresh.table_cells) is not None,
+        )
+        report.append(entry)
+
+    return report
 
 
 # ---------------------------------------------------------------------------
@@ -198,11 +314,22 @@ def _item_prov(item: Any) -> tuple[int, Any] | tuple[None, None]:
 
 
 def _table_to_cells(table_item: Any) -> list[dict[str, Any]]:
-    """Convert Docling table grid to our table_cells list format."""
+    """Convert Docling table grid to our table_cells list format.
+
+    Docling's ``grid`` repeats a spanning cell's text at every (row, col)
+    position it covers — that's how the grid is filled in. We additionally
+    record ``is_origin`` (true only at the cell's top-left position, per its
+    ``start_row/col_offset_idx``) so renderers can emit each cell's text
+    exactly once instead of duplicating it across every position it spans.
+    """
     cells: list[dict[str, Any]] = []
     try:
         for row_idx, row in enumerate(table_item.data.grid):
             for col_idx, cell in enumerate(row):
+                is_origin = (
+                    row_idx == getattr(cell, "start_row_offset_idx", row_idx)
+                    and col_idx == getattr(cell, "start_col_offset_idx", col_idx)
+                )
                 cells.append({
                     "row": row_idx + 1,
                     "col": col_idx + 1,
@@ -213,10 +340,88 @@ def _table_to_cells(table_item: Any) -> list[dict[str, Any]]:
                         getattr(cell, "column_header", False)
                         or getattr(cell, "row_header", False)
                     ),
+                    "is_origin": is_origin,
                 })
     except (AttributeError, TypeError):
         pass
     return cells
+
+
+# A repeated header cell needs to be at least this long to count as a
+# meaningful duplication signal — short tokens ("-", "Pin", "0x0") legitimately
+# repeat across columns without indicating a parsing failure.
+_GARBLED_HEADER_MIN_CHARS = 12
+# How many times a single header cell's text must repeat before we treat it
+# as TableFormer having misparsed a complex (multi-level / rotated-text)
+# header rather than correctly recognising the table's real column structure.
+_GARBLED_HEADER_MIN_REPEATS = 3
+
+
+def _detect_garbled_header(cells: list[dict[str, Any]]) -> str | None:
+    """Return the repeated text if this table's header looks misparsed.
+
+    TableFormer can fail on complex multi-level / rotated-text headers (the
+    kind found in dense pinout and register-summary tables) by stamping one
+    cell's text across many header positions instead of recognising the
+    actual nested structure — e.g. "Oscillator I/O PMUX Values 0x0 0x1 ..."
+    repeated across 15 separate header cells in PIC32CK1025GC01100's Table
+    5-3, each claiming colspan=15. That's not a real 15-column-group table;
+    it's a parse failure that (a) misleads anything reading the header and
+    (b) inflates every data row's rendered width via markdown-style padding.
+
+    We can't reconstruct the correct header from its own corrupted output —
+    detection only, so the table can be flagged for manual review (e.g.
+    re-running with --accurate-tables) and the bad header text can be
+    suppressed from what gets embedded.
+    """
+    header_texts = [
+        c["text"].strip()
+        for c in cells
+        if c.get("is_header") and c.get("is_origin", True)
+        and len(c["text"].strip()) >= _GARBLED_HEADER_MIN_CHARS
+    ]
+    for text, count in Counter(header_texts).most_common(1):
+        if count >= _GARBLED_HEADER_MIN_REPEATS:
+            return text
+    return None
+
+
+def _table_cells_to_compact_text(cells: list[dict[str, Any]], *, omit_header: bool = False) -> str:
+    """Render structured table cells as compact, unpadded pipe-delimited rows.
+
+    Unlike Docling's ``export_to_markdown`` (which pads every cell to a
+    uniform column width for visual alignment), this emits each cell's text
+    as-is. Alignment padding is pure display convenience — it costs real
+    embedding-token budget without adding any retrievable signal, and a
+    single oversized header cell can inflate the padding width applied to
+    *every* row and column (a 50-row × 17-col table rendered to 67KB here —
+    9× its actual ~7.5KB content — purely from padding "PB09" out to ~80
+    chars to match a misparsed header cell; see _detect_garbled_header).
+
+    Spanning cells are emitted once, at their origin position, to avoid
+    repeating their text at every grid position the span covers.
+
+    ``omit_header`` drops detected-garbled header rows entirely — feeding a
+    known-wrong column structure to the embedding is worse than feeding none.
+    """
+    if not cells:
+        return ""
+    rows: dict[int, list[dict[str, Any]]] = {}
+    header_rows: set[int] = set()
+    for cell in cells:
+        rows.setdefault(cell["row"], []).append(cell)
+        if cell.get("is_header"):
+            header_rows.add(cell["row"])
+
+    lines: list[str] = []
+    for row_idx in sorted(rows):
+        if omit_header and row_idx in header_rows:
+            continue
+        row_cells = sorted(rows[row_idx], key=lambda c: c["col"])
+        texts = [c["text"].strip() if c.get("is_origin", True) else "" for c in row_cells]
+        if any(texts):
+            lines.append(" | ".join(texts))
+    return "\n".join(lines)
 
 
 def _ensure_section(
@@ -335,12 +540,51 @@ def _build_outline(
         if label == DocItemLabel.TABLE:
             pending_caption_element = None
             cells = _table_to_cells(item)
-            try:
-                table_md = item.export_to_markdown(doc=doc)
-            except Exception:
-                table_md = "\n".join(c["text"] for c in cells if c["text"])
             caption = _clean_text(getattr(item, "text", "") or "")
-            text = (caption + "\n" + table_md).strip() if caption else table_md.strip()
+
+            prov = list(getattr(item, "prov", []) or [])
+            if len(prov) > 1:
+                pages = sorted({p.page_no for p in prov})
+                where = f"'{caption}'" if caption else f"starting on page {page_no}"
+                console.print(
+                    f"[yellow]Table parsing warning:[/] table {where} is a "
+                    f"single Docling item physically spanning pages {pages} — "
+                    f"continuation pages are normally separate items that "
+                    f"chunk independently, but this one was merged. Splitting "
+                    f"it at its true page boundaries would require reconciling "
+                    f"mismatched coordinate frames (table provenance is "
+                    f"BOTTOMLEFT-origin, cell bboxes are TOPLEFT-origin and "
+                    f"often absent for empty cells) with no real instance to "
+                    f"validate against — rather than guess, it's kept as one "
+                    f"chunk and is subject to the hard-size check below."
+                )
+
+            garbled = _detect_garbled_header(cells)
+            if garbled is not None:
+                where = f"'{caption}'" if caption else f"on page {page_no}"
+                console.print(
+                    f"[yellow]Table parsing warning:[/] table {where} has a "
+                    f"header cell repeated across multiple columns "
+                    f"({garbled[:60]!r}…) — Docling's table-structure "
+                    f"recognition likely misparsed a complex multi-level "
+                    f"header. The garbled header is being dropped from the "
+                    f"embedded text (this safety net applies regardless of "
+                    f"table-structure mode). Inspect page {page_no} to "
+                    f"confirm the real structure; re-running with "
+                    f"--accurate-tables (or table_structure_mode=accurate in "
+                    f"the global config) sometimes helps but is NOT a "
+                    f"guaranteed fix — empirically it can produce a "
+                    f"differently-garbled header for complex nested tables "
+                    f"like this one."
+                )
+            table_text = _table_cells_to_compact_text(cells, omit_header=garbled is not None)
+            if not table_text:
+                try:
+                    table_text = item.export_to_markdown(doc=doc)
+                except Exception:
+                    table_text = "\n".join(c["text"] for c in cells if c["text"])
+
+            text = (caption + "\n" + table_text).strip() if caption else table_text.strip()
             element = ContentElement(
                 element_type=ElementType.TABLE,
                 text=text,
@@ -406,6 +650,7 @@ def _build_outline(
             current_section.page_end = page_no
 
     _flush(section_stack, sections)
+    sections = _restructure_degenerate_outline(sections)
     sections = _filter_toc_sections(sections)
 
     running_header = ""
@@ -567,6 +812,124 @@ def _build_figure_regions(doc: Any) -> list[FigureRegion]:
         pending_region = region
 
     return regions
+
+
+def _parse_numbered_heading(title: str) -> tuple[int, int] | None:
+    """Parse a dotted numeric heading prefix into ``(depth, leading_number)``.
+
+    "1. Configuration Summary"             -> (1, 1)
+    "2.1. Basic Connection Requirements"   -> (2, 2)
+    "2.10.1.2. PCB Layout Recommendations" -> (4, 2)
+
+    Returns ``None`` when the title carries no such prefix (marketing
+    blurbs, bullet fragments, continuation headers, ...).
+    """
+    m = _NUMBERED_HEADING_RE.match(title.strip())
+    if not m:
+        return None
+    segments = m.group(1).split(".")
+    return len(segments), int(segments[0])
+
+
+def _restructure_flat_chapter(chapter: DocumentSection) -> list[DocumentSection]:
+    """Re-nest a chapter's flat children using their numeric heading prefixes.
+
+    Triggered when Docling emits no usable TITLE/level hierarchy for a
+    document and every heading collapses to one flat list of SECTION_HEADER
+    siblings (seen on a 2200-page MCU datasheet: one "chapter" swallowed
+    3949 sections). Real chapter headings in such documents are reliably
+    numbered ("1.", "2.1.", "2.10.1.2., ..."), so we use that numbering as
+    the depth signal and rebuild a proper tree from it.
+
+    Children before the first numbered heading (cover-page subtitles,
+    feature blurbs) are bucketed into a synthetic front-matter chapter so
+    they don't pollute the real chapter list. Stray headings that match the
+    numeric-prefix pattern but don't continue the chapter sequence — numbered
+    list items or notes inside body text, e.g. "2. Configure the EVSYS:"
+    appearing between chapters 33 and 34 — and un-numbered fragments
+    ("· Component Placement:", "Notes:") are nested under whatever section
+    is currently open — harmless leaf nodes, not structural problems.
+    """
+    front_matter = DocumentSection(
+        title=chapter.title,
+        level=0,
+        page_start=chapter.page_start,
+        page_end=chapter.page_end,
+        elements=list(chapter.elements),
+        header_block_id=chapter.header_block_id,
+    )
+
+    top_level: list[DocumentSection] = []
+    stack: list[tuple[int, DocumentSection]] = []  # (numbered depth, section)
+    seen_numbered = False
+    next_chapter_num: int | None = None
+
+    for child in chapter.children:
+        parsed = _parse_numbered_heading(child.title)
+
+        if parsed is not None:
+            depth, leading_num = parsed
+            # A depth-1 heading only starts a new chapter if it continues the
+            # chapter-numbering sequence — numbered list items / notes in body
+            # text match the same prefix pattern but break the sequence.
+            if depth == 1 and next_chapter_num is not None and leading_num != next_chapter_num:
+                parsed = None
+
+        if parsed is None:
+            if not seen_numbered:
+                front_matter.children.append(child)
+            else:
+                target = stack[-1][1] if stack else (top_level[-1] if top_level else front_matter)
+                target.children.append(child)
+            continue
+
+        depth, leading_num = parsed
+        seen_numbered = True
+        if depth == 1:
+            next_chapter_num = leading_num + 1
+
+        while stack and stack[-1][0] >= depth:
+            stack.pop()
+
+        if not stack:
+            child.level = 0
+            top_level.append(child)
+        else:
+            child.level = len(stack)
+            stack[-1][1].children.append(child)
+        stack.append((depth, child))
+
+    result: list[DocumentSection] = []
+    if front_matter.children or front_matter.elements:
+        result.append(front_matter)
+    result.extend(top_level)
+    return result
+
+
+def _restructure_degenerate_outline(sections: list[DocumentSection]) -> list[DocumentSection]:
+    """Detect and fix a flattened single-chapter outline (see _restructure_flat_chapter).
+
+    Only triggers when the outline is exactly one chapter with an unusually
+    large, mostly-numbered flat child list — i.e. genuinely small
+    single-chapter documents are left untouched.
+    """
+    if len(sections) != 1:
+        return sections
+
+    chapter = sections[0]
+    if len(chapter.children) < _FLAT_CHAPTER_MIN_CHILDREN:
+        return sections
+
+    numbered = sum(1 for c in chapter.children if _parse_numbered_heading(c.title) is not None)
+    if numbered < _FLAT_CHAPTER_MIN_NUMBERED:
+        return sections
+
+    console.print(
+        f"[yellow]Outline restructure:[/] '{chapter.title}' looked flattened "
+        f"({len(chapter.children)} flat children, {numbered} numbered) — "
+        f"rebuilding chapter structure from numeric heading prefixes."
+    )
+    return _restructure_flat_chapter(chapter)
 
 
 def _is_toc_section(section: DocumentSection) -> bool:

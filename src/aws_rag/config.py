@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -146,6 +146,23 @@ class Settings(BaseSettings):
     embedding_batch_size: int = Field(
         default=16,
         description="Number of texts to embed concurrently per batch.",
+    )
+
+    # Docling table structure recognition
+    table_structure_mode: Literal["fast", "accurate"] = Field(
+        default="fast",
+        description=(
+            "Docling TableFormer mode for table structure recognition. "
+            "'fast' (default) is roughly 2.4x faster and good enough for most "
+            "tables, but is known to misparse complex multi-level headers — "
+            "producing garbled/duplicated header cells (we detect and drop "
+            "those at chunking time, see docling_parser._detect_garbled_header). "
+            "'accurate' uses slower, more precise cell-boundary detection; "
+            "empirically it still doesn't fully fix complex garbled headers "
+            "(it can produce a *different* garbled parse), so treat it as a "
+            "quality knob, not a guaranteed fix. Override per-ingest with "
+            "--accurate-tables/--fast-tables on `rag ingest`."
+        ),
     )
 
     # Figure description (Bedrock Claude vision)

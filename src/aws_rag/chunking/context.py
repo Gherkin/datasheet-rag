@@ -129,11 +129,18 @@ def _get_neighbor_context(chunk: Chunk, graph: ChunkGraph, max_chars: int = 300)
 # ---------------------------------------------------------------------------
 
 
-def build_macro_context(chunk: Chunk, graph: ChunkGraph) -> str:
+def build_macro_context(
+    chunk: Chunk, graph: ChunkGraph, *, max_subsection_chars: int = 2000
+) -> str:
     """Build context text for a MACRO chunk after summarization.
 
     Called by the summarizer after it fills in the macro chunk's text
     with a concentrated summary.
+
+    ``max_subsection_chars`` bounds the "Subsections: ..." line — large
+    documents can have thousands of MESO children, and joining every
+    section title verbatim can blow past embedding-model input limits
+    (e.g. Titan's 50,000-char ``inputText`` cap).
     """
     parts: list[str] = []
 
@@ -142,7 +149,8 @@ def build_macro_context(chunk: Chunk, graph: ChunkGraph) -> str:
         parts.append(ctx)
         parts.append("---")
 
-    # List child section titles for navigation context
+    # List child section titles for navigation context, capped so this
+    # can't dwarf the rest of the context on documents with many sections.
     children = graph.children_of(chunk.id)
     if children:
         section_titles = []
@@ -151,7 +159,19 @@ def build_macro_context(chunk: Chunk, graph: ChunkGraph) -> str:
             if title and title not in section_titles:
                 section_titles.append(title)
         if section_titles:
-            parts.append("Subsections: " + " | ".join(section_titles))
+            kept: list[str] = []
+            total = 0
+            omitted = 0
+            for title in section_titles:
+                if total + len(title) + 3 > max_subsection_chars:
+                    omitted += 1
+                    continue
+                kept.append(title)
+                total += len(title) + 3
+            line = "Subsections: " + " | ".join(kept)
+            if omitted:
+                line += f" | … and {omitted} more"
+            parts.append(line)
             parts.append("---")
 
     # The summary text

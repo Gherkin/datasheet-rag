@@ -21,3 +21,8 @@ test-project/
 # Eval run outputs (commit golden.jsonl only)
 eval/*.json
 eval/trace.jsonl
+
+# Local planning notes + investigation assets — not part of the shipped
+# product, kept out of history because of size/churn (binary crops, a
+# growing plan that'll be superseded once the work lands)
+docs/table-structure-repair/

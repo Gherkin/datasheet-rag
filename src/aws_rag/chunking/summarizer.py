@@ -155,6 +155,11 @@ def _extractive_digest(text: str, max_chars: int) -> str:
     return " ".join(result)
 
 
+# Below this, a per-item slice is too short to read as anything but noise —
+# better to drop the item than pad the output with fragments.
+_MIN_ITEM_CHARS = 40
+
+
 def _weighted_combine(
     items: list[tuple[str, float]],
     max_chars: int,
@@ -162,6 +167,16 @@ def _weighted_combine(
     """Combine text items weighted by importance, fitting within budget.
 
     Higher-weight items get proportionally more space in the output.
+
+    When there are far more items than the budget can give a meaningful
+    slice to (e.g. thousands of MESO summaries feeding one MACRO budget),
+    keep only the highest-weight items that each clear _MIN_ITEM_CHARS,
+    in their original document order, and drop the rest — a coherent
+    summary of the most important pieces beats a wall of sub-word
+    fragments. (A previous version floored every item's allocation to
+    30-50 chars regardless of count, which guaranteed the combined output
+    could blow past max_chars by an order of magnitude — e.g. a single
+    MACRO summary came out at 91KB against a 1500-char budget.)
     """
     if not items:
         return ""
@@ -170,32 +185,39 @@ def _weighted_combine(
     if len(items) == 1:
         return _truncate_word_boundary(items[0][0], max_chars)
 
+    max_items = max(1, max_chars // (_MIN_ITEM_CHARS + 1))
+    if len(items) > max_items:
+        keep = {
+            i for i, _ in sorted(enumerate(items), key=lambda p: p[1][1], reverse=True)[:max_items]
+        }
+        items = [item for i, item in enumerate(items) if i in keep]
+
     # Calculate space allocation proportional to weight
     total_weight = sum(w for _, w in items)
     if total_weight == 0:
         total_weight = len(items)
 
-    # Allocate chars per item proportional to weight
-    allocations: list[int] = []
-    for _, weight in items:
-        alloc = int((weight / total_weight) * max_chars)
-        alloc = max(alloc, 50)  # Minimum 50 chars per item
-        allocations.append(alloc)
+    allocations = [
+        max(_MIN_ITEM_CHARS, int((weight / total_weight) * max_chars))
+        for _, weight in items
+    ]
 
-    # Scale down if total exceeds budget
+    # Scale down if total exceeds budget — no floor here, since a floor
+    # is exactly what let the total run away from max_chars in the first place.
     total_alloc = sum(allocations)
     if total_alloc > max_chars:
         scale = max_chars / total_alloc
-        allocations = [max(30, int(a * scale)) for a in allocations]
+        allocations = [max(1, int(a * scale)) for a in allocations]
 
-    # Truncate each item to its allocation
     parts: list[str] = []
     for (text, _), alloc in zip(items, allocations):
         truncated = _truncate_word_boundary(text.strip(), alloc)
         if truncated:
             parts.append(truncated)
 
-    return " ".join(parts)
+    # Backstop: guarantees the result can never exceed max_chars regardless
+    # of rounding/separator drift in the allocation above.
+    return _truncate_word_boundary(" ".join(parts), max_chars)
 
 
 def _truncate_word_boundary(text: str, max_chars: int) -> str:
@@ -372,9 +394,16 @@ class AbstractiveSummarizer:
                 )
                 meso_summaries.append((meso_summary, avg_weight))
 
-            # Pass 3: Combine meso summaries → macro summary
-            prompt = _macro_summary_prompt(
+            # Pass 3: Recursively reduce meso summaries to a small set (bounded
+            # input per LLM call regardless of chapter fan-in), then combine
+            # the survivors into the final chapter summary.
+            reduced = self._reduce_summaries(
                 meso_summaries,
+                chapter_title=macro.metadata.chapter_title,
+                doc_title=macro.metadata.doc_title,
+            )
+            prompt = _macro_summary_prompt(
+                reduced,
                 macro.metadata.chapter_title,
                 macro.metadata.doc_title,
             )
@@ -388,10 +417,65 @@ class AbstractiveSummarizer:
 
         return graph
 
+    def _reduce_summaries(
+        self,
+        items: list[tuple[str, float]],
+        *,
+        chapter_title: str,
+        doc_title: str,
+    ) -> list[tuple[str, float]]:
+        """Recursively batch-digest items until few enough for a final reduce.
+
+        Each LLM call sees at most _MAX_REDUCE_FANIN items — bounded input
+        regardless of how many MESO children a chapter has (one chapter in
+        a 2200-page MCU family datasheet had 3949, which would otherwise
+        produce a single ~600K-char reduce prompt). Genuinely abstractive
+        at every level: each batch becomes a real summary of what it
+        collectively covers, not a concatenation of fragments.
+        """
+        if len(items) <= _MAX_REDUCE_FANIN:
+            return items
+
+        digests: list[tuple[str, float]] = []
+        for i in range(0, len(items), _MAX_REDUCE_FANIN):
+            batch = items[i:i + _MAX_REDUCE_FANIN]
+            prompt = _group_digest_prompt(batch, chapter_title, doc_title)
+            digest = self._invoke(prompt, self.meso_summary_max_tokens)
+            avg_weight = sum(w for _, w in batch) / len(batch)
+            digests.append((digest, avg_weight))
+
+        return self._reduce_summaries(digests, chapter_title=chapter_title, doc_title=doc_title)
+
 
 # ---------------------------------------------------------------------------
 # LLM prompt templates
 # ---------------------------------------------------------------------------
+
+# Maximum number of summaries combined in a single LLM reduce call. Keeps
+# every prompt bounded regardless of chapter fan-in — larger sets are
+# digested in batches and reduced recursively (see _reduce_summaries).
+_MAX_REDUCE_FANIN = 25
+
+
+def _group_digest_prompt(
+    items: list[tuple[str, float]],
+    chapter_title: str,
+    doc_title: str,
+) -> str:
+    items_text = "\n".join(f"- [weight={w:.1f}] {text}" for text, w in items)
+    return (
+        f"Document: {doc_title}\n"
+        f"Chapter: {chapter_title}\n\n"
+        f"The following are descriptions of a group of consecutive sections "
+        f"within this chapter. These descriptions are your ONLY source of "
+        f"truth — you do not have access to the original text. Higher-weight "
+        f"items are more information-dense.\n\n"
+        f"{items_text}\n\n"
+        f"Summarize what this group of sections collectively contains in "
+        f"2-4 sentences. Only use facts present in the descriptions above — "
+        f"no added values or inferences. Preserve exact part numbers, "
+        f"parameter names, and value ranges as stated."
+    )
 
 
 def _micro_digest_prompt(

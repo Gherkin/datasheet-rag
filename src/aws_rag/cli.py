@@ -1052,13 +1052,17 @@ def _print_cost_table(cost: CostEstimate, heading: str = "Estimated AWS cost") -
     ),
 )
 @click.option(
-    "--accurate-tables",
+    "--accurate-tables/--fast-tables",
+    "accurate_tables",
     is_flag=True,
-    default=False,
+    default=None,
     help=(
-        "Use TableFormer ACCURATE mode for table structure (Docling backend only). "
-        "Default is FAST, which is 44% faster with negligible quality loss for RAG. "
-        "Use ACCURATE when precise cell-boundary detection matters."
+        "Override the global table_structure_mode setting for this ingest "
+        "(Docling backend only). FAST is ~2.4x faster; ACCURATE does more "
+        "precise cell-boundary detection but — empirically — still doesn't "
+        "fully fix complex misparsed/garbled headers (see "
+        "table_structure_mode in `rag config` / the README). Defaults to "
+        "whatever table_structure_mode is set to in the global config."
     ),
 )
 def ingest(
@@ -1083,7 +1087,7 @@ def ingest(
     show_cost: bool,
     force: bool,
     backend: str,
-    accurate_tables: bool,
+    accurate_tables: bool | None,
 ) -> None:
     """Full ingestion pipeline: analyse → figures → chunk → embed.
 
@@ -1200,7 +1204,7 @@ def _ingest_one(
     show_cost: bool,
     force: bool,
     backend: str,
-    accurate_tables: bool,
+    accurate_tables: bool | None,
 ) -> CostEstimate | None:
     """Ingest a single PDF; returns the cost estimate when --show-cost is set."""
     import time
@@ -1249,6 +1253,8 @@ def _ingest_one(
         )
 
     settings = get_settings()
+    if accurate_tables is None:
+        accurate_tables = settings.table_structure_mode == "accurate"
     t0 = time.monotonic()
     step_n = 0
     cost = CostEstimate()
@@ -1630,6 +1636,164 @@ def _ingest_one(
     console.rule(f"[bold green]Done[/] — {elapsed:.0f}s")
     console.print(f"  doc_id = [cyan]{did}[/]")
     return None
+
+
+def _parse_page_range(spec: str) -> tuple[int, int]:
+    """Parse '36' or '36-40' into a 1-based inclusive (start, end) pair."""
+    spec = spec.strip()
+    if "-" in spec:
+        start_s, _, end_s = spec.partition("-")
+        start, end = int(start_s), int(end_s)
+    else:
+        start = end = int(spec)
+    if start < 1 or end < start:
+        raise click.BadParameter(f"invalid page range {spec!r} (expected e.g. '36' or '36-40')")
+    return start, end
+
+
+@cli.command("reconvert-tables")
+@click.argument("pdf_path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option(
+    "--pages", "pages_spec", required=True,
+    help="1-based inclusive page range to re-run, e.g. '36' or '36-40'.",
+)
+@click.option("--doc-id", default=None, help="Override the content-hash doc_id.")
+@click.option(
+    "--accurate-tables/--fast-tables", default=True,
+    help="Table mode for the re-run (default: accurate — that's the point of this command).",
+)
+@click.option(
+    "--dry-run", is_flag=True,
+    help="Show what would change without patching the cached outline or invalidating chunks.",
+)
+def reconvert_tables_cmd(
+    pdf_path: Path,
+    pages_spec: str,
+    doc_id: str | None,
+    accurate_tables: bool,
+    dry_run: bool,
+) -> None:
+    """Selectively re-run table-structure recognition for a page range.
+
+    Re-running Docling layout analysis on an entire multi-thousand-page PDF
+    just to fix one or two misparsed tables (see the "Table parsing warning"
+    printouts during `rag ingest`) is wasteful — this instead converts only
+    the given --pages with the chosen TableFormer mode, geometrically matches
+    the resulting tables to their counterparts already in the cached layout
+    outline (by page number + bounding-box overlap — tables are leaf elements
+    with a clear geometric identity, unlike sections/headings which can't be
+    safely tree-merged across two independent conversions), and patches just
+    those table cells/text in place.
+
+    Requires the document to already be ingested with the Docling backend
+    (so a cached `<doc_id>_outline.json` exists). On success it deletes the
+    cached chunk graph so the next `rag ingest` re-derives chunks (and
+    embeddings) from the patched outline — Docling layout analysis itself is
+    NOT re-run for the rest of the document.
+    """
+    from aws_rag.chunking.layout_parser import DocumentOutline
+    from aws_rag.docling_parser import content_hash, reconvert_tables_in_range
+
+    page_range = _parse_page_range(pages_spec)
+    settings = get_settings()
+    did = doc_id or content_hash(pdf_path)
+    outline_path = settings.output_dir / f"{did}_outline.json"
+    chunks_path = settings.output_dir / f"{did}_chunks.json"
+
+    if not outline_path.exists():
+        raise click.ClickException(
+            f"No cached layout outline for doc_id={did} at {outline_path}. "
+            "Run `rag ingest` (Docling backend) on this PDF first — "
+            "reconvert-tables only patches an existing outline, it doesn't "
+            "do a first-time conversion."
+        )
+
+    with open(outline_path) as f:
+        cached = json.load(f)
+    outline = DocumentOutline.from_dict(cached["outline"])
+
+    mode_label = "accurate" if accurate_tables else "fast"
+    console.print(
+        f"Re-running pages {page_range[0]}-{page_range[1]} of {pdf_path.name} "
+        f"with TableFormer [cyan]{mode_label}[/] mode…"
+    )
+    report = reconvert_tables_in_range(
+        pdf_path, outline, doc_id=did, page_range=page_range, accurate_tables=accurate_tables
+    )
+
+    if not report:
+        console.print(
+            f"[yellow]No cached tables found on pages "
+            f"{page_range[0]}-{page_range[1]}.[/] Nothing to do."
+        )
+        return
+
+    table = Table(title=f"Tables on pages {page_range[0]}-{page_range[1]}")
+    table.add_column("Page", justify="right")
+    table.add_column("Caption")
+    table.add_column("Matched", justify="center")
+    table.add_column("Chars (old → new)", justify="right")
+    table.add_column("Garbled (old → new)", justify="center")
+    for entry in report:
+        caption = entry["caption"][:50] or "—"
+        if entry["matched"]:
+            chars = f"{entry['old_chars']:,} → {entry['new_chars']:,}"
+            garbled = (
+                f"{'yes' if entry['old_garbled'] else 'no'} → "
+                f"{'yes' if entry['new_garbled'] else 'no'}"
+            )
+            matched = f"yes ({entry['overlap']:.0%} overlap)"
+        else:
+            chars = f"{entry['old_chars']:,} → —"
+            garbled = f"{'yes' if entry['old_garbled'] else 'no'} → —"
+            matched = "[red]no[/]"
+        table.add_row(str(entry["page"]), caption, matched, chars, garbled)
+    console.print(table)
+
+    unmatched = [e for e in report if not e["matched"]]
+    if unmatched:
+        console.print(
+            f"[yellow]{len(unmatched)} cached table(s) had no geometric "
+            f"counterpart in the re-run output[/] — left untouched (could "
+            f"mean the table moved across the page boundary, or Docling "
+            f"placed it on a neighbouring page in this mode; widen --pages "
+            f"and retry if that looks wrong)."
+        )
+
+    matched = [e for e in report if e["matched"]]
+    fixed_garbled = [e for e in matched if e["old_garbled"] and not e["new_garbled"]]
+    still_garbled = [e for e in matched if e["new_garbled"]]
+    if fixed_garbled:
+        console.print(f"[green]{len(fixed_garbled)} garbled header(s) fixed by this re-run.[/]")
+    if still_garbled:
+        console.print(
+            f"[yellow]{len(still_garbled)} table(s) still have a garbled "
+            f"header after the re-run[/] — _detect_garbled_header will keep "
+            f"dropping them from the embedded text regardless."
+        )
+
+    if dry_run:
+        console.print("[yellow]--dry-run: outline and chunk cache left untouched.[/]")
+        return
+
+    if not matched:
+        console.print("[yellow]Nothing matched — leaving the cached outline untouched.[/]")
+        return
+
+    with open(outline_path, "w") as f:
+        json.dump({"outline": outline.to_dict(), "figure_regions": cached["figure_regions"]}, f)
+    console.print(f"[green]Patched outline saved[/] → [cyan]{outline_path}[/]")
+
+    if chunks_path.exists():
+        chunks_path.unlink()
+        console.print(
+            f"[green]Invalidated cached chunk graph[/] → removed [cyan]{chunks_path}[/]. "
+            f"Re-run `rag ingest {pdf_path}` (without --force) to re-derive "
+            f"chunks and embeddings from the patched outline — Docling layout "
+            f"analysis will be skipped since the outline cache still exists."
+        )
+    else:
+        console.print("Run `rag ingest` to (re)derive chunks and embeddings from the patched outline.")
 
 
 # ---------------------------------------------------------------------------
