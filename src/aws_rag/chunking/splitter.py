@@ -248,21 +248,28 @@ def _create_micro_chunks(
             counter += 1
 
         elif elem.element_type == ElementType.TABLE:
-            # Tables are atomic — never split. But that means a table whose
-            # structure Docling has genuinely mangled beyond what our
-            # rendering/detection safety nets can recover (see
+            # Tables are atomic — never split today. A table whose structure
+            # Docling has genuinely mangled beyond what our rendering/
+            # detection safety nets can recover (see
             # docling_parser._table_cells_to_compact_text and
             # _detect_garbled_header) can still produce text too large for
             # Bedrock's embedding input limit. Truncating would silently ship
             # an incomplete table — worse than an error, for a RAG system
             # whose whole point is trustworthy answers about these tables.
-            # Fail loudly with enough context to act on instead.
+            # Fail loudly with enough context instead.
             #
-            # TODO(table-structure-repair): once LLM-assisted introspective
-            # table repair exists (see docs/table-structure-repair/plan.md,
-            # local/untracked), this is the natural place to invoke it —
-            # detect the still-oversized/untrustworthy table here and attempt
-            # repair before falling back to this hard failure.
+            # TODO: there are two genuine fixes here, neither implemented —
+            # (a) page-boundary splitting for tables that physically span
+            #     multiple PDF pages (see the "single Docling item physically
+            #     spanning pages" warning in docling_parser._build_outline) —
+            #     blocked on reconciling mismatched coordinate frames (table
+            #     provenance bbox is BOTTOMLEFT-origin, cell bboxes are
+            #     TOPLEFT-origin and often absent for empty cells), with no
+            #     real multi-page+oversized instance yet to validate against;
+            # (b) LLM-assisted introspective table repair/splitting (see
+            #     docs/table-structure-repair/plan.md, local/untracked) — the
+            #     more general fix, since plenty of oversized tables are
+            #     single-page and page-splitting wouldn't help them anyway.
             if len(elem.text) > _EMBEDDING_MAX_CHARS:
                 raise ValueError(
                     f"Table on page {elem.page} "
@@ -274,12 +281,17 @@ def _create_micro_chunks(
                     f"likely produced a structure too broken to render "
                     f"sensibly (see the 'Table parsing warning' messages "
                     f"logged during conversion for this page). Tables are "
-                    f"never split, so this can't be auto-resolved — inspect "
-                    f"page {elem.page}, consider `rag reconvert-tables "
-                    f"--pages {elem.page}` with --accurate-tables (not "
-                    f"guaranteed to help — see README → Table parsing mode), "
-                    f"or wait for LLM-assisted table repair "
-                    f"(docs/table-structure-repair/plan.md)."
+                    f"never split today, and switching table_structure_mode "
+                    f"is NOT a fix: empirically, complex tables this badly "
+                    f"mangled stay unusable in BOTH fast and accurate modes, "
+                    f"just via different (and sometimes more dangerous, "
+                    f"silent) failure mechanisms — see README → Table "
+                    f"parsing mode. The durable fixes are unimplemented: "
+                    f"page-boundary splitting (for tables spanning multiple "
+                    f"PDF pages) or LLM-assisted introspective table "
+                    f"repair/splitting (docs/table-structure-repair/plan.md). "
+                    f"Until one of those lands, inspect page {elem.page} by "
+                    f"hand to decide whether to exclude or hand-correct it."
                 )
 
             chunk = _make_chunk(
