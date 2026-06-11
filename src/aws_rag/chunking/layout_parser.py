@@ -78,6 +78,17 @@ class ContentElement:
     # For tables: structured cell data
     table_cells: list[dict[str, Any]] = field(default_factory=list)
     table_title: str = ""
+    # Set when docling_parser.table_structure_untrustworthy() flagged this
+    # table's row/column/header structure as unsafe to assert (see
+    # docs/table-structure-repair/{problem,plan}.md) — None means trusted.
+    table_structure_warning: str | None = None
+    # Cached LLM-repaired structure (Stage 3 — table_repair.TableRepairer),
+    # same grid-filled shape as table_cells. None means "not (yet) repaired";
+    # an empty list would mean "repaired and found to have no cells", which
+    # cannot happen — a flagged table always has origin-cell text to repair,
+    # so empty vs. None is never ambiguous. Populated opt-in by `rag
+    # repair-tables`, not on the ingest hot path — see table_repair_concurrency.
+    table_repaired_cells: list[dict[str, Any]] | None = None
     # For figures: reference to the extracted image
     figure_block_id: str = ""
     figure_caption: str = ""
@@ -237,6 +248,8 @@ def _element_to_dict(element: ContentElement) -> dict[str, Any]:
         "bbox": _bbox_to_dict(element.bbox),
         "table_cells": element.table_cells,
         "table_title": element.table_title,
+        "table_structure_warning": element.table_structure_warning,
+        "table_repaired_cells": element.table_repaired_cells,
         "figure_block_id": element.figure_block_id,
         "figure_caption": element.figure_caption,
         "kv_key": element.kv_key,
@@ -254,6 +267,8 @@ def _element_from_dict(data: dict[str, Any]) -> ContentElement:
         bbox=_bbox_from_dict(data.get("bbox", {})),
         table_cells=data.get("table_cells", []),
         table_title=data.get("table_title", ""),
+        table_structure_warning=data.get("table_structure_warning"),
+        table_repaired_cells=data.get("table_repaired_cells"),
         figure_block_id=data.get("figure_block_id", ""),
         figure_caption=data.get("figure_caption", ""),
         kv_key=data.get("kv_key", ""),

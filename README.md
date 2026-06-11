@@ -119,6 +119,32 @@ so the next `rag ingest` re-derives chunks and embeddings from the patched
 outline — without re-running Docling layout analysis on the rest of the
 document.
 
+If `table_structure_untrustworthy` flags a table's header band (garbled
+repeated text, or a data row fused into the header), `rag repair-tables
+<doc_id>` re-transcribes just that header band from a cropped page image via
+a vision-capable Bedrock model — the table's data-row column count (`C`) and
+header-row count (`H`) come from Docling's grid geometry, which stays
+reliable even when the header text doesn't. The proposed H×C grid must
+exactly tile the header band and pass anti-degenerate / anti-fusion checks
+(`table_repair.validate_header_grid`); rejected or skipped tables (header
+band too large to crop reliably, or data rows don't agree on a column count)
+keep their existing structure-free reading-order rendering — repair is
+additive, never a regression. Use `rag table-structure-sweep` +
+`rag repair-tables --dry-run` to preview what would be touched.
+
+**TODO — wider cross-document validation:** the detector heuristics and
+`validate_header_grid`'s invariants were derived from one document
+(PIC32CK1025GC01100, doc_id `d44efe...`), with a small tracked fixture corpus
+(`tests/fixtures/table_repair_corpus/`, exercised by
+`tests/test_table_repair_corpus.py`) adding a second, structurally different
+document (doc_id `928d4097...`) as a false-positive control. Before treating
+the repair logic as generally reliable across vendors, run
+`rag table-structure-sweep` + `rag repair-tables --dry-run` against more
+datasheets from other silicon vendors (ST, TI, NXP, Renesas, …) with varying
+table styles (register-bit-field, pin-mux, electrical-characteristics,
+multi-page), spot-check flagged tables manually, and grow the fixture corpus
+with any new defect shapes found.
+
 ## Wiring Claude Code to a project
 
 Copy `.mcp.json.example` to `.mcp.json` in your electronics project's repo

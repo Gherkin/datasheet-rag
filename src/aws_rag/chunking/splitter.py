@@ -251,12 +251,15 @@ def _create_micro_chunks(
             # Tables are atomic — never split today. A table whose structure
             # Docling has genuinely mangled beyond what our rendering/
             # detection safety nets can recover (see
-            # docling_parser._table_cells_to_compact_text and
-            # _detect_garbled_header) can still produce text too large for
-            # Bedrock's embedding input limit. Truncating would silently ship
-            # an incomplete table — worse than an error, for a RAG system
-            # whose whole point is trustworthy answers about these tables.
-            # Fail loudly with enough context instead.
+            # docling_parser.table_structure_untrustworthy,
+            # _table_cells_to_compact_text, and
+            # _table_cells_to_reading_order_text — the latter is the
+            # structure-free fallback already baked into elem.text when
+            # table_structure_warning is set) can still produce text too
+            # large for Bedrock's embedding input limit. Truncating would
+            # silently ship an incomplete table — worse than an error, for a
+            # RAG system whose whole point is trustworthy answers about these
+            # tables. Fail loudly with enough context instead.
             #
             # TODO: there are two genuine fixes here, neither implemented —
             # (a) page-boundary splitting for tables that physically span
@@ -267,9 +270,9 @@ def _create_micro_chunks(
             #     TOPLEFT-origin and often absent for empty cells), with no
             #     real multi-page+oversized instance yet to validate against;
             # (b) LLM-assisted introspective table repair/splitting (see
-            #     docs/table-structure-repair/plan.md, local/untracked) — the
-            #     more general fix, since plenty of oversized tables are
-            #     single-page and page-splitting wouldn't help them anyway.
+            #     docs/table-structure-repair/plan.md, local/untracked) — for
+            #     the (hopefully now smaller) set of tables still oversized
+            #     even after the structure-free fallback above.
             if len(elem.text) > _EMBEDDING_MAX_CHARS:
                 raise ValueError(
                     f"Table on page {elem.page} "
@@ -304,6 +307,7 @@ def _create_micro_chunks(
                 section_title=elem_section.title,
                 page=elem.page,
                 layout_type=LayoutType.TABLE,
+                table_structure_warning=elem.table_structure_warning,
             )
             chunks.append(chunk)
             counter += 1
@@ -539,6 +543,7 @@ def _make_chunk(
     section_title: str,
     page: int,
     layout_type: LayoutType,
+    table_structure_warning: str | None = None,
 ) -> Chunk:
     """Create a Chunk with standard metadata."""
     return Chunk(
@@ -554,6 +559,7 @@ def _make_chunk(
             section_title=section_title,
             page_numbers=[page],
             layout_type=layout_type,
+            table_structure_warning=table_structure_warning,
         ),
     )
 

@@ -1,0 +1,258 @@
+[
+  {
+    "row": 1,
+    "col": 1,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "",
+    "is_header": false
+  },
+  {
+    "row": 1,
+    "col": 2,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "MIN",
+    "is_header": true
+  },
+  {
+    "row": 1,
+    "col": 3,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "MAX",
+    "is_header": true
+  },
+  {
+    "row": 1,
+    "col": 4,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "UNIT",
+    "is_header": true
+  },
+  {
+    "row": 2,
+    "col": 1,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "DVDD to GND",
+    "is_header": true
+  },
+  {
+    "row": 2,
+    "col": 2,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "-0.3",
+    "is_header": false
+  },
+  {
+    "row": 2,
+    "col": 3,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "5.5",
+    "is_header": false
+  },
+  {
+    "row": 2,
+    "col": 4,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "V",
+    "is_header": false
+  },
+  {
+    "row": 3,
+    "col": 1,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "AVDD to GND",
+    "is_header": true
+  },
+  {
+    "row": 3,
+    "col": 2,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "-0.3",
+    "is_header": false
+  },
+  {
+    "row": 3,
+    "col": 3,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "5.5",
+    "is_header": false
+  },
+  {
+    "row": 3,
+    "col": 4,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "V",
+    "is_header": false
+  },
+  {
+    "row": 4,
+    "col": 1,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "AINx / GPOx (2) to GND",
+    "is_header": true
+  },
+  {
+    "row": 4,
+    "col": 2,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "GND - 0.3",
+    "is_header": false
+  },
+  {
+    "row": 4,
+    "col": 3,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "AVDD + 0.3",
+    "is_header": false
+  },
+  {
+    "row": 4,
+    "col": 4,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "V",
+    "is_header": false
+  },
+  {
+    "row": 5,
+    "col": 1,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "Digital input to GND",
+    "is_header": true
+  },
+  {
+    "row": 5,
+    "col": 2,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "GND - 0.3",
+    "is_header": false
+  },
+  {
+    "row": 5,
+    "col": 3,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "5.5",
+    "is_header": false
+  },
+  {
+    "row": 5,
+    "col": 4,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "V",
+    "is_header": false
+  },
+  {
+    "row": 6,
+    "col": 1,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "Current through any pin except supply pins (3)",
+    "is_header": true
+  },
+  {
+    "row": 6,
+    "col": 2,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "-10",
+    "is_header": false
+  },
+  {
+    "row": 6,
+    "col": 3,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "10",
+    "is_header": false
+  },
+  {
+    "row": 6,
+    "col": 4,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "mA",
+    "is_header": false
+  },
+  {
+    "row": 7,
+    "col": 1,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "Junction temperature, T J",
+    "is_header": true
+  },
+  {
+    "row": 7,
+    "col": 2,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "-40",
+    "is_header": false
+  },
+  {
+    "row": 7,
+    "col": 3,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "125",
+    "is_header": false
+  },
+  {
+    "row": 7,
+    "col": 4,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "\u00b0C",
+    "is_header": false
+  },
+  {
+    "row": 8,
+    "col": 1,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "Storage temperature, T stg",
+    "is_header": true
+  },
+  {
+    "row": 8,
+    "col": 2,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "-60",
+    "is_header": false
+  },
+  {
+    "row": 8,
+    "col": 3,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "150",
+    "is_header": false
+  },
+  {
+    "row": 8,
+    "col": 4,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "\u00b0C",
+    "is_header": false
+  }
+]

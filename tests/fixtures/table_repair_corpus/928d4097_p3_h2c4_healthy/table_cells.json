@@ -1,0 +1,610 @@
+[
+  {
+    "row": 1,
+    "col": 1,
+    "row_span": 1,
+    "col_span": 2,
+    "text": "PIN",
+    "is_header": true
+  },
+  {
+    "row": 1,
+    "col": 2,
+    "row_span": 1,
+    "col_span": 2,
+    "text": "PIN",
+    "is_header": true
+  },
+  {
+    "row": 1,
+    "col": 3,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "",
+    "is_header": false
+  },
+  {
+    "row": 1,
+    "col": 4,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "",
+    "is_header": false
+  },
+  {
+    "row": 2,
+    "col": 1,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "NAME",
+    "is_header": true
+  },
+  {
+    "row": 2,
+    "col": 2,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "NO.",
+    "is_header": true
+  },
+  {
+    "row": 2,
+    "col": 3,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "FUNCTION (1)",
+    "is_header": true
+  },
+  {
+    "row": 2,
+    "col": 4,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "DESCRIPTION",
+    "is_header": true
+  },
+  {
+    "row": 3,
+    "col": 1,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "AIN0/GPIO0",
+    "is_header": false
+  },
+  {
+    "row": 3,
+    "col": 2,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "15",
+    "is_header": false
+  },
+  {
+    "row": 3,
+    "col": 3,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "AI, DI, DO",
+    "is_header": false
+  },
+  {
+    "row": 3,
+    "col": 4,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "Channel 0; can be configured as either an analog input (default), digital input, or digital output.",
+    "is_header": false
+  },
+  {
+    "row": 4,
+    "col": 1,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "AIN1/GPIO1",
+    "is_header": false
+  },
+  {
+    "row": 4,
+    "col": 2,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "16",
+    "is_header": false
+  },
+  {
+    "row": 4,
+    "col": 3,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "AI, DI, DO",
+    "is_header": false
+  },
+  {
+    "row": 4,
+    "col": 4,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "Channel 1; can be configured as either an analog input (default), digital input, or digital output.",
+    "is_header": false
+  },
+  {
+    "row": 5,
+    "col": 1,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "AIN2/GPIO2",
+    "is_header": false
+  },
+  {
+    "row": 5,
+    "col": 2,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "1",
+    "is_header": false
+  },
+  {
+    "row": 5,
+    "col": 3,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "AI, DI, DO",
+    "is_header": false
+  },
+  {
+    "row": 5,
+    "col": 4,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "Channel 2; can be configured as either an analog input (default), digital input, or digital output.",
+    "is_header": false
+  },
+  {
+    "row": 6,
+    "col": 1,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "AIN3/GPIO3",
+    "is_header": false
+  },
+  {
+    "row": 6,
+    "col": 2,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "2",
+    "is_header": false
+  },
+  {
+    "row": 6,
+    "col": 3,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "AI, DI, DO",
+    "is_header": false
+  },
+  {
+    "row": 6,
+    "col": 4,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "Channel 3; can be configured as either an analog input (default), digital input, or digital output.",
+    "is_header": false
+  },
+  {
+    "row": 7,
+    "col": 1,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "AIN4/GPIO4",
+    "is_header": false
+  },
+  {
+    "row": 7,
+    "col": 2,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "3",
+    "is_header": false
+  },
+  {
+    "row": 7,
+    "col": 3,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "AI, DI, DO",
+    "is_header": false
+  },
+  {
+    "row": 7,
+    "col": 4,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "Channel 4; can be configured as either an analog input (default), digital input, or digital output.",
+    "is_header": false
+  },
+  {
+    "row": 8,
+    "col": 1,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "AIN5/GPIO5",
+    "is_header": false
+  },
+  {
+    "row": 8,
+    "col": 2,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "4",
+    "is_header": false
+  },
+  {
+    "row": 8,
+    "col": 3,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "AI, DI, DO",
+    "is_header": false
+  },
+  {
+    "row": 8,
+    "col": 4,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "Channel 5; can be configured as either an analog input (default), digital input, or digital output.",
+    "is_header": false
+  },
+  {
+    "row": 9,
+    "col": 1,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "AIN6/GPIO6",
+    "is_header": false
+  },
+  {
+    "row": 9,
+    "col": 2,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "5",
+    "is_header": false
+  },
+  {
+    "row": 9,
+    "col": 3,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "AI, DI, DO",
+    "is_header": false
+  },
+  {
+    "row": 9,
+    "col": 4,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "Channel 6; can be configured as either an analog input (default), digital input, or digital output.",
+    "is_header": false
+  },
+  {
+    "row": 10,
+    "col": 1,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "AIN7/GPIO7",
+    "is_header": false
+  },
+  {
+    "row": 10,
+    "col": 2,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "6",
+    "is_header": false
+  },
+  {
+    "row": 10,
+    "col": 3,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "AI, DI, DO",
+    "is_header": false
+  },
+  {
+    "row": 10,
+    "col": 4,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "Channel 7; can be configured as either an analog input (default), digital input, or digital output.",
+    "is_header": false
+  },
+  {
+    "row": 11,
+    "col": 1,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "AVDD",
+    "is_header": false
+  },
+  {
+    "row": 11,
+    "col": 2,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "7",
+    "is_header": false
+  },
+  {
+    "row": 11,
+    "col": 3,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "Supply",
+    "is_header": false
+  },
+  {
+    "row": 11,
+    "col": 4,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "Analog supply input, also used as the reference voltage to the ADC; connect a 1-\u00b5F decoupling capacitor to GND.",
+    "is_header": false
+  },
+  {
+    "row": 12,
+    "col": 1,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "CS",
+    "is_header": false
+  },
+  {
+    "row": 12,
+    "col": 2,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "11",
+    "is_header": false
+  },
+  {
+    "row": 12,
+    "col": 3,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "DI",
+    "is_header": false
+  },
+  {
+    "row": 12,
+    "col": 4,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "Chip-select input pin; active low. The device takes control of the data bus when CS is low. The device starts converting the active input channel on the rising edge of CS. SDO goes hi-Z when CS is high.",
+    "is_header": false
+  },
+  {
+    "row": 13,
+    "col": 1,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "DECAP",
+    "is_header": false
+  },
+  {
+    "row": 13,
+    "col": 2,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "8",
+    "is_header": false
+  },
+  {
+    "row": 13,
+    "col": 3,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "Supply",
+    "is_header": false
+  },
+  {
+    "row": 13,
+    "col": 4,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "Connect a 1-\u00b5F decoupling capacitor to GND for the internal power supply.",
+    "is_header": false
+  },
+  {
+    "row": 14,
+    "col": 1,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "DVDD",
+    "is_header": false
+  },
+  {
+    "row": 14,
+    "col": 2,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "10",
+    "is_header": false
+  },
+  {
+    "row": 14,
+    "col": 3,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "Supply",
+    "is_header": false
+  },
+  {
+    "row": 14,
+    "col": 4,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "Digital I/O supply voltage; connect a 1-\u00b5F decoupling capacitor to GND.",
+    "is_header": false
+  },
+  {
+    "row": 15,
+    "col": 1,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "GND",
+    "is_header": false
+  },
+  {
+    "row": 15,
+    "col": 2,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "9",
+    "is_header": false
+  },
+  {
+    "row": 15,
+    "col": 3,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "Supply",
+    "is_header": false
+  },
+  {
+    "row": 15,
+    "col": 4,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "Ground for the power supply; all analog and digital signals are referred to this pin voltage.",
+    "is_header": false
+  },
+  {
+    "row": 16,
+    "col": 1,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "SCLK",
+    "is_header": false
+  },
+  {
+    "row": 16,
+    "col": 2,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "13",
+    "is_header": false
+  },
+  {
+    "row": 16,
+    "col": 3,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "DI",
+    "is_header": false
+  },
+  {
+    "row": 16,
+    "col": 4,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "Serial clock for the SPI interface.",
+    "is_header": false
+  },
+  {
+    "row": 17,
+    "col": 1,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "SDI",
+    "is_header": false
+  },
+  {
+    "row": 17,
+    "col": 2,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "14",
+    "is_header": false
+  },
+  {
+    "row": 17,
+    "col": 3,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "DI",
+    "is_header": false
+  },
+  {
+    "row": 17,
+    "col": 4,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "Serial data in for the device.",
+    "is_header": false
+  },
+  {
+    "row": 18,
+    "col": 1,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "SDO",
+    "is_header": false
+  },
+  {
+    "row": 18,
+    "col": 2,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "12",
+    "is_header": false
+  },
+  {
+    "row": 18,
+    "col": 3,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "DO",
+    "is_header": false
+  },
+  {
+    "row": 18,
+    "col": 4,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "Serial data out for the device.",
+    "is_header": false
+  },
+  {
+    "row": 19,
+    "col": 1,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "Thermal pad",
+    "is_header": false
+  },
+  {
+    "row": 19,
+    "col": 2,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "-",
+    "is_header": false
+  },
+  {
+    "row": 19,
+    "col": 3,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "Supply",
+    "is_header": false
+  },
+  {
+    "row": 19,
+    "col": 4,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "Exposed thermal pad; connect to GND.",
+    "is_header": false
+  }
+]

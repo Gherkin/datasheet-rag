@@ -185,6 +185,44 @@ class Settings(BaseSettings):
                     "vision is slower and rate-limits are tighter.",
     )
 
+    # Table-structure repair (Bedrock Claude vision — see
+    # docs/table-structure-repair/{problem,plan}.md). Distinct from
+    # description_model_id: re-deriving a table's row/column/header structure
+    # from a crop + the existing (suspect-structure, trustworthy-text) cells
+    # is a harder structural-reasoning task than describing a figure, so a
+    # stronger model than figure-description Haiku is recommended — set this
+    # explicitly to a vision-capable Claude on Bedrock (e.g. a Sonnet
+    # inference-profile ARN for your account/region). Falls back to
+    # description_model_id if unset, but that default is tuned for cheap
+    # figure descriptions, not table-structure inference.
+    table_repair_model_id: str | None = Field(
+        default=None,
+        description=(
+            "Bedrock model ID for LLM-assisted table-structure repair "
+            "(Stage 3 of docs/table-structure-repair/plan.md). Recommended: "
+            "Claude Sonnet — stronger structural reasoning than the Haiku "
+            "used for figure descriptions, which matters for re-deriving "
+            "row/column/header layout from a table crop. Falls back to "
+            "description_model_id if unset (not recommended for production "
+            "use — that default is tuned for cheap figure descriptions)."
+        ),
+    )
+    table_repair_max_tokens: int = Field(
+        default=4000,
+        description=(
+            "Max output tokens per table-repair call. Higher than figure "
+            "descriptions — the response is structured per-cell data "
+            "(row/col/span/header for every origin cell), not 2-3 sentences."
+        ),
+    )
+    table_repair_concurrency: int = Field(
+        default=2,
+        description="Concurrent table-repair API calls. Lower than figure "
+                    "description — larger payloads (image + full cell list), "
+                    "slower responses, and this is an opt-in maintenance "
+                    "path (rag repair-tables), not an ingest hot-path knob.",
+    )
+
     @field_validator(
         "figures_dir", "pdf_dir", "output_dir", "sqlite_db_path", "default_project_id",
         mode="before",

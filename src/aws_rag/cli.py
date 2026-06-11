@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import re
 import socket
 from pathlib import Path
+from typing import Any
 
 import click
 from rich.console import Console
@@ -1794,6 +1796,421 @@ def reconvert_tables_cmd(
         )
     else:
         console.print("Run `rag ingest` to (re)derive chunks and embeddings from the patched outline.")
+
+
+@cli.command("table-structure-sweep")
+@click.argument("doc_id", type=str)
+@click.option(
+    "--list-flagged", is_flag=True,
+    help="Print every flagged table (page, caption, reason) instead of just the summary counts.",
+)
+@click.option(
+    "--sample", "sample_n", type=int, default=0,
+    help=(
+        "Print the rendered text of N randomly-sampled flagged tables AND N "
+        "randomly-sampled non-flagged tables, for manual eyeballing — a "
+        "zero-cost spot-check of detector accuracy (false positives among "
+        "the flagged sample, false negatives among the non-flagged one) "
+        "before spending on `rag repair-tables`. Sampling uses a fixed seed "
+        "so repeated runs show the same tables."
+    ),
+)
+def table_structure_sweep_cmd(doc_id: str, list_flagged: bool, sample_n: int) -> None:
+    """Report how many cached tables Docling's structure detectors flag as untrustworthy.
+
+    This is the Phase-0 instrument from docs/table-structure-repair/plan.md —
+    a zero-cost (pure Python over the cached `<doc_id>_outline.json`, no
+    Docling re-run, no AWS calls) sweep across every TABLE element already in
+    the layout outline, reporting how many each of
+    docling_parser._detect_garbled_header (failure mode #1: repeated header
+    text) and _detect_fused_header_row (failure mode #3: data leaked into the
+    header band) independently catches, and their overlap.
+
+    The resulting "fraction flagged" number is what gates whether an
+    LLM-assisted repair pipeline (Stage 3 of that plan) belongs in the ingest
+    hot path, a lazy on-demand path, or an explicit opt-in maintenance
+    command — don't guess the cost shape, measure it.
+
+    Looks up the cache directly by doc_id (full hash or unambiguous prefix —
+    like `reconvert-tables`, this works straight off `<doc_id>_outline.json`,
+    not the sqlite ingest registry, since a layout conversion can be cached
+    without a completed ingest).
+    """
+    from aws_rag.chunking.layout_parser import ContentElement, DocumentOutline, ElementType
+    from aws_rag.docling_parser import (
+        _detect_fused_header_row,
+        _detect_garbled_header,
+        _table_cells_to_compact_text,
+    )
+
+    settings = get_settings()
+    matches = sorted(settings.output_dir.glob(f"{doc_id}*_outline.json"))
+    if not matches:
+        raise click.ClickException(
+            f"No cached layout outline matching doc_id {doc_id!r} in "
+            f"{settings.output_dir}. Run `rag ingest` (Docling backend) on "
+            "this document first — the sweep only inspects an existing "
+            "outline, it doesn't convert."
+        )
+    if len(matches) > 1:
+        names = ", ".join(p.name.removesuffix("_outline.json") for p in matches)
+        raise click.ClickException(f"doc_id {doc_id!r} is ambiguous — matches: {names}")
+
+    outline_path = matches[0]
+    did = outline_path.name.removesuffix("_outline.json")
+
+    with open(outline_path) as f:
+        cached = json.load(f)
+    outline = DocumentOutline.from_dict(cached["outline"])
+
+    tables = [
+        el
+        for section in outline.all_sections_flat
+        for el in section.elements
+        if el.element_type == ElementType.TABLE
+    ]
+    if not tables:
+        console.print(f"[yellow]No cached tables found for doc_id={did}.[/]")
+        return
+
+    flagged: list[dict[str, object]] = []
+    # Parallel (element, reason | None) record — feeds --sample below without
+    # re-running the detectors over the whole corpus a second time.
+    judged: list[tuple[ContentElement, str | None]] = []
+    garbled_count = fused_count = both_count = 0
+    for el in tables:
+        garbled = _detect_garbled_header(el.table_cells)
+        fused = _detect_fused_header_row(el.table_cells) if garbled is None else None
+        if garbled is not None:
+            garbled_count += 1
+            if _detect_fused_header_row(el.table_cells) is not None:
+                both_count += 1
+        if fused is not None:
+            fused_count += 1
+        reason: str | None = None
+        if garbled is not None:
+            reason = f"garbled ({garbled[:40]!r}…)"
+        elif fused is not None:
+            reason = f"fused ({fused})"
+        if reason is not None:
+            flagged.append({"page": el.page, "caption": el.table_title, "reason": reason})
+        judged.append((el, reason))
+
+    total = len(tables)
+    flagged_count = len(flagged)
+    summary = Table(
+        title=f"Table-structure sweep — {did[:SHORT_DOC_ID_LEN]} ({total:,} cached tables)"
+    )
+    summary.add_column("Detector")
+    summary.add_column("Flagged", justify="right")
+    summary.add_column("% of corpus", justify="right")
+
+    def _row(label: str, count: int) -> None:
+        summary.add_row(label, f"{count:,}", f"{count / total:.1%}")
+
+    _row("_detect_garbled_header (mode #1: repeated text)", garbled_count)
+    _row("_detect_fused_header_row (mode #3: data-in-header)", fused_count)
+    _row("caught by both", both_count)
+    _row("[bold]flagged untrustworthy (either)[/]", flagged_count)
+    console.print(summary)
+
+    if list_flagged and flagged:
+        detail = Table(title="Flagged tables")
+        detail.add_column("Page", justify="right")
+        detail.add_column("Caption")
+        detail.add_column("Reason")
+        for entry in flagged:
+            detail.add_row(str(entry["page"]), (entry["caption"][:60] or "—"), entry["reason"])
+        console.print(detail)
+    elif flagged:
+        console.print(
+            "Pass [cyan]--list-flagged[/] to see page numbers and captions for each flagged table."
+        )
+
+    if sample_n > 0:
+        flagged_els = [(el, reason) for el, reason in judged if reason is not None]
+        clean_els = [(el, reason) for el, reason in judged if reason is None]
+        rng = random.Random(0)  # fixed seed: repeated runs sample the same tables
+        flagged_sample = rng.sample(flagged_els, min(sample_n, len(flagged_els)))
+        clean_sample = rng.sample(clean_els, min(sample_n, len(clean_els)))
+
+        console.print(
+            "\n[bold]Spot-check[/] — eyeball whether the detector's calls look "
+            "right before spending on `rag repair-tables` (zero AWS cost; "
+            "renders straight from the cached outline). For "
+            "[yellow]flagged[/] tables, does the asserted structure below "
+            "actually look broken? For [green]not flagged[/] tables, does it "
+            "look correct (no missed fusion/garbling)?"
+        )
+        for label, sample in (("FLAGGED", flagged_sample), ("NOT FLAGGED", clean_sample)):
+            for el, reason in sample:
+                where = el.table_title or f"page {el.page}"
+                header = f"[bold]{label}[/] — {where} (p.{el.page})"
+                if reason is not None:
+                    header += f" — {reason}"
+                console.print(f"\n{header}")
+                rendered = _table_cells_to_compact_text(el.table_cells)
+                console.print(rendered[:1500] + ("…" if len(rendered) > 1500 else ""))
+
+
+# Sanity cap for repair-tables: if Docling's is_header tagging is implausibly
+# large, it's too unreliable to use as a header-band crop boundary — skip
+# repair and keep the existing Stage-2 reading-order fallback.
+_MAX_HEADER_ROWS = 6
+_MAX_HEADER_FRACTION = 0.3
+
+
+@cli.command("repair-tables")
+@click.argument("doc_id", type=str)
+@click.option(
+    "--limit", type=int, default=None,
+    help="Repair at most N flagged tables (omit to repair all of them).",
+)
+@click.option(
+    "--model-id", default=None,
+    help=(
+        "Override the Bedrock model ID for this run. Defaults to "
+        "table_repair_model_id, falling back to description_model_id "
+        "(Haiku — cheap, and validation rejects anything structurally "
+        "inconsistent, so a weaker model fails safe rather than silently)."
+    ),
+)
+@click.option("--dpi", type=int, default=200, help="Render DPI for table crops (default: 200).")
+@click.option(
+    "--force", is_flag=True,
+    help="Re-repair tables that already have a cached table_repaired_cells.",
+)
+@click.option(
+    "--dry-run", is_flag=True,
+    help="List the tables that would be repaired without calling Bedrock or touching the cache.",
+)
+@click.option("-v", "--verbose", is_flag=True, help="Print rejection reasons as they happen.")
+def repair_tables_cmd(
+    doc_id: str,
+    limit: int | None,
+    model_id: str | None,
+    dpi: int,
+    force: bool,
+    dry_run: bool,
+    verbose: bool,
+) -> None:
+    """LLM-assisted repair of tables flagged untrustworthy (Stage 3).
+
+    For each cached TABLE that ``table_structure_untrustworthy`` flags (and
+    doesn't already carry a cached repair, unless --force): renders the
+    table's source page, crops to its header band (plus one data row of
+    visual context), and asks a vision-capable Claude on Bedrock to
+    re-transcribe the header band as an H×C grid — ``H`` header rows (from
+    Docling's ``is_header`` tagging) by ``C`` columns (from the table's
+    trusted data-row grid). The proposal is validated against threshold-free
+    structural invariants (the H×C band is tiled exactly once, the proposed
+    header isn't itself garbled or a recreation of a fused data row — see
+    table_repair.validate_header_grid). A validated proposal replaces the
+    header band wholesale (data rows are never touched), is cached as
+    ``table_repaired_cells``, the chunk text is re-rendered through the same
+    trusted compact-grid path a correctly-parsed table gets, and
+    ``table_structure_warning`` is cleared. An unparseable or structurally-
+    inconsistent response is rejected outright, as is a table whose header
+    band is implausibly large to crop reliably — repair is additive, never a
+    regression; the existing structure-free rendering is kept.
+
+    Like `reconvert-tables`, this patches the cached `<doc_id>_outline.json`
+    in place and invalidates the cached chunk graph so the next `rag ingest`
+    re-derives chunks/embeddings from the repaired structure. Run
+    `rag table-structure-sweep <doc_id>` first to see what would be touched
+    and at roughly what volume.
+    """
+    import io
+
+    from pdf2image import convert_from_bytes
+
+    from aws_rag.chunking.layout_parser import ContentElement, DocumentOutline, ElementType
+    from aws_rag.docling_parser import (
+        _table_column_count,
+        _table_header_row_count,
+        table_structure_untrustworthy,
+    )
+    from aws_rag.pdf_render import load_pdf_bytes
+    from aws_rag.table_repair import (
+        TableRepairer,
+        apply_repaired_structure,
+        splice_header_band,
+    )
+
+    def _skip_reason(cells: list[dict[str, Any]]) -> str | None:
+        """Why header-band repair can't safely run on this table, or None."""
+        header_rows = _table_header_row_count(cells)
+        total_rows = max((c["row"] for c in cells), default=0)
+        if header_rows == 0:
+            return "no header rows tagged"
+        if header_rows > _MAX_HEADER_ROWS or (
+            total_rows and header_rows > _MAX_HEADER_FRACTION * total_rows
+        ):
+            return "header band too large to crop reliably"
+        if _table_column_count(cells) == 0:
+            return "data rows disagree on column count — can't trust C"
+        return None
+
+    settings = get_settings()
+    matches = sorted(settings.output_dir.glob(f"{doc_id}*_outline.json"))
+    if not matches:
+        raise click.ClickException(
+            f"No cached layout outline matching doc_id {doc_id!r} in "
+            f"{settings.output_dir}. Run `rag ingest` (Docling backend) on "
+            "this document first — repair-tables only patches an existing "
+            "outline, it doesn't convert."
+        )
+    if len(matches) > 1:
+        names = ", ".join(p.name.removesuffix("_outline.json") for p in matches)
+        raise click.ClickException(f"doc_id {doc_id!r} is ambiguous — matches: {names}")
+
+    outline_path = matches[0]
+    did = outline_path.name.removesuffix("_outline.json")
+    chunks_path = settings.output_dir / f"{did}_chunks.json"
+
+    with open(outline_path) as f:
+        cached = json.load(f)
+    outline = DocumentOutline.from_dict(cached["outline"])
+
+    tables: list[ContentElement] = [
+        el
+        for section in outline.all_sections_flat
+        for el in section.elements
+        if el.element_type == ElementType.TABLE
+    ]
+
+    candidates: list[tuple[ContentElement, str]] = []
+    for el in tables:
+        if el.table_repaired_cells is not None and not force:
+            continue
+        reason = table_structure_untrustworthy(el.table_cells)
+        if reason is not None:
+            candidates.append((el, reason))
+
+    if limit is not None:
+        candidates = candidates[:limit]
+
+    if not candidates:
+        hint = "pass --force to re-repair cached ones" if not force else "all are already repaired"
+        console.print(
+            f"[green]Nothing to repair[/] for doc_id={did[:SHORT_DOC_ID_LEN]} — "
+            f"no untrustworthy tables without a cached repair ({hint}). "
+            "Run `rag table-structure-sweep` to confirm the flagged count."
+        )
+        return
+
+    repairer = TableRepairer(model_id=model_id, verbose=verbose)
+    console.print(
+        f"Repairing up to [cyan]{len(candidates)}[/] flagged table(s) of "
+        f"{len(tables):,} via header-band re-transcription with "
+        f"[cyan]{repairer.model_id}[/]…"
+    )
+    if dry_run:
+        for el, reason in candidates:
+            skip = _skip_reason(el.table_cells)
+            tag = f"skip — {skip}" if skip is not None else "LLM (header band)"
+            console.print(
+                f"  [yellow]would repair ({tag})[/] p.{el.page} "
+                f"{(el.table_title or '(untitled)')[:60]} — {reason}"
+            )
+        console.print("[yellow]--dry-run: no Bedrock calls made, cache untouched.[/]")
+        return
+
+    by_page: dict[int, list[tuple[ContentElement, str]]] = {}
+    for el, reason in candidates:
+        by_page.setdefault(el.page, []).append((el, reason))
+
+    pdf_bytes = load_pdf_bytes(did)
+
+    repaired_count = 0
+    llm_count = 0
+    for page in sorted(by_page):
+        page_image = None  # lazy: render only if a table on this page needs repair
+        for el, reason in by_page[page]:
+            where = (el.table_title or "(untitled)")[:60]
+            cells = el.table_cells
+
+            skip = _skip_reason(cells)
+            if skip is not None:
+                console.print(f"  [yellow]skipped ({skip})[/] p.{el.page} {where} — {reason}")
+                continue
+
+            header_rows = _table_header_row_count(cells)
+            total_rows = max((c["row"] for c in cells), default=0)
+            column_count = _table_column_count(cells)
+
+            # Crop: header band + one data row for visual alignment context
+            crop_end_row = min(header_rows + 1, total_rows) if total_rows else header_rows
+
+            if page_image is None:
+                page_images = convert_from_bytes(
+                    pdf_bytes, first_page=page, last_page=page, dpi=dpi
+                )
+                if not page_images:
+                    console.print(
+                        f"[yellow]Could not render page {page}[/] — skipping its "
+                        f"{len(by_page[page])} flagged table(s)."
+                    )
+                    break
+                page_image = page_images[0]
+
+            crop = repairer.crop_table(
+                page_image,
+                bbox=el.bbox,
+                row_range=(1, crop_end_row),
+                total_rows=total_rows,
+            )
+            buf = io.BytesIO()
+            crop.save(buf, format="PNG")
+            llm_count += 1
+
+            proposed = repairer.repair_header_band(
+                image_bytes=buf.getvalue(),
+                image_format="png",
+                cells=cells,
+                caption=el.table_title,
+                header_rows=header_rows,
+                column_count=column_count,
+            )
+            if proposed is None:
+                console.print(f"  [yellow]rejected[/] p.{el.page} {where} — {reason}")
+                continue
+
+            merged = splice_header_band(
+                cells, proposed, header_rows=header_rows, column_count=column_count
+            )
+            apply_repaired_structure(el, merged)
+            repaired_count += 1
+            console.print(f"  [green]repaired (LLM)[/] p.{el.page} {where} — was {reason}")
+
+    s = repairer.stats()
+    console.print(
+        f"\n[bold]{repaired_count}/{len(candidates)}[/] repaired "
+        f"(LLM calls: {llm_count}) · "
+        f"rejected={s['total_rejected']} · errors={s['total_errors']} · "
+        f"in={s['total_input_tokens']:,} tok · out={s['total_output_tokens']:,} tok"
+    )
+
+    if repaired_count == 0:
+        console.print("[yellow]Nothing repaired — leaving the cached outline untouched.[/]")
+        return
+
+    with open(outline_path, "w") as f:
+        json.dump({"outline": outline.to_dict(), "figure_regions": cached["figure_regions"]}, f)
+    console.print(f"[green]Patched outline saved[/] → [cyan]{outline_path}[/]")
+
+    if chunks_path.exists():
+        chunks_path.unlink()
+        console.print(
+            f"[green]Invalidated cached chunk graph[/] → removed [cyan]{chunks_path}[/]. "
+            f"Re-run `rag ingest` (without --force) to re-derive chunks and "
+            f"embeddings from the repaired structure — Docling layout "
+            f"analysis will be skipped since the outline cache still exists."
+        )
+    else:
+        console.print(
+            "Run `rag ingest` to (re)derive chunks and embeddings from the repaired outline."
+        )
 
 
 # ---------------------------------------------------------------------------

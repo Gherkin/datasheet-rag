@@ -182,6 +182,23 @@ def _shape_chunk(result_or_chunk: Any, *, score: float | None = None) -> dict[st
             f"you MUST call show_figure('{chunk.id}') — do not skip it. "
             f"If relevance is uncertain, offer it to the user instead of silently skipping."
         )
+    if chunk.metadata.layout_type == LayoutType.TABLE and pages:
+        warning = chunk.metadata.table_structure_warning
+        if warning:
+            out["table_structure_warning"] = warning
+            out["DISPLAY_INSTRUCTION"] = (
+                f"This table's structure could not be fully verified ({warning}). "
+                f"Before citing specific values from it, call "
+                f"show_page('{chunk.doc_id}', {pages[0]}) to visually check "
+                f"the source page against the text above."
+            )
+        else:
+            out["DISPLAY_INSTRUCTION"] = (
+                "Docling's table extraction can mislabel headers or merge stray text into "
+                "cells even when no warning is raised. If you're about to cite a specific "
+                f"value from this table, consider calling show_page('{chunk.doc_id}', {pages[0]}) "
+                "to visually confirm it against the source page."
+            )
     if score is not None:
         out["score"] = round(float(score), 4)
     return out

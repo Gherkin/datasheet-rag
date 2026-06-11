@@ -1,0 +1,322 @@
+[
+  {
+    "row": 1,
+    "col": 1,
+    "row_span": 1,
+    "col_span": 4,
+    "text": "BOR_TRIP_AVDD HYST_BOR_AVDD",
+    "is_header": true
+  },
+  {
+    "row": 1,
+    "col": 2,
+    "row_span": 1,
+    "col_span": 4,
+    "text": "BOR_TRIP_AVDD HYST_BOR_AVDD",
+    "is_header": true
+  },
+  {
+    "row": 1,
+    "col": 3,
+    "row_span": 1,
+    "col_span": 4,
+    "text": "BOR_TRIP_AVDD HYST_BOR_AVDD",
+    "is_header": true
+  },
+  {
+    "row": 1,
+    "col": 4,
+    "row_span": 1,
+    "col_span": 4,
+    "text": "BOR_TRIP_AVDD HYST_BOR_AVDD",
+    "is_header": true
+  },
+  {
+    "row": 2,
+    "col": 1,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "Value",
+    "is_header": true
+  },
+  {
+    "row": 2,
+    "col": 2,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "Description",
+    "is_header": true
+  },
+  {
+    "row": 2,
+    "col": 3,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "Value",
+    "is_header": true
+  },
+  {
+    "row": 2,
+    "col": 4,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "Description",
+    "is_header": true
+  },
+  {
+    "row": 3,
+    "col": 1,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "0x00",
+    "is_header": false
+  },
+  {
+    "row": 3,
+    "col": 2,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "1.67-1.71V",
+    "is_header": false
+  },
+  {
+    "row": 3,
+    "col": 3,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "0",
+    "is_header": false
+  },
+  {
+    "row": 3,
+    "col": 4,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "20.0 mV",
+    "is_header": false
+  },
+  {
+    "row": 4,
+    "col": 1,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "",
+    "is_header": false
+  },
+  {
+    "row": 4,
+    "col": 2,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "",
+    "is_header": false
+  },
+  {
+    "row": 4,
+    "col": 3,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "1",
+    "is_header": false
+  },
+  {
+    "row": 4,
+    "col": 4,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "40.0 mV",
+    "is_header": false
+  },
+  {
+    "row": 5,
+    "col": 1,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "0x01",
+    "is_header": false
+  },
+  {
+    "row": 5,
+    "col": 2,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "2.19-2.22V",
+    "is_header": false
+  },
+  {
+    "row": 5,
+    "col": 3,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "0",
+    "is_header": false
+  },
+  {
+    "row": 5,
+    "col": 4,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "62.5 mV",
+    "is_header": false
+  },
+  {
+    "row": 6,
+    "col": 1,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "",
+    "is_header": false
+  },
+  {
+    "row": 6,
+    "col": 2,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "",
+    "is_header": false
+  },
+  {
+    "row": 6,
+    "col": 3,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "1",
+    "is_header": false
+  },
+  {
+    "row": 6,
+    "col": 4,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "125 mV",
+    "is_header": false
+  },
+  {
+    "row": 7,
+    "col": 1,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "0x02",
+    "is_header": false
+  },
+  {
+    "row": 7,
+    "col": 2,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "2.63-2.67V",
+    "is_header": false
+  },
+  {
+    "row": 7,
+    "col": 3,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "0",
+    "is_header": false
+  },
+  {
+    "row": 7,
+    "col": 4,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "100 mV",
+    "is_header": false
+  },
+  {
+    "row": 8,
+    "col": 1,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "",
+    "is_header": false
+  },
+  {
+    "row": 8,
+    "col": 2,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "",
+    "is_header": false
+  },
+  {
+    "row": 8,
+    "col": 3,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "1",
+    "is_header": false
+  },
+  {
+    "row": 8,
+    "col": 4,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "200 mV",
+    "is_header": false
+  },
+  {
+    "row": 9,
+    "col": 1,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "0x03",
+    "is_header": false
+  },
+  {
+    "row": 9,
+    "col": 2,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "2.96-2.96V",
+    "is_header": false
+  },
+  {
+    "row": 9,
+    "col": 3,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "0",
+    "is_header": false
+  },
+  {
+    "row": 9,
+    "col": 4,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "125 mV",
+    "is_header": false
+  },
+  {
+    "row": 10,
+    "col": 1,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "",
+    "is_header": false
+  },
+  {
+    "row": 10,
+    "col": 2,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "",
+    "is_header": false
+  },
+  {
+    "row": 10,
+    "col": 3,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "1",
+    "is_header": false
+  },
+  {
+    "row": 10,
+    "col": 4,
+    "row_span": 1,
+    "col_span": 1,
+    "text": "300 mV",
+    "is_header": false
+  }
+]

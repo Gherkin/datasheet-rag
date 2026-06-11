@@ -356,6 +356,12 @@ _GARBLED_HEADER_MIN_CHARS = 12
 # header rather than correctly recognising the table's real column structure.
 _GARBLED_HEADER_MIN_REPEATS = 3
 
+# A header/data text overlap needs to be at least this long to count as a
+# fusion signal — single-character tokens ("-", "x", "0") are common
+# placeholder/footnote markers that legitimately appear in both header and
+# data cells without indicating that a data row was tagged as a header.
+_FUSED_HEADER_MIN_CHARS = 2
+
 
 def _detect_garbled_header(cells: list[dict[str, Any]]) -> str | None:
     """Return the repeated text if this table's header looks misparsed.
@@ -386,7 +392,193 @@ def _detect_garbled_header(cells: list[dict[str, Any]]) -> str | None:
     return None
 
 
-def _table_cells_to_compact_text(cells: list[dict[str, Any]], *, omit_header: bool = False) -> str:
+def _detect_fused_header_row(cells: list[dict[str, Any]]) -> str | None:
+    """Return overlapping text if a header row looks fused with a data row.
+
+    TableFormer can fuse a data row into the header band on complex tables —
+    e.g. tagging a pin number ("30"), its part-style identifiers ("PB08",
+    "SERCOM3_PAD3") and the *real* header cells ("Port", "SERCOM") all as
+    ``is_header=True`` in adjacent rows. Unlike the garbled-header failure
+    above, this output looks structurally clean — separated cells, no
+    repetition — so only its *content* gives it away: a pin's actual values
+    end up split across rows and shifted relative to the header (problem.md
+    failure mode #3).
+
+    Headers describe columns; they don't repeat the values a table reports.
+    So a cell tagged ``is_header=True`` whose exact text also occurs as a
+    *non-header* origin cell elsewhere in the same table is a candidate for
+    "data value that leaked into the header band" — a structural
+    self-consistency check that needs no shape heuristics or magic
+    thresholds (cf. _GARBLED_HEADER_MIN_CHARS).
+
+    That candidate signal alone over-fires on multi-block register tables —
+    e.g. a 32-bit register rendered as four repeated "Bit / Access / Reset"
+    sub-blocks (bits 31-24, 23-16, …): Docling tags the *first* block's row
+    labels ``is_header=True`` but the repeats in later blocks
+    ``is_header=False``, so "bit"/"access"/"reset" each show up in both sets
+    despite the table being perfectly fine — they're legitimately-recurring
+    *structural labels*, not leaked data.
+
+    The distinguishing trait of *real* fusion (problem.md's Table 5-6: pin
+    30's row — "30", "PB08", "SERCOM3_PAD3" — tagged as header alongside the
+    genuine "Port"/"SERCOM" labels) is that it pulls a whole DATA ROW of
+    several distinct, mutually-unrelated values into the header band
+    *together*. An individually-recurring label can never do that — it is,
+    by construction, the only overlap candidate in its row (surrounded by
+    genuinely distinct header content, e.g. the bit-position numbers). So:
+    flag fusion only when **multiple** distinct overlap candidates cluster in
+    the *same* header row — that is what a leaked row looks like, and a lone
+    recurring label structurally cannot produce it.
+    """
+    origin = [c for c in cells if c.get("is_origin", True)]
+    header_texts = {
+        c["text"].strip().casefold()
+        for c in origin
+        if c.get("is_header") and c["text"].strip()
+    }
+    data_texts = {
+        c["text"].strip().casefold()
+        for c in origin
+        if not c.get("is_header") and c["text"].strip()
+    }
+    candidates = {t for t in (header_texts & data_texts) if len(t) >= _FUSED_HEADER_MIN_CHARS}
+    if not candidates:
+        return None
+
+    candidates_by_row: dict[int, set[str]] = {}
+    for c in origin:
+        if not c.get("is_header"):
+            continue
+        text = c["text"].strip().casefold()
+        if text in candidates:
+            candidates_by_row.setdefault(c["row"], set()).add(text)
+
+    leaked_row = next((texts for texts in candidates_by_row.values() if len(texts) >= 2), None)
+    if leaked_row is not None:
+        return ", ".join(sorted(leaked_row)[:3])
+    return None
+
+
+def _table_header_row_count(cells: list[dict[str, Any]]) -> int:
+    """Number of rows (from row 1) that make up this table's header band.
+
+    Used by the header-band repair to size the crop and the proposal grid —
+    derived from Docling's ``is_header`` tagging, which (per
+    :func:`_detect_fused_header_row`'s docstring) can over- or under-tag in
+    pathological cases, so callers should sanity-check the result before
+    relying on it as a crop boundary.
+    """
+    header_origin = [c for c in cells if c.get("is_origin", True) and c.get("is_header")]
+    if not header_origin:
+        return 0
+    return max(c["row"] for c in header_origin)
+
+
+# Header-band repair trusts the data grid's column count as ground truth for
+# what the re-transcribed header must tile. If the data rows themselves
+# disagree on width below this fraction, that trust is misplaced — e.g.
+# PIC32CK1025GC01100 p.16's table has data rows of width 37/44/55 (mode
+# 37 covers only 5/9 = 56% of rows) while the table visually has ~40
+# columns; a header forced to tile 37 columns would be structurally valid
+# (passes every check in validate_header_grid) but silently misaligned
+# against the real data columns from partway through the table onward —
+# worse than the honest reading-order fallback it would replace.
+_COLUMN_COUNT_CONSISTENCY_THRESHOLD = 0.7
+
+
+def _table_column_count(cells: list[dict[str, Any]]) -> int:
+    """Trusted column count, derived from the table's data rows.
+
+    Header bands are exactly the part of the grid that
+    :func:`table_structure_untrustworthy` doesn't trust — but the data rows
+    below them retain a reliable column count for *most* rows. A handful of
+    data rows can still have their own row-level corruption (extra/merged
+    cells widening or narrowing just that row), so taking ``max()`` over all
+    data rows is fragile — one outlier row inflates ``C`` for the whole
+    table. The width shared by the *most* data rows is the table's real
+    column count; outlier rows are themselves a sign of trouble but don't
+    change what the header band needs to tile. Falls back to the widest row
+    in the table if there are no data rows (a degenerate all-header table).
+
+    Returns ``0`` — "don't trust this table's column count at all" — if
+    fewer than :data:`_COLUMN_COUNT_CONSISTENCY_THRESHOLD` of the data rows
+    agree on a single width (see module comment above).
+    """
+    header_rows = _table_header_row_count(cells)
+    data = [c for c in cells if c.get("is_origin", True) and c["row"] > header_rows]
+    source = data if data else [c for c in cells if c.get("is_origin", True)]
+    if not source:
+        return 0
+    widths_by_row: dict[int, int] = {}
+    for c in source:
+        right_edge = c["col"] + c["col_span"] - 1
+        widths_by_row[c["row"]] = max(widths_by_row.get(c["row"], 0), right_edge)
+    width, count = Counter(widths_by_row.values()).most_common(1)[0]
+    if count / len(widths_by_row) < _COLUMN_COUNT_CONSISTENCY_THRESHOLD:
+        return 0
+    return width
+
+
+def table_structure_untrustworthy(cells: list[dict[str, Any]]) -> str | None:
+    """Return a human-readable reason if this table's structure is untrustworthy.
+
+    Two independent signals feed this gate:
+
+    - :func:`_detect_garbled_header` — TableFormer stamped one cell's text
+      across many header positions (failure mode #1: loud, self-announcing
+      via repetition).
+    - :func:`_detect_fused_header_row` — TableFormer tagged data-row content
+      as header content (failure mode #3: looks clean, silently wrong).
+
+    Either one means the row/column/header grid Docling proposed cannot be
+    trusted as-is. Callers should not assert that grid (e.g. via
+    :func:`_table_cells_to_compact_text`'s pipe-delimited columns) — instead
+    fall back to :func:`_table_cells_to_reading_order_text`, which makes no
+    structural claims. See docs/table-structure-repair/{problem,plan}.md for
+    the full investigation this responds to.
+    """
+    garbled = _detect_garbled_header(cells)
+    if garbled is not None:
+        return f"garbled header — {garbled[:60]!r} repeated across columns"
+    fused = _detect_fused_header_row(cells)
+    if fused is not None:
+        return f"fused header/data row — {fused!r} tagged as both header and data"
+    return None
+
+
+def _table_cells_to_reading_order_text(cells: list[dict[str, Any]]) -> str:
+    """Render table cells as plain text in geometric reading order, no grid asserted.
+
+    Used when :func:`table_structure_untrustworthy` flags a table — emitting
+    Docling's proposed row/column/header structure (even via the compact
+    pipe-delimited form) would assert a grid that may be silently wrong, and
+    a reader (human or LLM) would conclude a pin/register/field does
+    something it doesn't (problem.md failure mode #3). This instead emits
+    each origin cell's text once, in row-major reading order (deduplicated
+    via ``is_origin`` — the same span-collapsing _table_cells_to_compact_text
+    relies on), with no column alignment implied. Strictly worse for *quick
+    visual scanning*, strictly better than confidently-wrong structure for
+    retrieval and LLM reasoning to build on.
+
+    Adjacent identical lines are collapsed to one: a garbled-header table can
+    have the *same* misparsed string independently claim ``is_origin`` at
+    several consecutive grid positions (the span-detection bug described in
+    problem.md's failure mode #1) — repeating it verbatim back-to-back would
+    carry the garbling straight through into "structure-free" text instead of
+    actually neutralising it. This is a property of well-formed reading-order
+    text in general (the same line twice in a row is never useful signal,
+    regardless of *why* it repeated), not a heuristic tuned to this table.
+    """
+    texts = [
+        cell["text"].strip()
+        for cell in sorted(cells, key=lambda c: (c["row"], c["col"]))
+        if cell.get("is_origin", True) and cell["text"].strip()
+    ]
+    deduped = [t for i, t in enumerate(texts) if i == 0 or t != texts[i - 1]]
+    return "\n".join(deduped)
+
+
+def _table_cells_to_compact_text(cells: list[dict[str, Any]]) -> str:
     """Render structured table cells as compact, unpadded pipe-delimited rows.
 
     Unlike Docling's ``export_to_markdown`` (which pads every cell to a
@@ -401,22 +593,18 @@ def _table_cells_to_compact_text(cells: list[dict[str, Any]], *, omit_header: bo
     Spanning cells are emitted once, at their origin position, to avoid
     repeating their text at every grid position the span covers.
 
-    ``omit_header`` drops detected-garbled header rows entirely — feeding a
-    known-wrong column structure to the embedding is worse than feeding none.
+    Only used when :func:`table_structure_untrustworthy` finds nothing wrong
+    — once a table is flagged, asserting *any* row/column grid (even this
+    compact one) is unsafe; see :func:`_table_cells_to_reading_order_text`.
     """
     if not cells:
         return ""
     rows: dict[int, list[dict[str, Any]]] = {}
-    header_rows: set[int] = set()
     for cell in cells:
         rows.setdefault(cell["row"], []).append(cell)
-        if cell.get("is_header"):
-            header_rows.add(cell["row"])
 
     lines: list[str] = []
     for row_idx in sorted(rows):
-        if omit_header and row_idx in header_rows:
-            continue
         row_cells = sorted(rows[row_idx], key=lambda c: c["col"])
         texts = [c["text"].strip() if c.get("is_origin", True) else "" for c in row_cells]
         if any(texts):
@@ -559,25 +747,25 @@ def _build_outline(
                     f"chunk and is subject to the hard-size check below."
                 )
 
-            garbled = _detect_garbled_header(cells)
-            if garbled is not None:
+            untrustworthy = table_structure_untrustworthy(cells)
+            if untrustworthy is not None:
                 where = f"'{caption}'" if caption else f"on page {page_no}"
                 console.print(
-                    f"[yellow]Table parsing warning:[/] table {where} has a "
-                    f"header cell repeated across multiple columns "
-                    f"({garbled[:60]!r}…) — Docling's table-structure "
-                    f"recognition likely misparsed a complex multi-level "
-                    f"header. The garbled header is being dropped from the "
-                    f"embedded text (this safety net applies regardless of "
-                    f"table-structure mode). Inspect page {page_no} to "
-                    f"confirm the real structure; re-running with "
-                    f"--accurate-tables (or table_structure_mode=accurate in "
-                    f"the global config) sometimes helps but is NOT a "
-                    f"guaranteed fix — empirically it can produce a "
-                    f"differently-garbled header for complex nested tables "
-                    f"like this one."
+                    f"[yellow]Table parsing warning:[/] table {where} has an "
+                    f"untrustworthy structure ({untrustworthy}) — Docling's "
+                    f"table-structure recognition likely misparsed a complex "
+                    f"multi-level header or fused a data row into the header "
+                    f"band. Rather than assert a row/column grid that may be "
+                    f"silently wrong, this table is being rendered as plain "
+                    f"reading-order text with no structure implied (this "
+                    f"safety net applies regardless of table-structure mode — "
+                    f"switching to --accurate-tables is NOT a guaranteed fix, "
+                    f"see docs/table-structure-repair/problem.md). Inspect "
+                    f"page {page_no} by hand to confirm the real structure."
                 )
-            table_text = _table_cells_to_compact_text(cells, omit_header=garbled is not None)
+                table_text = _table_cells_to_reading_order_text(cells)
+            else:
+                table_text = _table_cells_to_compact_text(cells)
             if not table_text:
                 try:
                     table_text = item.export_to_markdown(doc=doc)
@@ -593,6 +781,7 @@ def _build_outline(
                 bbox=norm_bbox,
                 table_cells=cells,
                 table_title=caption,
+                table_structure_warning=untrustworthy,
             )
 
         elif label == DocItemLabel.PICTURE:

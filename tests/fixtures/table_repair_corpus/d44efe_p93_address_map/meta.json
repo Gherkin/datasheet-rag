@@ -1,0 +1,15 @@
+{
+  "doc": "d44efe998b6632d4ed49236a1eed2792fc74fc047e2f3bec3fe09399b16f2d96",
+  "page": 93,
+  "caption": "",
+  "header_rows": 2,
+  "column_count": 3,
+  "total_rows": 18,
+  "warning_before": "garbled header \u2014 'Peripheral Bus A Address Map' repeated across columns",
+  "expected": true,
+  "expected_header_substrings": [
+    "Peripheral on APB",
+    "Start Address",
+    "End Address"
+  ]
+}

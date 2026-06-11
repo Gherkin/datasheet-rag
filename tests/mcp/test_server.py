@@ -57,6 +57,7 @@ def _make_chunk(
     next_id: str | None = None,
     chapter_root_id: str | None = None,
     layout_type: LayoutType = LayoutType.TEXT,
+    table_structure_warning: str | None = None,
 ) -> Chunk:
     md = ChunkMetadata(
         doc_id=doc_id,
@@ -64,6 +65,7 @@ def _make_chunk(
         section_title=section,
         page_numbers=[page],
         layout_type=layout_type,
+        table_structure_warning=table_structure_warning,
     )
     return Chunk(
         id=chunk_id,
@@ -251,6 +253,39 @@ def test_get_chunk_returns_compact_dict(conn: Any) -> None:
 
 def test_get_chunk_missing_returns_none(conn: Any) -> None:
     assert _get_chunk_impl("does-not-exist", conn=conn) is None
+
+
+def test_table_chunk_without_warning_gets_visual_check_nudge(conn: Any) -> None:
+    chunk = _make_chunk("t1", doc_id="docA", text="Pin | Function\n88 | -",
+                         section="Pinout", chapter="Comm", page=53,
+                         layout_type=LayoutType.TABLE)
+    insert_chunks(conn, [chunk], vectors={"t1": _vec(7)}, project_id="p1")
+
+    out = _get_chunk_impl("t1", conn=conn)
+    assert out is not None
+    assert "table_structure_warning" not in out
+    assert "show_page('docA', 53)" in out["DISPLAY_INSTRUCTION"]
+
+
+def test_table_chunk_with_warning_flags_it(conn: Any) -> None:
+    chunk = _make_chunk("t2", doc_id="docA", text="Pin | Function\n88 | -",
+                         section="Pinout", chapter="Comm", page=53,
+                         layout_type=LayoutType.TABLE,
+                         table_structure_warning="garbled header")
+    insert_chunks(conn, [chunk], vectors={"t2": _vec(8)}, project_id="p1")
+
+    out = _get_chunk_impl("t2", conn=conn)
+    assert out is not None
+    assert out["table_structure_warning"] == "garbled header"
+    assert "show_page('docA', 53)" in out["DISPLAY_INSTRUCTION"]
+    assert "garbled header" in out["DISPLAY_INSTRUCTION"]
+
+
+def test_non_table_chunk_has_no_table_instruction(conn: Any) -> None:
+    out = _get_chunk_impl("c1", conn=conn)
+    assert out is not None
+    assert "DISPLAY_INSTRUCTION" not in out
+    assert "table_structure_warning" not in out
 
 
 def test_get_chunk_with_neighbors(conn: Any) -> None:

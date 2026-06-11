@@ -38,6 +38,15 @@ class ChunkMetadata(BaseModel):
     page_numbers: list[int] = Field(default_factory=list)
     layout_type: LayoutType = LayoutType.TEXT
 
+    # Set on TABLE chunks whose row/column/header structure Docling's
+    # TableFormer produced but we couldn't trust (see
+    # docling_parser.table_structure_untrustworthy and
+    # docs/table-structure-repair/{problem,plan}.md). When set, `text` is
+    # plain reading-order content with no grid asserted — retrieval/UI
+    # should surface "table structure could not be verified" rather than
+    # present (possibly wrong) columns as ground truth. None means trusted.
+    table_structure_warning: str | None = None
+
     # Contextual summary prepended during embedding
     # e.g. "Chapter: Power Supply Specifications > Section: Thermal Characteristics"
     context_string: str = ""
