@@ -355,17 +355,8 @@ class TableRepairer:
 
     def _get_client(self) -> Any:
         if self.client is None:
-            from botocore.config import Config as _BotocoreConfig
-
-            from aws_rag.aws import _session
-            config = _BotocoreConfig(
-                connect_timeout=60,
-                read_timeout=60,
-                retries={"max_attempts": 5, "mode": "adaptive"},
-            )
-            self.client = _session().client(
-                "bedrock-runtime", region_name=self.region, config=config
-            )
+            from aws_rag.local_models import get_chat_client
+            self.client = get_chat_client(kind="vision", region=self.region, profile=self.profile)
         return self.client
 
     # ---- public ---------------------------------------------------------

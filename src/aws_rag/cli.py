@@ -632,7 +632,7 @@ def embed(
 ) -> None:
     """Embed a chunk graph (produced by `rag chunk`) and store it in SQLite."""
     from aws_rag.chunking.pipeline import load_chunk_graph
-    from aws_rag.embedding import BedrockEmbedder, embed_chunk_graph
+    from aws_rag.embedding import embed_chunk_graph, get_embedder
     from aws_rag.project_config import get_project_config
     from aws_rag.store import connect, insert_chunk_graph
 
@@ -683,8 +683,12 @@ def embed(
         finally:
             _conn.close()
 
-    console.print("Embedding with Bedrock Titan v2…")
-    embedder = BedrockEmbedder(verbose=verbose)
+    _s = get_settings()
+    if _s.embedding_backend == "local":
+        console.print(f"Embedding with local Ollama model {_s.local_embedding_model!r}…")
+    else:
+        console.print("Embedding with Bedrock Titan v2…")
+    embedder = get_embedder(verbose=verbose)
     vectors = embed_chunk_graph(graph, embedder=embedder)
     s = embedder.stats()
     console.print(
@@ -774,9 +778,9 @@ def search(
     )
 
     if mode in ("vector", "hybrid"):
-        from aws_rag.embedding import BedrockEmbedder
+        from aws_rag.embedding import get_embedder
 
-        embedder = BedrockEmbedder()
+        embedder = get_embedder()
         query_vec = embedder.embed_one(query)
     else:
         query_vec = None
@@ -1226,7 +1230,7 @@ def _ingest_one(
         save_chunk_graph,
     )
     from aws_rag.chunking.splitter import SplitterConfig
-    from aws_rag.embedding import BedrockEmbedder, embed_chunk_graph
+    from aws_rag.embedding import embed_chunk_graph, get_embedder
     from aws_rag.figures import extract_figures, extract_figures_from_regions, upload_figures_to_s3
     from aws_rag.store import (
         apply_metadata_to_chunks,
@@ -1522,7 +1526,7 @@ def _ingest_one(
 
             target = db_path or settings.sqlite_db_path
             conn = connect(target)
-            embedder_tmp = BedrockEmbedder(verbose=False)
+            embedder_tmp = get_embedder(verbose=False)
             vectors_tmp = embed_chunk_graph(graph, embedder=embedder_tmp)
             inserted_tmp = insert_chunk_graph(
                 conn, graph, vectors=vectors_tmp,
@@ -1571,8 +1575,11 @@ def _ingest_one(
         _print_cost_table(cost)
         return cost
 
-    console.print("  Embedding with Bedrock Titan v2…")
-    embedder = BedrockEmbedder(verbose=True)
+    if settings.embedding_backend == "local":
+        console.print(f"  Embedding with local Ollama model {settings.local_embedding_model!r}…")
+    else:
+        console.print("  Embedding with Bedrock Titan v2…")
+    embedder = get_embedder(verbose=True)
     vectors = embed_chunk_graph(graph, embedder=embedder)
     es = embedder.stats()
     console.print(
@@ -2601,9 +2608,9 @@ def eval_run(
 
     embedder = None
     if mode in ("vector", "hybrid"):
-        from aws_rag.embedding import BedrockEmbedder
+        from aws_rag.embedding import get_embedder
 
-        embedder = BedrockEmbedder()
+        embedder = get_embedder()
 
     config = RunConfig(
         mode=mode,  # type: ignore[arg-type]
@@ -2656,7 +2663,7 @@ def eval_ablate(
     verbose: bool,
 ) -> None:
     """Run the ablation matrix and print which concepts move the needle."""
-    from aws_rag.embedding import BedrockEmbedder
+    from aws_rag.embedding import get_embedder
     from aws_rag.eval.ablation import (
         build_macro_summarizer_variant_store,
         build_variant_store,
@@ -2670,7 +2677,7 @@ def eval_ablate(
     settings = get_settings()
     conn = connect(db_path or settings.sqlite_db_path)
     eval_set = EvalSet.load(set_path)
-    embedder = BedrockEmbedder()
+    embedder = get_embedder()
 
     if index_ablation is None:
         reports = run_matrix(

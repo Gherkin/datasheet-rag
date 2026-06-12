@@ -23,6 +23,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from aws_rag.config import get_settings
 from aws_rag.models.chunk import ChunkGraph
 
 TITAN_V2_USD_PER_1M_INPUT_TOKENS = 0.02
@@ -86,6 +87,12 @@ def estimate_embedding_cost(graph: ChunkGraph) -> CostLineItem:
     :attr:`Chunk.token_count` — so the estimate lines up with what
     ``rag ingest`` would report for a real run.
     """
+    if get_settings().embedding_backend == "local":
+        return CostLineItem(
+            label="Embeddings (local Ollama)",
+            detail="local backend — no AWS cost",
+            usd=0.0,
+        )
     chars = sum(len(c.context_text or c.text) for c in graph.chunks.values())
     tokens = max(1, chars // _CHARS_PER_TOKEN)
     usd = tokens / 1_000_000 * TITAN_V2_USD_PER_1M_INPUT_TOKENS
@@ -97,6 +104,12 @@ def estimate_embedding_cost(graph: ChunkGraph) -> CostLineItem:
 
 
 def estimate_figure_description_cost(figure_count: int) -> CostLineItem:
+    if get_settings().vision_backend == "local":
+        return CostLineItem(
+            label="Figure descriptions (local Ollama vision)",
+            detail=f"{figure_count} figures — local backend, no AWS cost",
+            usd=0.0,
+        )
     usd = figure_count * HAIKU_VISION_USD_PER_FIGURE
     return CostLineItem(
         label="Figure descriptions (Haiku vision)",
@@ -106,6 +119,12 @@ def estimate_figure_description_cost(figure_count: int) -> CostLineItem:
 
 
 def estimate_title_inference_cost() -> CostLineItem:
+    if get_settings().text_backend == "local":
+        return CostLineItem(
+            label="Title inference (local Ollama text)",
+            detail="local backend — no AWS cost",
+            usd=0.0,
+        )
     return CostLineItem(
         label="Title inference (Haiku text)",
         detail="1 completion × ~$0.0005",

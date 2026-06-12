@@ -57,6 +57,117 @@ class Settings(BaseSettings):
     aws_region: str = Field(default="eu-west-1", alias="AWS_REGION")
     aws_profile: str | None = Field(default=None, alias="AWS_PROFILE")
 
+    # ------------------------------------------------------------------
+    # Model backend selection — per capability, each independently 'local'
+    # (default; run on this machine, no per-call AWS cost) or 'bedrock' (AWS).
+    #
+    # Three capabilities, split so they can be mixed (e.g. the recommended
+    # hybrid: local embeddings + local text, but Bedrock for figure/vision
+    # since 7-8B local VLMs that fit a consumer GPU trail Claude on complex
+    # diagrams):
+    #   embedding_backend — text embeddings
+    #   text_backend      — title inference, chunk summaries, eval generation
+    #   vision_backend    — figure descriptions, table-structure repair
+    #
+    # NOTE: switching embedding_backend makes existing stored vectors
+    # incompatible — re-embed the corpus on a DB created with the matching
+    # embedding_dimensions (vectors from different models are not comparable).
+    #
+    # The "local" defaults require the local extras:
+    #   pip install 'aws-rag[local,local-hf]'
+    # ------------------------------------------------------------------
+    embedding_backend: Literal["bedrock", "local"] = Field(
+        default="local",
+        description="Embeddings backend: 'local' (default) or 'bedrock' (Titan v2).",
+    )
+    text_backend: Literal["bedrock", "local"] = Field(
+        default="local",
+        description=(
+            "Backend for text LLM calls (titling, summaries, eval): 'local' "
+            "(default) or 'bedrock' (Claude)."
+        ),
+    )
+    vision_backend: Literal["bedrock", "local"] = Field(
+        default="local",
+        description=(
+            "Backend for vision LLM calls (figure descriptions, table-structure "
+            "repair): 'local' (default) or 'bedrock' (Claude). On a small GPU, "
+            "'bedrock' is recommended for quality (the hybrid setup)."
+        ),
+    )
+
+    # Local runtimes — consulted only when the matching *_backend is 'local'.
+    # Each local capability can run via 'huggingface' (in-process, PyTorch/CUDA;
+    # full precision, robust, fits whatever VRAM allows and supports any HF
+    # model) or 'ollama' (the Ollama server; lighter Python deps, GGUF/quantized,
+    # but its memory estimation can force large vision models onto CPU).
+    ollama_host: str = Field(
+        default="http://localhost:11434",
+        alias="RAG_OLLAMA_HOST",
+        description="Base URL of the Ollama HTTP server.",
+    )
+    local_embedding_runtime: Literal["huggingface", "ollama"] = Field(
+        default="huggingface",
+        description=(
+            "Local embeddings runtime. 'huggingface' (default) = "
+            "sentence-transformers in-process (robust; the only reliable way to "
+            "run bge-m3 — Ollama's F16 path emits NaN on some inputs). 'ollama' "
+            "= Ollama server (use mxbai-embed-large there, not bge-m3)."
+        ),
+    )
+    local_text_runtime: Literal["huggingface", "ollama"] = Field(
+        default="ollama",
+        description=(
+            "Local text-LLM runtime. 'ollama' (default; light, qwen2.5:7b) or "
+            "'huggingface' (in-process transformers causal LM)."
+        ),
+    )
+    local_vision_runtime: Literal["huggingface", "ollama"] = Field(
+        default="huggingface",
+        description=(
+            "Local vision-LLM runtime. 'huggingface' (default; in-process "
+            "transformers VLM with precise VRAM control — the only way large "
+            "VLMs fit a consumer GPU) or 'ollama'."
+        ),
+    )
+
+    local_embedding_model: str = Field(
+        default="BAAI/bge-m3",
+        description=(
+            "Local embedding model; output dim MUST equal embedding_dimensions "
+            "(bge-m3 / mxbai-embed-large = 1024; nomic-embed-text = 768). Id "
+            "format follows local_embedding_runtime: a HuggingFace repo id for "
+            "'huggingface' (default 'BAAI/bge-m3') or an Ollama tag for 'ollama' "
+            "(e.g. 'mxbai-embed-large' — not bge-m3, which hits the F16 bug)."
+        ),
+    )
+    local_text_model: str = Field(
+        default="qwen2.5:7b",
+        description=(
+            "Local text model. Id format follows local_text_runtime: an Ollama "
+            "tag (default 'qwen2.5:7b') or a HuggingFace repo id (e.g. "
+            "'Qwen/Qwen2.5-7B-Instruct')."
+        ),
+    )
+    local_vision_model: str = Field(
+        default="Qwen/Qwen2.5-VL-3B-Instruct",
+        description=(
+            "Local vision model. Id format follows local_vision_runtime: a "
+            "HuggingFace repo id (default 'Qwen/Qwen2.5-VL-3B-Instruct'; use "
+            "...-7B/-32B/-72B on bigger GPUs) or an Ollama tag (e.g. "
+            "'qwen2.5vl:3b'). NOTE: 7-8B VLMs that fit a 12GB GPU trail Claude "
+            "on complex diagrams — Haiku-parity needs ~32B (~24GB VRAM)."
+        ),
+    )
+    local_hf_load_4bit: bool = Field(
+        default=False,
+        description=(
+            "Load huggingface vision/text models in 4-bit (bitsandbytes) to fit "
+            "larger models on limited VRAM. Off by default (a 3B VLM fits 12GB "
+            "in fp16); enable for 7B+ on a 12-24GB GPU."
+        ),
+    )
+
     # S3 (opt-in remote storage — see s3_bucket description)
     s3_bucket: str | None = Field(
         default=None,

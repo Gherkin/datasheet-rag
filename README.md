@@ -74,6 +74,72 @@ Most settings are self-explanatory (AWS region/profile, model IDs, batch
 sizes); this section covers the ones with real tradeoffs worth
 understanding before you change them.
 
+### Model backends (`RAG_EMBEDDING_BACKEND` / `RAG_TEXT_BACKEND` / `RAG_VISION_BACKEND`)
+
+Every model call picks a backend **per capability** — each `local` (default; run
+on this machine, no per-call AWS cost) or `bedrock` (AWS). Three independent
+switches so they can be mixed:
+
+| Setting | Covers | Local runtime knob |
+|---|---|---|
+| `RAG_EMBEDDING_BACKEND` | text embeddings | `RAG_LOCAL_EMBEDDING_RUNTIME` |
+| `RAG_TEXT_BACKEND` | titling, summaries, eval | `RAG_LOCAL_TEXT_RUNTIME` |
+| `RAG_VISION_BACKEND` | figure descriptions, table repair | `RAG_LOCAL_VISION_RUNTIME` |
+
+Each local runtime knob is **`huggingface`** (in-process via PyTorch/CUDA — full
+precision, robust, precise VRAM control, any HF model id) or **`ollama`** (the
+[Ollama](https://ollama.com) server — lighter deps, GGUF/quantized).
+
+**Recommended on a consumer GPU: the hybrid** — local embeddings + text, but
+**Bedrock for vision**. A 7-8B VLM is the largest that fits ~12 GB and it trails
+Claude on complex diagrams (Haiku-parity needs a ~32B VLM / ~24 GB VRAM); and
+Bedrock figure descriptions cost only ~$1-2 one-time for a whole corpus.
+
+```bash
+pip install 'aws-rag[local,local-hf]'   # httpx (Ollama) + transformers/sentence-transformers
+ollama serve                            # for the ollama text runtime
+ollama pull qwen2.5:7b                   # local text model
+# embeddings + (optional) local vision download from the HF Hub on first use
+```
+
+```env
+# Hybrid (recommended on 12 GB):
+RAG_EMBEDDING_BACKEND=local
+RAG_TEXT_BACKEND=local
+RAG_VISION_BACKEND=bedrock
+
+RAG_LOCAL_EMBEDDING_RUNTIME=huggingface
+RAG_LOCAL_EMBEDDING_MODEL=BAAI/bge-m3      # HF repo id; output dim must match ↓
+RAG_EMBEDDING_DIMENSIONS=1024
+
+RAG_LOCAL_TEXT_RUNTIME=ollama
+RAG_LOCAL_TEXT_MODEL=qwen2.5:7b
+
+# For fully-local vision (bigger GPU): RAG_VISION_BACKEND=local
+RAG_LOCAL_VISION_RUNTIME=huggingface
+RAG_LOCAL_VISION_MODEL=Qwen/Qwen2.5-VL-3B-Instruct  # 3B fits 12GB; 7B/32B/72B need more
+# RAG_LOCAL_HF_LOAD_4BIT=true              # 4-bit (bitsandbytes) to fit 7B+ on a 12-24GB GPU
+```
+
+Vision model vs VRAM (4-bit): ~8B → ~6-8 GB (12 GB GPU, *below* Haiku on diagrams);
+~32B → ~24 GB (*≈ Haiku*); ~72B → ~48 GB (*≈ Sonnet*). The `huggingface` runtime
+is hardware-portable: on a bigger box just point `RAG_LOCAL_VISION_MODEL` at a
+larger repo id.
+
+> **bge-m3 only works via the `huggingface` runtime.** On Ollama its llama.cpp
+> F16 path emits `NaN` (HTTP 500) on some inputs (e.g. the `---` separator we put
+> in every chunk), aborting ingestion. For `RAG_LOCAL_EMBEDDING_RUNTIME=ollama`
+> use `mxbai-embed-large` instead.
+
+> **Re-embed when switching `RAG_EMBEDDING_BACKEND`** (or the embedding
+> model/dimension). Vectors from different models aren't comparable and the
+> dimension is baked into the sqlite-vec table, so switching needs a re-embed on
+> a fresh DB. The text/vision backends flip freely.
+
+The `--model` overrides on `rag describe-figures` / `repair-tables` /
+`infer-title` are Bedrock model IDs and are ignored when that capability runs
+locally (local model names come from the settings above).
+
 ### Table parsing mode (`RAG_TABLE_STRUCTURE_MODE`)
 
 Docling recognises table structure with its TableFormer model, which has two

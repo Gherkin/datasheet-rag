@@ -193,9 +193,9 @@ def generate_golden_set(
     rng = random.Random(seed)
 
     if client is None:
-        from aws_rag.embedding.embedder import _bedrock_runtime_client
+        from aws_rag.local_models import get_chat_client
 
-        client = _bedrock_runtime_client()
+        client = get_chat_client(kind="text")
 
     items: list[GoldenItem] = []
     for category in CATEGORIES:

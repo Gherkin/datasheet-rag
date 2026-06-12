@@ -132,9 +132,9 @@ class ReviewState:
 
     def embedder(self) -> Any:
         if self._embedder is None:
-            from aws_rag.embedding import BedrockEmbedder
+            from aws_rag.embedding import get_embedder
 
-            self._embedder = BedrockEmbedder()
+            self._embedder = get_embedder()
         return self._embedder
 
     def save(self) -> None:

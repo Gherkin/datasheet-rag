@@ -32,6 +32,22 @@ docling = [
     "docling>=2.0.0",
     "pymupdf>=1.24.0",
 ]
+# Local model backend (Ollama) — needed only when RAG_EMBEDDING_BACKEND or
+# RAG_CHAT_BACKEND is set to "local". Keeps the default install AWS-only.
+local = [
+    "httpx>=0.27",
+]
+# In-process HuggingFace runtimes (PyTorch/CUDA): sentence-transformers for
+# embeddings, transformers for vision/text LLMs. Needed when any *_BACKEND=local
+# uses RAG_LOCAL_*_RUNTIME=huggingface (the default for embeddings + vision).
+# bitsandbytes/accelerate enable 4-bit loading of larger VLMs on limited VRAM.
+local-hf = [
+    "sentence-transformers>=3.0",
+    "transformers>=4.49",
+    "accelerate>=0.30",
+    "bitsandbytes>=0.43",
+    "torchvision>=0.18",
+]
 
 [project.scripts]
 rag = "aws_rag.cli:cli"

@@ -13,12 +13,20 @@ from __future__ import annotations
 
 from aws_rag.embedding.embedder import (
     BedrockEmbedder,
+    Embedder,
+    OllamaEmbedder,
+    SentenceTransformerEmbedder,
     embed_chunk_graph,
     embed_texts,
+    get_embedder,
 )
 
 __all__ = [
     "BedrockEmbedder",
+    "Embedder",
+    "OllamaEmbedder",
+    "SentenceTransformerEmbedder",
     "embed_chunk_graph",
     "embed_texts",
+    "get_embedder",
 ]

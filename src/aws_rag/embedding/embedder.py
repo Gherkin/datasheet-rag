@@ -45,6 +45,7 @@ hard-coded reference; we do not auto-fetch pricing.
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any
@@ -88,6 +89,14 @@ def _is_transient_model_error(exc: BaseException) -> bool:
     return resp.get("Error", {}).get("Code") == "ModelErrorException"
 
 
+class _TransientOllamaError(RuntimeError):
+    """A retryable Ollama failure (HTTP 5xx other than the NaN bug)."""
+
+
+def _is_transient_ollama_error(exc: BaseException) -> bool:
+    return isinstance(exc, _TransientOllamaError)
+
+
 # ---------------------------------------------------------------------------
 # Client factory
 # ---------------------------------------------------------------------------
@@ -124,11 +133,69 @@ def _bedrock_runtime_client(
 
 
 # ---------------------------------------------------------------------------
+# Shared chunk-embedding logic
+# ---------------------------------------------------------------------------
+
+
+class _ChunkEmbeddingMixin:
+    """``embed_chunks`` shared by every embedder (Bedrock or local).
+
+    Depends only on the concrete embedder providing ``embed_texts``.
+    """
+
+    verbose: bool
+
+    def embed_texts(self, texts: Sequence[str]) -> list[list[float]]:
+        raise NotImplementedError  # pragma: no cover - interface, overridden
+
+    def embed_chunks(self, chunks: Iterable[Chunk]) -> dict[str, list[float]]:
+        """Embed a sequence of :class:`Chunk` objects.
+
+        Uses :attr:`Chunk.context_text`; falls back to :attr:`Chunk.text`
+        if context is empty (with a console warning). Chunks where both
+        are empty are skipped with a warning.
+
+        Returns a mapping ``chunk_id -> embedding`` in chunk-iteration
+        order (insertion-ordered dict).
+        """
+        chunks_list = list(chunks)
+        if not chunks_list:
+            return {}
+
+        # Materialize the (id, text) pairs in order, recording skips.
+        ids_in_order: list[str] = []
+        texts_in_order: list[str] = []
+        for c in chunks_list:
+            payload = c.context_text
+            if not payload:
+                if c.text:
+                    console.print(
+                        f"[yellow]warning[/]: chunk {c.id} has empty "
+                        "context_text — falling back to raw text."
+                    )
+                    payload = c.text
+                else:
+                    console.print(
+                        f"[yellow]warning[/]: chunk {c.id} has empty "
+                        "context_text AND text — skipping."
+                    )
+                    continue
+            ids_in_order.append(c.id)
+            texts_in_order.append(payload)
+
+        if not ids_in_order:
+            return {}
+
+        vectors = self.embed_texts(texts_in_order)
+        return dict(zip(ids_in_order, vectors, strict=True))
+
+
+# ---------------------------------------------------------------------------
 # Embedder
 # ---------------------------------------------------------------------------
 
 
-class BedrockEmbedder:
+class BedrockEmbedder(_ChunkEmbeddingMixin):
     """Thin wrapper around the Bedrock runtime client for Titan v2.
 
     Holds a single client and a small counter dict. Thread-safe for
@@ -231,47 +298,6 @@ class BedrockEmbedder:
             )
         return vectors
 
-    def embed_chunks(self, chunks: Iterable[Chunk]) -> dict[str, list[float]]:
-        """Embed a sequence of :class:`Chunk` objects.
-
-        Uses :attr:`Chunk.context_text`; falls back to :attr:`Chunk.text`
-        if context is empty (with a console warning). Chunks where both
-        are empty are skipped with a warning.
-
-        Returns a mapping ``chunk_id -> embedding`` in chunk-iteration
-        order (insertion-ordered dict).
-        """
-        chunks_list = list(chunks)
-        if not chunks_list:
-            return {}
-
-        # Materialize the (id, text) pairs in order, recording skips.
-        ids_in_order: list[str] = []
-        texts_in_order: list[str] = []
-        for c in chunks_list:
-            payload = c.context_text
-            if not payload:
-                if c.text:
-                    console.print(
-                        f"[yellow]warning[/]: chunk {c.id} has empty "
-                        "context_text — falling back to raw text."
-                    )
-                    payload = c.text
-                else:
-                    console.print(
-                        f"[yellow]warning[/]: chunk {c.id} has empty "
-                        "context_text AND text — skipping."
-                    )
-                    continue
-            ids_in_order.append(c.id)
-            texts_in_order.append(payload)
-
-        if not ids_in_order:
-            return {}
-
-        vectors = self.embed_texts(texts_in_order)
-        return dict(zip(ids_in_order, vectors, strict=True))
-
     def stats(self) -> dict[str, int]:
         """Return a snapshot of the metric counters."""
         return {
@@ -348,29 +374,355 @@ class BedrockEmbedder:
 
 
 # ---------------------------------------------------------------------------
+# Local (Ollama) embedder
+# ---------------------------------------------------------------------------
+
+
+class OllamaEmbedder(_ChunkEmbeddingMixin):
+    """Local text embedding via an Ollama server.
+
+    Mirrors :class:`BedrockEmbedder`'s public surface (``embed_one``,
+    ``embed_texts``, ``embed_chunks``, ``stats``) so it is interchangeable.
+    Each text is one ``POST /api/embed`` call (truncate=True), batched
+    concurrently. Use a robust model such as ``mxbai-embed-large`` here — not
+    ``bge-m3``, whose llama.cpp F16 path emits NaN on some inputs (HTTP 500).
+
+    The first returned vector's length is checked against
+    ``settings.embedding_dimensions`` and a mismatch fails loud — that value
+    is baked into the sqlite-vec table, so a silently-wrong dimension would
+    only surface as an opaque insert error later.
+    """
+
+    _TIMEOUT_SECONDS = 120.0
+
+    def __init__(
+        self,
+        *,
+        model: str | None = None,
+        dimensions: int | None = None,
+        host: str | None = None,
+        max_concurrency: int | None = None,
+        verbose: bool = False,
+    ) -> None:
+        settings = get_settings()
+        self.model = model or settings.local_embedding_model
+        self.dimensions = (
+            dimensions if dimensions is not None else settings.embedding_dimensions
+        )
+        self.host = (host or settings.ollama_host).rstrip("/")
+        self.max_concurrency = (
+            max_concurrency if max_concurrency is not None else settings.embedding_batch_size
+        )
+        if self.max_concurrency < 1:
+            raise ValueError(
+                f"max_concurrency must be >= 1, got {self.max_concurrency}."
+            )
+        self.verbose = verbose
+
+        self.total_tokens_in: int = 0  # Ollama embeddings don't report tokens.
+        self.total_invocations: int = 0
+        self.total_errors: int = 0
+
+    def embed_one(self, text: str) -> list[float]:
+        if not text:
+            raise ValueError("embed_one() requires a non-empty string.")
+        return self._invoke_one(text)
+
+    def embed_texts(self, texts: Sequence[str]) -> list[list[float]]:
+        if len(texts) == 0:
+            return []
+        for i, t in enumerate(texts):
+            if not t:
+                raise ValueError(
+                    f"embed_texts(): text at index {i} is empty — refusing "
+                    "to embed an empty string."
+                )
+        workers = min(self.max_concurrency, len(texts))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            vectors = list(pool.map(self._invoke_one, texts))
+        if self.verbose:
+            console.print(
+                f"[green]embed_texts[/]: embedded {len(texts)} texts via "
+                f"Ollama model {self.model!r}."
+            )
+        return vectors
+
+    def stats(self) -> dict[str, int]:
+        return {
+            "total_tokens_in": self.total_tokens_in,
+            "total_invocations": self.total_invocations,
+            "total_errors": self.total_errors,
+        }
+
+    def _invoke_one(self, text: str) -> list[float]:
+        try:
+            import httpx
+        except ImportError as exc:
+            raise ImportError(
+                "The local embedding backend needs the 'httpx' package. "
+                "Install the local extra:  pip install 'aws-rag[local]'"
+            ) from exc
+        def _post() -> list[float] | None:
+            # Use the newer /api/embed endpoint with truncate=True so inputs
+            # longer than the model's context window are truncated rather than
+            # rejected with a hard HTTP 500 (the legacy /api/embeddings has no
+            # truncate option — mxbai-embed-large's 512-token window otherwise
+            # fails on long context_text chunks).
+            resp = httpx.post(
+                f"{self.host}/api/embed",
+                json={"model": self.model, "input": text, "truncate": True},
+                timeout=self._TIMEOUT_SECONDS,
+            )
+            if resp.status_code >= 400:
+                try:
+                    detail = resp.json().get("error", "") or resp.text
+                except Exception:
+                    detail = resp.text
+                # bge-m3 on Ollama deterministically emits NaN embeddings for
+                # certain token sequences (e.g. our "\n---\n" separator) -> 500.
+                # Retrying won't help; fail with an actionable message rather
+                # than an opaque 500 traceback.
+                if "NaN" in detail:
+                    raise ValueError(
+                        f"Ollama model {self.model!r} produced a NaN embedding "
+                        f"(HTTP {resp.status_code}: {detail!r}). Known "
+                        "bge-m3/llama.cpp F16 bug — use mxbai-embed-large via "
+                        "Ollama, or serve bge-m3 in-process (transformers)."
+                    )
+                if resp.status_code >= 500:
+                    raise _TransientOllamaError(
+                        f"Ollama HTTP {resp.status_code}: {detail!r}"
+                    )
+                resp.raise_for_status()
+            # /api/embed returns {"embeddings": [[...]]} (one row per input).
+            rows = resp.json().get("embeddings") or []
+            return rows[0] if rows else None
+
+        try:
+            for attempt in Retrying(
+                retry=retry_if_exception(_is_transient_ollama_error),
+                stop=stop_after_attempt(_MAX_INVOKE_ATTEMPTS),
+                wait=_INVOKE_WAIT,
+                reraise=True,
+            ):
+                with attempt:
+                    vector = _post()
+        except Exception:
+            self.total_errors += 1
+            raise
+
+        if not isinstance(vector, list) or not vector:
+            self.total_errors += 1
+            raise TypeError(
+                f"Ollama returned no embedding for model {self.model!r} "
+                "(is the model pulled and an embedding model?)."
+            )
+        if len(vector) != self.dimensions:
+            self.total_errors += 1
+            raise ValueError(
+                f"Ollama model {self.model!r} returned a {len(vector)}-dim "
+                f"vector but embedding_dimensions={self.dimensions}. Set "
+                "RAG_EMBEDDING_DIMENSIONS to match the model (and re-create "
+                "the DB), or pick a model with the configured dimension."
+            )
+        if any(math.isnan(x) or math.isinf(x) for x in vector):
+            self.total_errors += 1
+            raise ValueError(
+                f"Ollama model {self.model!r} returned a non-finite (NaN/inf) "
+                "embedding — refusing to store it. Try mxbai-embed-large."
+            )
+
+        self.total_invocations += 1
+        return [float(x) for x in vector]
+
+
+# ---------------------------------------------------------------------------
+# Local (sentence-transformers) embedder — in-process, GPU via torch
+# ---------------------------------------------------------------------------
+
+
+class SentenceTransformerEmbedder(_ChunkEmbeddingMixin):
+    """Local text embedding via sentence-transformers (HuggingFace + PyTorch).
+
+    In-process (no server): loads a HuggingFace model with ``transformers`` and
+    runs it on the GPU through ``torch``. Unlike the Ollama path this uses the
+    full-precision reference implementation, so it is numerically robust —
+    notably it does *not* hit llama.cpp's F16 NaN bug that ``bge-m3`` triggers
+    on certain inputs, and it honours the model's full context window
+    (truncating longer inputs rather than erroring).
+
+    The model is loaded lazily on first use (the first call also downloads the
+    weights from the HF Hub into ``~/.cache/huggingface`` if not cached).
+    """
+
+    def __init__(
+        self,
+        *,
+        model: str | None = None,
+        dimensions: int | None = None,
+        normalize: bool | None = None,
+        device: str | None = None,
+        max_concurrency: int | None = None,
+        verbose: bool = False,
+    ) -> None:
+        settings = get_settings()
+        self.model_name = model or settings.local_embedding_model
+        self.dimensions = (
+            dimensions if dimensions is not None else settings.embedding_dimensions
+        )
+        self.normalize = normalize if normalize is not None else settings.embedding_normalize
+        self.device = device
+        # batch_size for the GPU forward pass (reuses the embedding batch knob).
+        self.batch_size = (
+            max_concurrency if max_concurrency is not None else settings.embedding_batch_size
+        )
+        self.verbose = verbose
+        self._model: Any = None
+
+        self.total_tokens_in: int = 0  # not tracked for the local path
+        self.total_invocations: int = 0
+        self.total_errors: int = 0
+
+    def _get_model(self) -> Any:
+        if self._model is None:
+            try:
+                from sentence_transformers import SentenceTransformer
+            except ImportError as exc:
+                raise ImportError(
+                    "The huggingface embedding runtime needs the "
+                    "'sentence-transformers' package. Install the extra:  "
+                    "pip install 'aws-rag[local-hf]'"
+                ) from exc
+            device = self.device
+            if device is None:
+                try:
+                    import torch
+
+                    device = "cuda" if torch.cuda.is_available() else "cpu"
+                except ImportError:
+                    device = "cpu"
+            if self.verbose:
+                console.print(
+                    f"[cyan]loading[/] {self.model_name!r} on {device} "
+                    "(first run downloads weights from the HF Hub)…"
+                )
+            self._model = SentenceTransformer(self.model_name, device=device)
+            # Method renamed in newer sentence-transformers; support both.
+            get_dim = getattr(self._model, "get_embedding_dimension", None) or (
+                self._model.get_sentence_embedding_dimension
+            )
+            actual = get_dim()
+            if actual != self.dimensions:
+                raise ValueError(
+                    f"sentence-transformers model {self.model_name!r} produces "
+                    f"{actual}-dim vectors but embedding_dimensions={self.dimensions}. "
+                    "Set RAG_EMBEDDING_DIMENSIONS to match (and re-create the DB)."
+                )
+        return self._model
+
+    def embed_one(self, text: str) -> list[float]:
+        if not text:
+            raise ValueError("embed_one() requires a non-empty string.")
+        return self.embed_texts([text])[0]
+
+    def embed_texts(self, texts: Sequence[str]) -> list[list[float]]:
+        if len(texts) == 0:
+            return []
+        for i, t in enumerate(texts):
+            if not t:
+                raise ValueError(
+                    f"embed_texts(): text at index {i} is empty — refusing "
+                    "to embed an empty string."
+                )
+        model = self._get_model()
+        try:
+            arr = model.encode(
+                list(texts),
+                batch_size=self.batch_size,
+                normalize_embeddings=self.normalize,
+                convert_to_numpy=True,
+                show_progress_bar=False,
+            )
+        except Exception:
+            self.total_errors += 1
+            raise
+        self.total_invocations += len(texts)
+        if self.verbose:
+            console.print(
+                f"[green]embed_texts[/]: embedded {len(texts)} texts via "
+                f"sentence-transformers {self.model_name!r}."
+            )
+        return [[float(x) for x in row] for row in arr]
+
+    def stats(self) -> dict[str, int]:
+        return {
+            "total_tokens_in": self.total_tokens_in,
+            "total_invocations": self.total_invocations,
+            "total_errors": self.total_errors,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Backend factory
+# ---------------------------------------------------------------------------
+
+
+# A structural type covering every embedder; callers only need these methods.
+Embedder = BedrockEmbedder | OllamaEmbedder | SentenceTransformerEmbedder
+
+
+def get_embedder(**kwargs: Any) -> Embedder:
+    """Return the embedder for the configured backend.
+
+    ``embedding_backend='bedrock'`` (default) → :class:`BedrockEmbedder`.
+    ``embedding_backend='local'`` selects a local runtime via
+    ``local_embedding_runtime``: ``'sentence-transformers'`` (default,
+    :class:`SentenceTransformerEmbedder`) or ``'ollama'``
+    (:class:`OllamaEmbedder`).
+
+    ``kwargs`` (e.g. ``verbose=True``) are forwarded to whichever embedder is
+    built; constructor kwargs the chosen backend doesn't accept are dropped so
+    call sites can pass backend-agnostic flags.
+    """
+    settings = get_settings()
+    if settings.embedding_backend == "local":
+        if settings.local_embedding_runtime == "ollama":
+            cls: type[Embedder] = OllamaEmbedder
+        else:
+            cls = SentenceTransformerEmbedder
+    else:
+        cls = BedrockEmbedder
+    import inspect
+
+    accepted = set(inspect.signature(cls.__init__).parameters)
+    filtered = {k: v for k, v in kwargs.items() if k in accepted}
+    return cls(**filtered)
+
+
+# ---------------------------------------------------------------------------
 # Module-level convenience helpers
 # ---------------------------------------------------------------------------
 
 
 def embed_chunk_graph(
     graph: ChunkGraph,
-    embedder: BedrockEmbedder | None = None,
+    embedder: Embedder | None = None,
 ) -> dict[str, list[float]]:
     """Embed every chunk in a :class:`ChunkGraph`.
 
-    If ``embedder`` is None, a default :class:`BedrockEmbedder` is built
-    using settings from :mod:`aws_rag.config`.
+    If ``embedder`` is None, one is built from settings via
+    :func:`get_embedder` (Bedrock or local depending on ``embedding_backend``).
     """
     if embedder is None:
-        embedder = BedrockEmbedder()
+        embedder = get_embedder()
     return embedder.embed_chunks(graph.chunks.values())
 
 
 def embed_texts(
     texts: Sequence[str],
-    embedder: BedrockEmbedder | None = None,
+    embedder: Embedder | None = None,
 ) -> list[list[float]]:
     """Module-level convenience for one-shot embedding of a text list."""
     if embedder is None:
-        embedder = BedrockEmbedder()
+        embedder = get_embedder()
     return embedder.embed_texts(texts)

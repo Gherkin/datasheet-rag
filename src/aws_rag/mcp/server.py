@@ -86,13 +86,13 @@ def _get_conn(db_path: str | Path | None = None) -> sqlite3.Connection:
 
 
 def _get_embedder() -> Any:
-    """Return a process-wide cached BedrockEmbedder. Imported lazily."""
+    """Return a process-wide cached embedder (Bedrock or local). Imported lazily."""
     global _embedder
     with _embedder_lock:
         if _embedder is None:
-            from aws_rag.embedding import BedrockEmbedder
+            from aws_rag.embedding import get_embedder
 
-            _embedder = BedrockEmbedder()
+            _embedder = get_embedder()
         return _embedder
 
 

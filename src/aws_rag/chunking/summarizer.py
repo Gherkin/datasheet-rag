@@ -288,8 +288,8 @@ class AbstractiveSummarizer:
 
     def _get_client(self) -> Any:
         if self._client is None:
-            from aws_rag.aws import _session
-            self._client = _session().client("bedrock-runtime", region_name=self.region)
+            from aws_rag.local_models import get_chat_client
+            self._client = get_chat_client(kind="text", region=self.region)
         return self._client
 
     def _invoke(self, prompt: str, max_tokens: int) -> str:

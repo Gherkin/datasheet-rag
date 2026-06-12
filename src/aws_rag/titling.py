@@ -54,8 +54,8 @@ class TitleInferer:
 
     def _get_client(self) -> Any:
         if self.client is None:
-            from aws_rag.aws import _session
-            self.client = _session().client("bedrock-runtime", region_name=self.region)
+            from aws_rag.local_models import get_chat_client
+            self.client = get_chat_client(kind="text", region=self.region)
         return self.client
 
     def infer(self, first_page_text: str) -> str | None:
