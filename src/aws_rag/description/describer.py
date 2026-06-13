@@ -25,6 +25,7 @@ import base64
 import concurrent.futures as _cf
 import json
 import sqlite3
+import time
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -40,6 +41,14 @@ console = Console()
 
 _MAX_INVOKE_ATTEMPTS = 4
 _INVOKE_WAIT = wait_exponential(multiplier=1, min=2, max=8)
+
+# Per-figure retry in the concurrent describe path: a transient failure
+# (timeout, throttle, transient model/HTTP 5xx error, empty response) on one
+# figure shouldn't silently drop it. Retried with linear backoff before the
+# figure is finally skipped. Permanent errors (missing image, non-figure) are
+# not retried.
+_DESCRIBE_MAX_ATTEMPTS = 3
+_DESCRIBE_RETRY_WAIT = 1.5  # seconds, scaled by attempt number
 
 
 def _is_transient_model_error(exc: BaseException) -> bool:
@@ -279,8 +288,9 @@ class FigureDescriber:
     ) -> dict[str, str]:
         """Describe many chunks concurrently. Returns ``{chunk_id: description}``.
 
-        Failures for individual chunks are logged and skipped — the dict
-        only contains successes. Use :meth:`stats` to see the failure count.
+        Each figure is retried up to ``_DESCRIBE_MAX_ATTEMPTS`` times on a
+        transient failure (timeout/throttle/5xx) before being skipped; the
+        dict only contains successes. Use :meth:`stats` for the failure count.
         """
         targets = [c for c in chunks if c.metadata.layout_type == LayoutType.FIGURE]
         if not targets:
@@ -295,11 +305,28 @@ class FigureDescriber:
         results: dict[str, str] = {}
 
         def _one(c: Chunk) -> tuple[str, str | None]:
-            try:
-                return c.id, self.describe_chunk_in_context(c, conn)
-            except Exception as e:
-                console.print(f"[red]describe failed[/] for {c.id}: {e}")
-                return c.id, None
+            for attempt in range(1, _DESCRIBE_MAX_ATTEMPTS + 1):
+                try:
+                    return c.id, self.describe_chunk_in_context(c, conn)
+                except (FileNotFoundError, ValueError) as e:
+                    # Permanent (missing image / not a figure) — don't retry.
+                    console.print(f"[red]describe failed[/] for {c.id}: {e}")
+                    return c.id, None
+                except Exception as e:
+                    if attempt < _DESCRIBE_MAX_ATTEMPTS:
+                        if self.verbose:
+                            console.print(
+                                f"[yellow]describe retry[/] {c.id} "
+                                f"({attempt}/{_DESCRIBE_MAX_ATTEMPTS}): {e}"
+                            )
+                        time.sleep(_DESCRIBE_RETRY_WAIT * attempt)
+                        continue
+                    console.print(
+                        f"[red]describe failed[/] for {c.id} after "
+                        f"{_DESCRIBE_MAX_ATTEMPTS} attempts: {e}"
+                    )
+                    return c.id, None
+            return c.id, None  # unreachable; satisfies the type checker
 
         with _cf.ThreadPoolExecutor(max_workers=self.max_concurrency) as pool:
             for chunk_id, desc in pool.map(_one, targets):

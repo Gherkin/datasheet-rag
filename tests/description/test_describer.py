@@ -241,6 +241,49 @@ def test_describe_chunks_tolerates_per_chunk_failures(
     assert out["c-good"] == "good description"
 
 
+def test_describe_chunks_retries_transient_failure(
+    conn: Any, tmp_path: Any, monkeypatch: Any
+) -> None:
+    monkeypatch.setattr("aws_rag.description.describer._DESCRIBE_RETRY_WAIT", 0)
+    img = tmp_path / "flaky.png"
+    img.write_bytes(b"\x89PNGFLAKY")
+    fig = _figure_chunk("c-flaky", image_path=str(img))
+    insert_chunks(conn, [fig])
+
+    client = MagicMock()
+    # Two transient failures, then success → should retry and recover.
+    client.invoke_model.side_effect = [
+        RuntimeError("read timeout"),
+        RuntimeError("read timeout"),
+        _mock_bedrock_response("recovered description"),
+    ]
+    describer = FigureDescriber(client=client, max_concurrency=1)
+    out = describer.describe_chunks([fig], conn)
+
+    assert out == {"c-flaky": "recovered description"}
+    assert client.invoke_model.call_count == 3
+
+
+def test_describe_chunks_gives_up_after_max_attempts(
+    conn: Any, tmp_path: Any, monkeypatch: Any
+) -> None:
+    monkeypatch.setattr("aws_rag.description.describer._DESCRIBE_RETRY_WAIT", 0)
+    from aws_rag.description import describer as _d
+
+    img = tmp_path / "dead.png"
+    img.write_bytes(b"\x89PNGDEAD")
+    fig = _figure_chunk("c-dead", image_path=str(img))
+    insert_chunks(conn, [fig])
+
+    client = MagicMock()
+    client.invoke_model.side_effect = RuntimeError("always fails")
+    describer = FigureDescriber(client=client, max_concurrency=1)
+    out = describer.describe_chunks([fig], conn)
+
+    assert out == {}  # skipped after exhausting retries
+    assert client.invoke_model.call_count == _d._DESCRIBE_MAX_ATTEMPTS
+
+
 def test_describe_chunks_ignores_non_figure_inputs(
     conn: Any, fake_client: Any, tmp_path: Any
 ) -> None:
