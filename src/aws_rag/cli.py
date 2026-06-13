@@ -50,6 +50,37 @@ def _backend_for(db_path: Path | None = None):
     return get_backend()
 
 
+def _require_local_db(db_path: Path | None) -> Path:
+    """Return a concrete local sqlite path for commands that need raw index
+    access (the eval harness: tunable RRF weights, variant-store builds).
+
+    In remote mode these can't run against the HTTP API, so require an
+    explicit local --db pointing at a copy of the corpus.
+    """
+    from aws_rag.backend import backend_mode
+
+    if db_path is not None:
+        return db_path
+    if backend_mode() == "remote":
+        raise click.ClickException(
+            "eval is a local-only benchmarking harness (it needs raw index "
+            "access and builds variant stores) — it can't run against a "
+            "remote RAG server. Pass --db pointing at a local sqlite copy of "
+            "the corpus, e.g. `--db ./rag.sqlite`."
+        )
+    return get_settings().sqlite_db_path
+
+
+def _backend_resolve(be, doc_id: str) -> str:
+    """Resolve a doc_id prefix via the backend, turning errors into ClickException."""
+    from aws_rag.backend import RagServerError
+
+    try:
+        return be.resolve_doc_id(doc_id)
+    except (ValueError, RagServerError) as e:
+        raise click.ClickException(str(e)) from e
+
+
 _SLUG_RE = re.compile(r"[^a-zA-Z0-9]+")
 
 
@@ -413,20 +444,17 @@ def _local_ips() -> list[str]:
               help="Destination file or directory (default: ./<short_doc_id>.pdf).")
 @click.option("--db", "db_path", type=click.Path(path_type=Path), default=None)
 def download_doc(doc_id: str, output_path: Path | None, db_path: Path | None) -> None:
-    """Save a document's source PDF to disk (from S3, or the local scan fallback)."""
-    from aws_rag import pdf_viewer
-    from aws_rag.store import connect, get_doc_titles
-
-    settings = get_settings()
-    target = db_path or settings.sqlite_db_path
-    conn = connect(target)
-    doc_id = _resolve_doc_id(conn, doc_id)
-    title = get_doc_titles(conn).get(doc_id)
-    conn.close()
+    """Save a document's source PDF to disk (from the server / S3, or the
+    local scan fallback)."""
+    be = _backend_for(db_path)
+    doc_id = _backend_resolve(be, doc_id)
+    title = be.get_doc_titles().get(doc_id)
 
     try:
-        data = pdf_viewer.load_pdf_bytes(doc_id)
+        data = be.get_pdf_bytes(doc_id)
     except FileNotFoundError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except Exception as exc:  # RagServerError, etc.
         raise click.ClickException(str(exc)) from exc
 
     short_id = doc_id[:SHORT_DOC_ID_LEN]
@@ -463,17 +491,17 @@ def open_doc(doc_id: str, page: int, db_path: Path | None, launch: bool) -> None
     import webbrowser
 
     from aws_rag import pdf_viewer
-    from aws_rag.store import connect
 
-    settings = get_settings()
-    target = db_path or settings.sqlite_db_path
-    conn = connect(target)
-    doc_id = _resolve_doc_id(conn, doc_id)
-    conn.close()
+    be = _backend_for(db_path)
+    doc_id = _backend_resolve(be, doc_id)
 
     try:
-        pdf_viewer.load_pdf_bytes(doc_id)  # validate + warm cache before printing URLs
+        # Fetch via the backend (HTTP in remote mode) and prime the viewer
+        # cache so the loopback server can serve it locally.
+        pdf_viewer.prime_pdf_cache(doc_id, be.get_pdf_bytes(doc_id))
     except FileNotFoundError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except Exception as exc:
         raise click.ClickException(str(exc)) from exc
 
     port = pdf_viewer.ensure_pdf_server()
@@ -764,11 +792,15 @@ def embed(
     verbose: bool,
     dry_run: bool,
 ) -> None:
-    """Embed a chunk graph (produced by `rag chunk`) and store it in SQLite."""
+    """Embed a chunk graph (produced by `rag chunk`) and store it.
+
+    Embedding + insert run through the backend, so this writes to the remote
+    server (which embeds) when RAG_SERVER_URL is set, or the local sqlite
+    store otherwise.
+    """
+    from aws_rag.backend import MetadataPatch, backend_mode
     from aws_rag.chunking.pipeline import load_chunk_graph
-    from aws_rag.embedding import embed_chunk_graph, get_embedder
     from aws_rag.project_config import get_project_config
-    from aws_rag.store import connect, insert_chunk_graph
 
     proj_cfg = get_project_config()
     if proj_cfg is not None:
@@ -783,70 +815,37 @@ def embed(
                   f"MESO {stats['by_level']['MESO']}, "
                   f"MICRO {stats['by_level']['MICRO']})")
 
-    settings = get_settings()
-    target = db_path or settings.sqlite_db_path
-
-    # Fold any previously-generated figure descriptions into context_text so
-    # vectors include them. The JSON file never carries descriptions back.
-    if target.exists():
-        _conn = connect(target)
-        try:
-            undescribed_ids = [
-                c.id for c in graph.chunks.values() if not c.figure_description
-            ]
-            if undescribed_ids:
-                placeholders = ",".join("?" * len(undescribed_ids))
-                rows = _conn.execute(
-                    f"SELECT id, figure_description FROM chunks "
-                    f"WHERE id IN ({placeholders}) AND figure_description IS NOT NULL",
-                    undescribed_ids,
-                ).fetchall()
-                if rows:
-                    console.print(
-                        f"  Merging [green]{len(rows)}[/] stored figure "
-                        f"descriptions into context_text before embedding…"
-                    )
-                for row in rows:
-                    chunk = graph.chunks.get(row["id"])
-                    if chunk:
-                        desc = row["figure_description"]
-                        chunk.figure_description = desc
-                        tag = f"Description: {desc}"
-                        if tag not in (chunk.context_text or ""):
-                            chunk.context_text = (chunk.context_text or chunk.text) + "\n" + tag
-        finally:
-            _conn.close()
-
-    _s = get_settings()
-    if _s.embedding_backend == "local":
-        console.print(
-            f"Embedding with local {_s.local_embedding_runtime} model "
-            f"{_s.local_embedding_model!r}…"
-        )
-    else:
-        console.print("Embedding with Bedrock Titan v2…")
-    embedder = get_embedder(verbose=verbose)
-    vectors = embed_chunk_graph(graph, embedder=embedder)
-    s = embedder.stats()
-    console.print(
-        f"  [green]Embedded[/] {len(vectors)} chunks · "
-        f"{s['total_tokens_in']} input tokens · "
-        f"{s['total_errors']} errors"
-    )
-
     if dry_run:
-        console.print("[yellow]Dry run — not writing to the store.[/]")
-        return
+        raise click.ClickException(
+            "embed --dry-run is no longer supported (embedding now happens via "
+            "the backend, server-side in remote mode). Use `rag ingest --dry-run "
+            "--show-cost` for an estimate without writing."
+        )
 
-    console.print(f"Writing to [cyan]{target}[/]…")
-    conn = connect(target)
-    inserted = insert_chunk_graph(
-        conn, graph, vectors=vectors,
-        project_id=project_id, group_name=group_name,
+    be = _backend_for(db_path)
+
+    # Remote: ship figure images so the server stores them and the embedded
+    # context_text can fold in any server-side descriptions.
+    figures_upload: dict[str, tuple[bytes, str]] | None = None
+    if backend_mode() == "remote" and db_path is None:
+        figures_upload = {}
+        for c in graph.chunks.values():
+            if c.figure_image_path:
+                p = Path(c.figure_image_path)
+                if p.is_file():
+                    figures_upload[c.id] = (p.read_bytes(), p.suffix.lstrip(".") or "png")
+
+    console.print("Embedding & writing via the backend…")
+    result = be.ingest_chunk_graph(
+        graph,
+        figures=figures_upload,
+        project_id=project_id,
+        group_name=group_name,
+        metadata=MetadataPatch(),
+        embed=True,
+        describe_figures=False,
     )
-    conn.commit()
-    conn.close()
-    console.print(f"[green]Inserted[/] {inserted} chunks.")
+    console.print(f"[green]Inserted[/] {result.inserted} chunks.")
 
 
 # ---------------------------------------------------------------------------
@@ -962,16 +961,13 @@ def list_figures_cmd(
 ) -> None:
     """List figure chunks in the store (those with a usable image)."""
     from aws_rag.project_config import resolve_cli_project_id
-    from aws_rag.store import connect, list_figure_chunks
 
     project_id = resolve_cli_project_id(project_id, is_global=is_global)
 
-    settings = get_settings()
-    target = db_path or settings.sqlite_db_path
-    conn = connect(target)
+    be = _backend_for(db_path)
     if doc_id:
-        doc_id = _resolve_doc_id(conn, doc_id)
-    figs = list_figure_chunks(conn, doc_id=doc_id, project_id=project_id)
+        doc_id = _backend_resolve(be, doc_id)
+    figs = be.list_figure_chunks(doc_id=doc_id, project_id=project_id)
     if missing_description_only:
         figs = [c for c in figs if not c.figure_description]
 
@@ -1003,7 +999,6 @@ def list_figures_cmd(
             src,
         )
     console.print(table)
-    conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -1048,37 +1043,25 @@ def describe_figures_cmd(
         rag chunk output/<doc>_blocks.json --figures-manifest ...   # if needed
         rag embed output/<doc>_chunks.json --project-id <p>
     """
-    from aws_rag.description import FigureDescriber, describe_figures_in_store
-    from aws_rag.store import connect
-
-    settings = get_settings()
-    target = db_path or settings.sqlite_db_path
-    conn = connect(target)
+    be = _backend_for(db_path)
     if doc_id:
-        doc_id = _resolve_doc_id(conn, doc_id)
+        doc_id = _backend_resolve(be, doc_id)
 
-    describer = FigureDescriber(model_id=model_id, verbose=verbose)
-    console.print(
-        f"Describing figures with [cyan]{describer.model_id}[/] "
-        f"(concurrency={describer.max_concurrency}, max_tokens={describer.max_tokens})"
-    )
-
-    descriptions = describe_figures_in_store(
-        conn,
+    console.print("Describing figures via the backend (vision runs server-side in remote mode)…")
+    descriptions, s = be.describe_figures(
         doc_id=doc_id,
         project_id=project_id,
         missing_only=missing_only,
         limit=limit,
-        describer=describer,
+        model_id=model_id,
         dry_run=dry_run,
     )
 
-    s = describer.stats()
     console.print(
         f"  [green]{len(descriptions)}[/] descriptions · "
-        f"in={s['total_input_tokens']} tok · "
-        f"out={s['total_output_tokens']} tok · "
-        f"errors={s['total_errors']}"
+        f"in={s.get('total_input_tokens', 0)} tok · "
+        f"out={s.get('total_output_tokens', 0)} tok · "
+        f"errors={s.get('total_errors', 0)}"
     )
 
     if dry_run and descriptions:
@@ -1092,8 +1075,6 @@ def describe_figures_cmd(
             "  Re-run `rag embed <chunks.json>` (or implement an "
             "updated-only re-embed) to refresh the vectors."
         )
-
-    conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -1250,19 +1231,18 @@ def ingest(
 
     from aws_rag.costs import CostEstimate, CostLineItem
     from aws_rag.docling_parser import content_hash
-    from aws_rag.store import connect, get_ingested_docs
 
     pdf_files = sorted(p for p in pdf_path.rglob("*") if p.is_file() and p.suffix.lower() == ".pdf")
     if not pdf_files:
         raise click.ClickException(f"No PDFs found under {pdf_path}")
 
-    settings = get_settings()
-    target = db_path or settings.sqlite_db_path
+    # Skip docs already in the store (local or remote, via the backend).
     ingested_ids: set[str] = set()
-    if target.exists():
-        conn = connect(target)
-        ingested_ids = {d["doc_id"] for d in get_ingested_docs(conn)}
-        conn.close()
+    if not show_cost:
+        try:
+            ingested_ids = {d.doc_id for d in _backend_for(db_path).get_ingested_docs()}
+        except Exception:
+            ingested_ids = set()
 
     console.rule(f"[bold magenta]Bulk ingest — {len(pdf_files)} PDFs under {pdf_path}[/]")
     total_cost = CostEstimate()
@@ -2451,47 +2431,38 @@ def fix_titles_cmd(
     <doc_id>`) so they're distinguishable from titles Docling extracted
     directly. Re-run with --doc-id --force to overwrite an inferred title.
     """
-    from aws_rag.store import connect, get_ingested_docs
-    from aws_rag.titling import TitleInferer, infer_and_backfill_title
-
-    settings = get_settings()
-    target = db_path or settings.sqlite_db_path
-    conn = connect(target)
+    be = _backend_for(db_path)
 
     if doc_id:
-        doc_id = _resolve_doc_id(conn, doc_id)
-        docs = [d for d in get_ingested_docs(conn) if d["doc_id"] == doc_id]
+        doc_id = _backend_resolve(be, doc_id)
+        docs = [d for d in be.get_ingested_docs() if d.doc_id == doc_id]
     else:
-        docs = get_ingested_docs(conn)
+        docs = be.get_ingested_docs()
 
     if not force:
-        skipped = [d for d in docs if d["doc_title"] not in _BLANK_TITLES]
-        docs = [d for d in docs if d["doc_title"] in _BLANK_TITLES]
+        skipped = [d for d in docs if d.doc_title not in _BLANK_TITLES]
+        docs = [d for d in docs if d.doc_title in _BLANK_TITLES]
         if skipped and len(skipped) == 1 and not docs:
             console.print(
-                f"[yellow]{skipped[0]['doc_id'][:SHORT_DOC_ID_LEN]}[/] already has a title "
-                f"({skipped[0]['doc_title']!r}). Pass --force to re-infer it anyway."
+                f"[yellow]{skipped[0].doc_id[:SHORT_DOC_ID_LEN]}[/] already has a title "
+                f"({skipped[0].doc_title!r}). Pass --force to re-infer it anyway."
             )
 
     if not docs:
         console.print("[yellow]No documents need a title fix.[/]")
-        conn.close()
         return
 
-    inferer = TitleInferer(model_id=model_id)
-    console.print(f"Inferring titles with [cyan]{inferer.model_id}[/] for {len(docs)} document(s)…")
+    console.print(f"Inferring titles for {len(docs)} document(s) (LLM runs server-side in remote mode)…")
 
     for d in docs:
-        short_id = d["doc_id"][:SHORT_DOC_ID_LEN]
-        current = d["doc_title"]
-        title = infer_and_backfill_title(conn, d["doc_id"], inferer=inferer, dry_run=dry_run)
+        short_id = d.doc_id[:SHORT_DOC_ID_LEN]
+        current = d.doc_title
+        title = be.infer_title(d.doc_id, model_id=model_id, dry_run=dry_run)
         if title is None:
             console.print(f"  [yellow]could not infer[/] {short_id} (was: {current!r})")
             continue
         verb = "would set" if dry_run else "set"
         console.print(f"  [green]{verb}[/] {short_id}: {current!r} → {title!r}")
-
-    conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -2593,8 +2564,7 @@ def eval_generate(
     from aws_rag.eval.generate import generate_golden_set
     from aws_rag.store import connect
 
-    settings = get_settings()
-    conn = connect(db_path or settings.sqlite_db_path)
+    conn = connect(_require_local_db(db_path))
     if doc_id:
         doc_id = _resolve_doc_id(conn, doc_id)
     eval_set = generate_golden_set(
@@ -2649,8 +2619,7 @@ def eval_run(
     from aws_rag.eval.harness import RunConfig, run_eval
     from aws_rag.store import connect
 
-    settings = get_settings()
-    conn = connect(db_path or settings.sqlite_db_path)
+    conn = connect(_require_local_db(db_path))
     eval_set = EvalSet.load(set_path)
 
     embedder = None
@@ -2721,8 +2690,7 @@ def eval_ablate(
     from aws_rag.eval.harness import RunConfig, run_eval
     from aws_rag.store import connect
 
-    settings = get_settings()
-    conn = connect(db_path or settings.sqlite_db_path)
+    conn = connect(_require_local_db(db_path))
     eval_set = EvalSet.load(set_path)
     embedder = get_embedder()
 

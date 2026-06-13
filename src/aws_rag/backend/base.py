@@ -130,6 +130,30 @@ class RagBackend(ABC):
         self, chunk_id: str, description: str, *, update_context_text: bool = True
     ) -> bool: ...
 
+    @abstractmethod
+    def describe_figures(
+        self,
+        *,
+        doc_id: str | None = None,
+        project_id: str | None = None,
+        missing_only: bool = True,
+        limit: int | None = None,
+        model_id: str | None = None,
+        dry_run: bool = False,
+    ) -> tuple[dict[str, str], dict[str, int]]:
+        """Generate vision-LLM descriptions for figure chunks (server-side).
+
+        Returns ``(descriptions, stats)`` where descriptions maps chunk_id to
+        the generated text and stats carries token/error counts.
+        """
+
+    # ---- titles (text LLM, server-side) ----
+    @abstractmethod
+    def infer_title(
+        self, doc_id: str, *, model_id: str | None = None, dry_run: bool = False
+    ) -> str | None:
+        """Infer and (unless dry_run) backfill a document's title."""
+
     # ---- source PDF ----
     @abstractmethod
     def get_pdf_bytes(self, doc_id: str) -> bytes: ...

@@ -60,6 +60,20 @@ class FigureDescriptionBody(BaseModel):
     update_context_text: bool = True
 
 
+class DescribeFiguresBody(BaseModel):
+    doc_id: str | None = None
+    project_id: str | None = None
+    missing_only: bool = True
+    limit: int | None = None
+    model_id: str | None = None
+    dry_run: bool = False
+
+
+class InferTitleBody(BaseModel):
+    model_id: str | None = None
+    dry_run: bool = False
+
+
 def build_app() -> FastAPI:
     app = FastAPI(
         title="aws-rag server",
@@ -234,6 +248,30 @@ def build_app() -> FastAPI:
             chunk_id, body.description, update_context_text=body.update_context_text
         )
         return {"updated": updated}
+
+    @app.post("/figures/describe", dependencies=dep)
+    def figures_describe(
+        body: DescribeFiguresBody, be: LocalBackend = Depends(get_backend)
+    ) -> dict:
+        descriptions, stats = be.describe_figures(
+            doc_id=body.doc_id,
+            project_id=body.project_id,
+            missing_only=body.missing_only,
+            limit=body.limit,
+            model_id=body.model_id,
+            dry_run=body.dry_run,
+        )
+        return {"descriptions": descriptions, "stats": stats}
+
+    @app.post("/documents/{doc_id}/infer-title", dependencies=dep)
+    def document_infer_title(
+        doc_id: str, body: InferTitleBody, be: LocalBackend = Depends(get_backend)
+    ) -> dict:
+        return {
+            "title": be.infer_title(
+                doc_id, model_id=body.model_id, dry_run=body.dry_run
+            )
+        }
 
     # -- ingestion -------------------------------------------------------
     @app.post("/ingest", dependencies=dep)

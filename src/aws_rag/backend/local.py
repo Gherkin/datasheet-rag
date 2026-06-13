@@ -353,6 +353,42 @@ class LocalBackend(RagBackend):
                 update_context_text=update_context_text,
             )
 
+    def describe_figures(
+        self,
+        *,
+        doc_id: str | None = None,
+        project_id: str | None = None,
+        missing_only: bool = True,
+        limit: int | None = None,
+        model_id: str | None = None,
+        dry_run: bool = False,
+    ) -> tuple[dict[str, str], dict[str, int]]:
+        from aws_rag.description import FigureDescriber, describe_figures_in_store
+
+        describer = FigureDescriber(model_id=model_id, verbose=False)
+        with self._write_lock:
+            descriptions = describe_figures_in_store(
+                self._get_conn(),
+                doc_id=doc_id,
+                project_id=project_id,
+                missing_only=missing_only,
+                limit=limit,
+                describer=describer,
+                dry_run=dry_run,
+            )
+        return descriptions, describer.stats()
+
+    def infer_title(
+        self, doc_id: str, *, model_id: str | None = None, dry_run: bool = False
+    ) -> str | None:
+        from aws_rag.titling import TitleInferer, infer_and_backfill_title
+
+        inferer = TitleInferer(model_id=model_id)
+        with self._write_lock:
+            return infer_and_backfill_title(
+                self._get_conn(), doc_id, inferer=inferer, dry_run=dry_run
+            )
+
     # -- source PDF ----------------------------------------------------
     def get_pdf_bytes(self, doc_id: str) -> bytes:
         from aws_rag import pdf_viewer

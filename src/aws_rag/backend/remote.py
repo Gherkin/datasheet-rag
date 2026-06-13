@@ -208,6 +208,40 @@ class RemoteBackend(RagBackend):
         )
         return bool(data["updated"])
 
+    def describe_figures(
+        self,
+        *,
+        doc_id: str | None = None,
+        project_id: str | None = None,
+        missing_only: bool = True,
+        limit: int | None = None,
+        model_id: str | None = None,
+        dry_run: bool = False,
+    ) -> tuple[dict[str, str], dict[str, int]]:
+        data = self._json(
+            "POST",
+            "/figures/describe",
+            json={
+                "doc_id": doc_id,
+                "project_id": project_id,
+                "missing_only": missing_only,
+                "limit": limit,
+                "model_id": model_id,
+                "dry_run": dry_run,
+            },
+        )
+        return data["descriptions"], data["stats"]
+
+    def infer_title(
+        self, doc_id: str, *, model_id: str | None = None, dry_run: bool = False
+    ) -> str | None:
+        data = self._json(
+            "POST",
+            f"/documents/{doc_id}/infer-title",
+            json={"model_id": model_id, "dry_run": dry_run},
+        )
+        return data["title"]
+
     # -- source PDF ----------------------------------------------------
     def get_pdf_bytes(self, doc_id: str) -> bytes:
         return self._request("GET", f"/documents/{doc_id}/pdf").content
