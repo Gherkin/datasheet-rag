@@ -53,6 +53,40 @@ class Settings(BaseSettings):
         ),
     )
 
+    # ------------------------------------------------------------------
+    # Remote server — when set, the CLI and MCP talk to a shared RAG
+    # server over HTTP instead of opening the local sqlite file. This is
+    # how multiple developers share one corpus (server runs in Docker and
+    # owns the db + embedder). Unset = local mode (the historical default).
+    # ------------------------------------------------------------------
+    server_url: str | None = Field(
+        default=None,
+        alias="RAG_SERVER_URL",
+        description=(
+            "Base URL of a remote RAG server (e.g. http://rag.internal:8080). "
+            "When set, the CLI and MCP operate against it over HTTP instead of "
+            "the local sqlite file — the server owns the database and the "
+            "embedder. Unset = local mode (uses sqlite_db_path directly)."
+        ),
+    )
+    server_token: str | None = Field(
+        default=None,
+        alias="RAG_SERVER_TOKEN",
+        description=(
+            "Optional bearer token sent to the remote server. The server "
+            "requires it only when it has RAG_SERVER_TOKEN set too. Stage-1 "
+            "auth extension point; unset = no auth."
+        ),
+    )
+    server_timeout: float = Field(
+        default=120.0,
+        alias="RAG_SERVER_TIMEOUT",
+        description=(
+            "HTTP timeout in seconds for remote backend calls. Generous by "
+            "default because ingest requests embed server-side and can be slow."
+        ),
+    )
+
     # AWS
     aws_region: str = Field(default="eu-west-1", alias="AWS_REGION")
     aws_profile: str | None = Field(default=None, alias="AWS_PROFILE")

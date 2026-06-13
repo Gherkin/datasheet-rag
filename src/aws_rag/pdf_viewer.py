@@ -190,6 +190,18 @@ def _build_viewer_html(doc_id: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def prime_pdf_cache(doc_id: str, body: bytes) -> None:
+    """Seed the process PDF cache so ``load_pdf_bytes``/``viewer_url`` resolve
+    a doc whose bytes live on a remote server rather than the local store.
+
+    Used by the MCP server in remote mode: it fetches the PDF over HTTP via
+    the backend, then primes the cache so the loopback viewer can serve it
+    without a local file.
+    """
+    with _pdf_cache_lock:
+        _pdf_cache[doc_id] = body
+
+
 def load_pdf_bytes(doc_id: str) -> bytes:
     """Return the raw PDF bytes for *doc_id*, using a process-level cache.
 

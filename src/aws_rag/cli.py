@@ -34,6 +34,22 @@ def _resolve_doc_id(conn, doc_id: str) -> str:
         raise click.ClickException(str(e)) from e
 
 
+def _backend_for(db_path: Path | None = None):
+    """Return the backend a command should use.
+
+    ``--db <path>`` always means "this specific local sqlite file" so it
+    builds a LocalBackend on that path; otherwise the configured backend
+    (remote when RAG_SERVER_URL is set, else local).
+    """
+    if db_path is not None:
+        from aws_rag.backend import LocalBackend
+
+        return LocalBackend(db_path)
+    from aws_rag.backend import get_backend
+
+    return get_backend()
+
+
 _SLUG_RE = re.compile(r"[^a-zA-Z0-9]+")
 
 
@@ -46,11 +62,135 @@ def _slugify(text: str | None) -> str:
 
 @click.group()
 @click.option("--bucket", envvar="RAG_S3_BUCKET", default=None, help="Override S3 bucket name.")
-def cli(bucket: str | None) -> None:
+@click.pass_context
+def cli(ctx: click.Context, bucket: str | None) -> None:
     """AWS RAG Pipeline — electronics datasheet ingestion."""
     if bucket:
         import os
         os.environ["RAG_S3_BUCKET"] = bucket
+    # Remind the user when they're using the local sqlite file rather than a
+    # shared server (printed to stderr, non-failing). Skipped for `init`,
+    # which is the command that sets the server up.
+    if ctx.invoked_subcommand != "init":
+        from aws_rag.backend import emit_local_notice
+
+        emit_local_notice()
+
+
+# ---------------------------------------------------------------------------
+# Init
+# ---------------------------------------------------------------------------
+
+
+def _config_env_lines() -> list[str]:
+    """Render every Settings field as a commented-out config.env line.
+
+    Schema-driven so the template never drifts from the model: each field
+    becomes ``# RAG_X=<default>   # <terse description>``. The caller fills
+    in (uncomments) the handful of critical fields it prompted for.
+    """
+    from aws_rag.config import Settings
+
+    lines: list[str] = []
+    for name, field in Settings.model_fields.items():
+        env_key = field.alias or f"RAG_{name.upper()}"
+        default = field.default
+        if default is None or (isinstance(default, str) and default == ""):
+            example = ""
+        elif isinstance(default, Path):
+            example = str(default)
+        elif isinstance(default, bool):
+            example = "true" if default else "false"
+        elif isinstance(default, list):
+            example = ",".join(str(x) for x in default)
+        else:
+            example = str(default)
+        desc = (field.description or "").strip().split(". ")[0].split("\n")[0]
+        if len(desc) > 90:
+            desc = desc[:87] + "…"
+        comment = f"   # {desc}" if desc else ""
+        lines.append(f"# {env_key}={example}{comment}")
+    return lines
+
+
+@cli.command()
+@click.option("--force", is_flag=True, help="Overwrite an existing config.env without prompting.")
+def init(force: bool) -> None:
+    """Create ~/.rag and a documented config.env, prompting for the essentials.
+
+    Sets up the local store directory and writes a config file with the few
+    critical options filled in (from prompts) and every other option present
+    but commented out with a terse description — so it doubles as reference.
+    """
+    settings = get_settings()
+    home = settings.rag_home
+    home.mkdir(parents=True, exist_ok=True)
+    for sub in ("pdfs", "figures", "cache"):
+        (home / sub).mkdir(parents=True, exist_ok=True)
+
+    config_path = home / "config.env"
+    if config_path.exists() and not force:
+        if not click.confirm(f"{config_path} already exists — overwrite?", default=False):
+            console.print("[yellow]Left existing config.env untouched.[/]")
+            return
+
+    console.rule("[bold magenta]Configure aws-rag[/]")
+    console.print(
+        "Leave the server URL blank to use a [cyan]local[/] sqlite store. "
+        "Point it at a shared RAG server to collaborate with others.\n"
+    )
+    server_url = click.prompt(
+        "Remote RAG server URL (blank = local mode)", default="", show_default=False
+    ).strip()
+
+    chosen: dict[str, str] = {}
+    if server_url:
+        chosen["RAG_SERVER_URL"] = server_url
+        token = click.prompt(
+            "Server bearer token (blank = none)", default="", show_default=False
+        ).strip()
+        if token:
+            chosen["RAG_SERVER_TOKEN"] = token
+        console.print(
+            "[dim]Embeddings run on the server in remote mode — no local "
+            "model config needed.[/]"
+        )
+    else:
+        backend = click.prompt(
+            "Embedding backend", type=click.Choice(["local", "bedrock"]), default="local"
+        )
+        chosen["RAG_EMBEDDING_BACKEND"] = backend
+        if backend == "bedrock":
+            chosen["AWS_REGION"] = click.prompt("AWS region", default=settings.aws_region)
+
+    # Render the full template, uncommenting the chosen keys.
+    rendered: list[str] = [
+        "# aws-rag configuration — generated by `rag init`.",
+        "# Uncomment and edit any line below to override a default.",
+        "",
+    ]
+    chosen_written: set[str] = set()
+    for line in _config_env_lines():
+        key = line[2:].split("=", 1)[0]
+        if key in chosen:
+            comment = line.split("   # ", 1)
+            tail = f"   # {comment[1]}" if len(comment) > 1 else ""
+            rendered.append(f"{key}={chosen[key]}{tail}")
+            chosen_written.add(key)
+        else:
+            rendered.append(line)
+    # Any chosen key not present as a field (shouldn't happen) appended verbatim.
+    for key, val in chosen.items():
+        if key not in chosen_written:
+            rendered.append(f"{key}={val}")
+
+    config_path.write_text("\n".join(rendered) + "\n")
+    console.print(f"\n[green]Wrote[/] {config_path}")
+    if server_url:
+        console.print(f"  Mode: [cyan]remote[/] → {server_url}")
+    else:
+        console.print(f"  Mode: [cyan]local[/] → {settings.sqlite_db_path}")
+    console.print("  Edit the file to tweak any other option (all are listed, commented).")
 
 
 # ---------------------------------------------------------------------------
@@ -190,13 +330,7 @@ def list_docs(db_path: Path | None, project_id: str | None, is_global: bool, sho
         console.print(table)
         return
 
-    from aws_rag.store import connect, get_ingested_docs
-
-    settings = get_settings()
-    target = db_path or settings.sqlite_db_path
-    conn = connect(target)
-    docs = get_ingested_docs(conn, project_id=project_id)
-    conn.close()
+    docs = _backend_for(db_path).get_ingested_docs(project_id=project_id)
 
     if not docs:
         console.print("[yellow]No ingested documents found.[/] Run [cyan]rag ingest[/] first "
@@ -212,11 +346,11 @@ def list_docs(db_path: Path | None, project_id: str | None, is_global: bool, sho
 
     for doc in docs:
         table.add_row(
-            doc["doc_id"][:SHORT_DOC_ID_LEN],
-            doc["doc_title"],
-            str(doc["chunk_count"]),
-            str(doc["page_count"]) if doc["page_count"] is not None else "—",
-            doc["ingested_at"] or "—",
+            doc.doc_id[:SHORT_DOC_ID_LEN],
+            doc.doc_title or "—",
+            str(doc.chunk_count),
+            str(doc.page_count) if doc.page_count is not None else "—",
+            doc.ingested_at or "—",
         )
 
     console.print(table)
@@ -749,24 +883,17 @@ def search(
     level: str | None,
     show_context: bool,
 ) -> None:
-    """Search the local SQLite store with hybrid / vector / keyword retrieval."""
+    """Search the RAG store (local sqlite or remote server) with hybrid /
+    vector / keyword retrieval. The query is embedded by the backend."""
+    from aws_rag.backend import RagServerError
     from aws_rag.models.chunk import ChunkLevel
     from aws_rag.project_config import resolve_cli_project_id
-    from aws_rag.store import (
-        SearchFilters,
-        connect,
-        hybrid_search,
-        keyword_search,
-        vector_search,
-    )
+    from aws_rag.store import SearchFilters
 
     project_id = resolve_cli_project_id(project_id, is_global=is_global)
+    be = _backend_for(db_path)
 
-    settings = get_settings()
-    target = db_path or settings.sqlite_db_path
-    conn = connect(target)
-
-    resolved_doc_ids = [_resolve_doc_id(conn, d) for d in doc_ids]
+    resolved_doc_ids = [be.resolve_doc_id(d) for d in doc_ids]
 
     level_enum = None
     if level:
@@ -780,20 +907,10 @@ def search(
         level=level_enum,
     )
 
-    if mode in ("vector", "hybrid"):
-        from aws_rag.embedding import get_embedder
-
-        embedder = get_embedder()
-        query_vec = embedder.embed_one(query)
-    else:
-        query_vec = None
-
-    if mode == "vector":
-        results = vector_search(conn, query_vec, k=top_k, filters=filters)  # type: ignore[arg-type]
-    elif mode == "keyword":
-        results = keyword_search(conn, query, k=top_k, filters=filters)
-    else:
-        results = hybrid_search(conn, query_vec, query, k=top_k, filters=filters)  # type: ignore[arg-type]
+    try:
+        results = be.search(query, mode=mode, k=top_k, filters=filters)
+    except RagServerError as e:
+        raise click.ClickException(str(e)) from e
 
     if not results:
         console.print("[yellow]No results.[/]")
@@ -820,7 +937,6 @@ def search(
         )
 
     console.print(table)
-    conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -1218,6 +1334,13 @@ def _ingest_one(
     """Ingest a single PDF; returns the cost estimate when --show-cost is set."""
     import time
 
+    from aws_rag.chunking.pipeline import (
+        load_chunk_graph,
+        run_chunking_pipeline,
+        run_chunking_pipeline_from_outline,
+        save_chunk_graph,
+    )
+    from aws_rag.chunking.splitter import SplitterConfig
     from aws_rag.costs import (
         CostEstimate,
         estimate_embedding_cost,
@@ -1226,23 +1349,7 @@ def _ingest_one(
         estimate_title_inference_cost,
         pdf_page_count,
     )
-    from aws_rag.chunking.pipeline import (
-        load_chunk_graph,
-        run_chunking_pipeline,
-        run_chunking_pipeline_from_outline,
-        save_chunk_graph,
-    )
-    from aws_rag.chunking.splitter import SplitterConfig
-    from aws_rag.embedding import embed_chunk_graph, get_embedder
     from aws_rag.figures import extract_figures, extract_figures_from_regions, upload_figures_to_s3
-    from aws_rag.store import (
-        apply_metadata_to_chunks,
-        connect,
-        get_doc_titles,
-        insert_chunk_graph,
-        set_metadata,
-    )
-
     from aws_rag.project_config import get_project_config_for
     proj_cfg = get_project_config_for(pdf_path.parent)
     if proj_cfg is not None:
@@ -1268,6 +1375,9 @@ def _ingest_one(
     step_n = 0
     cost = CostEstimate()
     figure_count = 0
+    # Set in the docling path; the textract path leaves them empty.
+    running_header = ""
+    pdf_meta_title = ""
 
     def _step(label: str) -> None:
         nonlocal step_n
@@ -1403,6 +1513,7 @@ def _ingest_one(
 
     # ── 2b. Textract path (scanned PDFs) ─────────────────────────────────────
     else:
+        from aws_rag.storage import save_pdf_locally
         from aws_rag.textract import (
             get_job_results,
             load_blocks,
@@ -1410,7 +1521,6 @@ def _ingest_one(
             start_analysis,
             wait_for_job,
         )
-        from aws_rag.storage import save_pdf_locally
 
         if show_cost:
             from aws_rag.docling_parser import content_hash
@@ -1511,65 +1621,18 @@ def _ingest_one(
                 f"MICRO {stats['by_level']['MICRO']}) → [cyan]{chunks_path}[/]"
             )
 
-    # ── 5. Describe figures (optional) ───────────────────────────────────────
-    if not skip_figures and not skip_describe:
-        _step("AI figure descriptions")
-        # Need chunks in the store first so describe-figures can find them.
-        # We do a provisional write, then describe, then the embed step below
-        # will merge the descriptions into context_text.
-        if show_cost:
+    # ── 5/6. Describe, embed & store (via the backend) ───────────────────────
+    # Parsing/chunking/figure-cropping above ran client-side. Embedding,
+    # figure description (vision LLM) and the DB write all happen through the
+    # backend — locally against sqlite, or server-side over HTTP in remote
+    # mode (where the embedder/vision models live).
+    do_describe = not skip_figures and not skip_describe
+
+    if show_cost:
+        if do_describe:
             if figure_count == 0:
-                # Resumed from a cached chunk graph — figures weren't
-                # re-extracted, so count figure chunks already in the graph.
                 figure_count = sum(1 for c in graph.chunks.values() if c.figure_image_path)
             cost.items.append(estimate_figure_description_cost(figure_count))
-            console.print(f"  [yellow]Estimating only — {figure_count} figures, no Bedrock calls made.[/]")
-        elif not dry_run:
-            from aws_rag.description import FigureDescriber, describe_figures_in_store
-
-            target = db_path or settings.sqlite_db_path
-            conn = connect(target)
-            embedder_tmp = get_embedder(verbose=False)
-            vectors_tmp = embed_chunk_graph(graph, embedder=embedder_tmp)
-            inserted_tmp = insert_chunk_graph(
-                conn, graph, vectors=vectors_tmp,
-                project_id=project_id, group_name=group_name,
-            )
-            conn.commit()
-            console.print(f"  Provisional write of {inserted_tmp} chunks for description pass.")
-
-            describer = FigureDescriber(verbose=True)
-            descriptions = describe_figures_in_store(
-                conn, doc_id=did, project_id=project_id,
-                missing_only=True, describer=describer, dry_run=False,
-            )
-            s = describer.stats()
-            console.print(
-                f"  [green]{len(descriptions)}[/] descriptions · "
-                f"in={s['total_input_tokens']} tok · out={s['total_output_tokens']} tok"
-            )
-            conn.close()
-
-            # Merge stored descriptions back into graph so the final embed
-            # includes them in context_text.
-            conn2 = connect(target)
-            for row in conn2.execute(
-                "SELECT id, figure_description FROM chunks WHERE doc_id=? AND figure_description IS NOT NULL",
-                (did,),
-            ).fetchall():
-                chunk = graph.chunks.get(row["id"])
-                if chunk:
-                    chunk.figure_description = row["figure_description"]
-                    tag = f"Description: {row['figure_description']}"
-                    if tag not in (chunk.context_text or ""):
-                        chunk.context_text = (chunk.context_text or chunk.text) + "\n" + tag
-            conn2.close()
-        else:
-            console.print("  [yellow]Dry run — skipping description and provisional embed.[/]")
-
-    # ── 6. Embed + store ─────────────────────────────────────────────────────
-    _step("Embed & store")
-    if show_cost:
         embed_item = estimate_embedding_cost(graph)
         cost.items.append(embed_item)
         console.print(f"  [yellow]Estimating only — {embed_item.detail}, no Bedrock calls made.[/]")
@@ -1578,74 +1641,66 @@ def _ingest_one(
         _print_cost_table(cost)
         return cost
 
-    if settings.embedding_backend == "local":
-        console.print(
-            f"  Embedding with local {settings.local_embedding_runtime} model "
-            f"{settings.local_embedding_model!r}…"
-        )
-    else:
-        console.print("  Embedding with Bedrock Titan v2…")
-    embedder = get_embedder(verbose=True)
-    vectors = embed_chunk_graph(graph, embedder=embedder)
-    es = embedder.stats()
-    console.print(
-        f"  [green]Embedded[/] {len(vectors)} chunks · "
-        f"{es['total_tokens_in']} input tokens · "
-        f"{es['total_errors']} errors"
-    )
-
     if dry_run:
         console.print("[yellow]Dry run — not writing to the store.[/]")
+        elapsed = time.monotonic() - t0
+        console.rule(f"[bold green]Done (dry run)[/] — {elapsed:.0f}s")
+        console.print(f"  doc_id = [cyan]{did}[/]")
+        return None
+
+    _step("Embed & store")
+    from aws_rag.backend import MetadataPatch, backend_mode, get_backend
+
+    # `rag ingest --db` targets a specific local file; honor it by building a
+    # LocalBackend on that path rather than the configured backend.
+    if db_path is not None:
+        from aws_rag.backend import LocalBackend
+
+        backend_obj = LocalBackend(db_path)
     else:
-        target = db_path or settings.sqlite_db_path
-        conn = connect(target)
-        inserted = insert_chunk_graph(
-            conn, graph, vectors=vectors,
-            project_id=project_id, group_name=group_name,
-        )
-        conn.commit()
-        console.print(f"  [green]Upserted[/] {inserted} chunks → [cyan]{target}[/]")
+        backend_obj = get_backend()
 
-        # Metadata sidecar
-        any_meta = any([project_id, group_name, mpn, manufacturer, subsystem, doc_type, tags])
-        if any_meta:
-            set_metadata(
-                conn, did,
-                project_id=project_id, group_name=group_name,
-                mpn=mpn, manufacturer=manufacturer,
-                subsystem=subsystem, doc_type=doc_type,
-                tags=list(tags) if tags else None,
-            )
-            apply_metadata_to_chunks(conn, did)
-            conn.commit()
-            console.print("  Metadata sidecar saved.")
+    # In remote mode the cropped figure images live only on this client —
+    # ship their bytes so the server stores them and rewrites the host-local
+    # figure_image_path before inserting.
+    figures_upload: dict[str, tuple[bytes, str]] | None = None
+    if not skip_figures and backend_mode() == "remote" and db_path is None:
+        figures_upload = {}
+        for c in graph.chunks.values():
+            if c.figure_image_path:
+                p = Path(c.figure_image_path)
+                if p.is_file():
+                    figures_upload[c.id] = (p.read_bytes(), p.suffix.lstrip(".") or "png")
 
-        title_hints = {}
-        if running_header:
-            title_hints["running_header"] = running_header
-        if pdf_meta_title:
-            title_hints["pdf_meta_title"] = pdf_meta_title
-        if title_hints:
-            set_metadata(conn, did, attributes=title_hints)
-            conn.commit()
-            for key, value in title_hints.items():
-                console.print(f"  {key} captured: [dim]{value!r}[/]")
+    meta_patch = MetadataPatch(
+        mpn=mpn or None,
+        manufacturer=manufacturer or None,
+        subsystem=subsystem or None,
+        doc_type=doc_type or None,
+        tags=list(tags) if tags else None,
+    )
+    title_hints: dict[str, str] = {}
+    if running_header:
+        title_hints["running_header"] = running_header
+    if pdf_meta_title:
+        title_hints["pdf_meta_title"] = pdf_meta_title
 
-        if infer_title:
-            current_title = get_doc_titles(conn).get(did)
-            if current_title in (None, "", "—"):
-                from aws_rag.titling import infer_and_backfill_title
-
-                console.print("  Inferring document title from page 1…")
-                inferred = infer_and_backfill_title(conn, did)
-                if inferred:
-                    console.print(f"  [green]Inferred title:[/] {inferred}")
-                else:
-                    console.print("  [yellow]Could not infer a title from the first page.[/]")
-            else:
-                console.print(f"  Title already set ({current_title!r}) — skipping inference.")
-
-        conn.close()
+    result = backend_obj.ingest_chunk_graph(
+        graph,
+        figures=figures_upload,
+        project_id=project_id,
+        group_name=group_name,
+        metadata=meta_patch,
+        embed=True,
+        describe_figures=do_describe,
+        infer_title=infer_title,
+        title_hints=title_hints or None,
+    )
+    console.print(f"  [green]Upserted[/] {result.inserted} chunks")
+    if result.described:
+        console.print(f"  [green]{result.described}[/] figure descriptions generated")
+    if result.title:
+        console.print(f"  [green]Inferred title:[/] {result.title}")
 
     elapsed = time.monotonic() - t0
     console.rule(f"[bold green]Done[/] — {elapsed:.0f}s")
@@ -2265,8 +2320,8 @@ def metadata_set(
     apply_to_chunks: bool,
 ) -> None:
     """Upsert document metadata. Only fields you pass are updated."""
+    from aws_rag.backend import MetadataPatch
     from aws_rag.project_config import get_project_config
-    from aws_rag.store import apply_metadata_to_chunks, connect, set_doc_title, set_metadata
 
     proj_cfg = get_project_config()
     if proj_cfg is not None:
@@ -2278,33 +2333,28 @@ def metadata_set(
         if not tags and proj_cfg.tags:
             tags = tuple(proj_cfg.tags)
 
-    settings = get_settings()
-    target = db_path or settings.sqlite_db_path
-    conn = connect(target)
-    doc_id = _resolve_doc_id(conn, doc_id)
+    be = _backend_for(db_path)
+    doc_id = be.resolve_doc_id(doc_id)
 
     if doc_title is not None:
-        updated = set_doc_title(conn, doc_id, doc_title)
-        conn.commit()
+        updated = be.set_doc_title(doc_id, doc_title)
         console.print(f"[green]Title set[/] on {updated} chunk rows: {doc_title!r}")
 
-    meta = set_metadata(
-        conn, doc_id,
-        project_id=project_id, group_name=group_name,
-        mpn=mpn, manufacturer=manufacturer, subsystem=subsystem,
-        doc_type=doc_type,
-        tags=list(tags) if tags else None,
+    meta = be.set_metadata(
+        doc_id,
+        MetadataPatch(
+            project_id=project_id, group_name=group_name,
+            mpn=mpn, manufacturer=manufacturer, subsystem=subsystem,
+            doc_type=doc_type,
+            tags=list(tags) if tags else None,
+        ),
     )
-    conn.commit()
     console.print(f"[green]Saved metadata for[/] {doc_id}")
     console.print(meta.model_dump_json(indent=2, exclude_none=True))
 
     if apply_to_chunks:
-        updated = apply_metadata_to_chunks(conn, doc_id)
-        conn.commit()
+        updated = be.apply_metadata_to_chunks(doc_id)
         console.print(f"  Propagated to {updated} chunk rows.")
-
-    conn.close()
 
 
 @metadata.command("get")
@@ -2312,18 +2362,13 @@ def metadata_set(
 @click.option("--db", "db_path", type=click.Path(path_type=Path), default=None)
 def metadata_get(doc_id: str, db_path: Path | None) -> None:
     """Show the sidecar metadata row for a document."""
-    from aws_rag.store import connect, get_metadata
-
-    settings = get_settings()
-    target = db_path or settings.sqlite_db_path
-    conn = connect(target)
-    doc_id = _resolve_doc_id(conn, doc_id)
-    meta = get_metadata(conn, doc_id)
+    be = _backend_for(db_path)
+    doc_id = be.resolve_doc_id(doc_id)
+    meta = be.get_metadata(doc_id)
     if meta is None:
         console.print(f"[yellow]No metadata recorded for[/] {doc_id}")
         return
     console.print(meta.model_dump_json(indent=2, exclude_none=True))
-    conn.close()
 
 
 @metadata.command("list")
@@ -2343,14 +2388,11 @@ def metadata_list(
 ) -> None:
     """List documents in the sidecar, optionally filtered."""
     from aws_rag.project_config import resolve_cli_project_id
-    from aws_rag.store import connect, list_docs
 
     project_id = resolve_cli_project_id(project_id, is_global=is_global)
 
-    settings = get_settings()
-    target = db_path or settings.sqlite_db_path
-    conn = connect(target)
-    docs = list_docs(conn, project_id=project_id, group_name=group_name, mpn=mpn)
+    be = _backend_for(db_path)
+    docs = be.list_docs(project_id=project_id, group_name=group_name, mpn=mpn)
 
     if not docs:
         console.print("[yellow]No documents match.[/]")
@@ -2371,7 +2413,6 @@ def metadata_list(
             d.manufacturer or "—", d.subsystem or "—",
         )
     console.print(table)
-    conn.close()
 
 
 # ---------------------------------------------------------------------------

@@ -37,6 +37,21 @@ docling = [
 local = [
     "httpx>=0.27",
 ]
+# Remote-client support: the CLI/MCP talking to a RAG server over HTTP only
+# needs httpx (already pulled by `local`); listed explicitly so a thin client
+# can `pip install 'aws-rag[client]'` without the AWS/local-model extras.
+client = [
+    "httpx>=0.27",
+]
+# RAG HTTP server (runs in Docker, owns the sqlite db + embedder). Install
+# alongside an embedding backend, e.g. `aws-rag[server]` (Bedrock) or
+# `aws-rag[server,local,local-hf]` (fully local embeddings/vision).
+server = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "python-multipart>=0.0.9",
+    "httpx>=0.27",
+]
 # In-process HuggingFace runtimes (PyTorch/CUDA): sentence-transformers for
 # embeddings, transformers for vision/text LLMs. Needed when any *_BACKEND=local
 # uses RAG_LOCAL_*_RUNTIME=huggingface (the default for embeddings + vision).
@@ -52,6 +67,7 @@ local-hf = [
 [project.scripts]
 rag = "aws_rag.cli:cli"
 rag-mcp = "aws_rag.mcp.server:main"
+rag-server = "aws_rag.server.main:run"
 
 [build-system]
 requires = ["setuptools>=68.0.0", "wheel"]

@@ -1,0 +1,47 @@
+# Shared RAG server for a team of developers.
+#
+#   docker compose up --build
+#
+# The sqlite db, PDFs and figures persist in the named `rag-data` volume
+# (mapped to /data inside the container via RAG_HOME), so they survive
+# `docker compose down` and container rebuilds.
+#
+# Clients point at it with:  export RAG_SERVER_URL=http://<host>:8080
+#
+# Future web UI: it will be served by this same container on this same port
+# (mounted under /ui by the FastAPI app) — no extra service needed.
+
+services:
+  rag-server:
+    build: .
+    image: aws-rag-server
+    ports:
+      - "8080:8080"
+    environment:
+      RAG_HOME: /data
+      # --- Embedding/vision backend --------------------------------------
+      # Bedrock (default in the image): mount AWS creds below + set region.
+      RAG_EMBEDDING_BACKEND: ${RAG_EMBEDDING_BACKEND:-bedrock}
+      RAG_TEXT_BACKEND: ${RAG_TEXT_BACKEND:-bedrock}
+      RAG_VISION_BACKEND: ${RAG_VISION_BACKEND:-bedrock}
+      AWS_REGION: ${AWS_REGION:-eu-west-1}
+      # For a local Ollama on the host instead of Bedrock, set the backends
+      # to "local" and uncomment:
+      # RAG_OLLAMA_HOST: http://host.docker.internal:11434
+      #
+      # --- Auth (stage 1) -----------------------------------------------
+      # Uncomment + set on the server AND every client to require a token.
+      # TODO(auth): replace this single shared static token with real auth
+      # before exposing the server beyond a trusted LAN.
+      # RAG_SERVER_TOKEN: change-me
+    volumes:
+      - rag-data:/data
+      # Bedrock credentials (read-only). Drop if using a local Ollama backend.
+      - ${HOME}/.aws:/root/.aws:ro
+    # host.docker.internal resolution for talking to a host-side Ollama.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+volumes:
+  rag-data:

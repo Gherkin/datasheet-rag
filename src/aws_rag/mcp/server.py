@@ -33,67 +33,39 @@ from __future__ import annotations
 
 import json
 import os
-import sqlite3
 import sys
-from pathlib import Path
-from threading import Lock, Thread
+from threading import Thread
 from typing import Any, Literal
 
 from aws_rag import pdf_viewer
+from aws_rag.backend import RagBackend, backend_mode, emit_local_notice, get_backend
 from aws_rag.config import get_settings
 from aws_rag.models.chunk import ChunkLevel, LayoutType
-from aws_rag.store import (
-    SearchFilters,
-    SearchResult,
-    apply_metadata_to_chunks,  # noqa: F401  (re-exported convenience)
-    connect,
-    count_chunks,
-    get_chunk as store_get_chunk,
-    get_metadata,
-    hybrid_search,
-    keyword_search,
-    list_docs,
-    vector_search,
-)
+from aws_rag.store import SearchFilters, SearchResult
 
 # ---------------------------------------------------------------------------
-# Lazy singletons
+# Backend access — local sqlite or remote HTTP, chosen from config.
 # ---------------------------------------------------------------------------
 
-_conn_lock = Lock()
-_conn: sqlite3.Connection | None = None
-_conn_path: str | None = None
 
-_embedder_lock = Lock()
-_embedder: Any | None = None  # BedrockEmbedder, imported lazily to keep import cost low
+def _backend(
+    backend: RagBackend | None,
+    conn: Any | None = None,
+    embedder: Any | None = None,
+) -> RagBackend:
+    """Resolve the backend for an impl call.
 
-def _get_conn(db_path: str | Path | None = None) -> sqlite3.Connection:
-    """Return a process-wide cached SQLite connection.
-
-    Re-opens if the requested path differs from the cached one (rare —
-    practically every call uses the default).
+    Prefers an explicit ``backend``; otherwise, if a legacy ``conn`` (and/or
+    ``embedder``) is supplied — as the test-suite does — wrap it in a
+    ``LocalBackend``; otherwise fall back to the configured backend.
     """
-    global _conn, _conn_path
-    settings = get_settings()
-    target = str(db_path or settings.sqlite_db_path)
-    with _conn_lock:
-        if _conn is None or _conn_path != target:
-            if _conn is not None:
-                _conn.close()
-            _conn = connect(target)
-            _conn_path = target
-        return _conn
+    if backend is not None:
+        return backend
+    if conn is not None or embedder is not None:
+        from aws_rag.backend import LocalBackend
 
-
-def _get_embedder() -> Any:
-    """Return a process-wide cached embedder (Bedrock or local). Imported lazily."""
-    global _embedder
-    with _embedder_lock:
-        if _embedder is None:
-            from aws_rag.embedding import get_embedder
-
-            _embedder = get_embedder()
-        return _embedder
+        return LocalBackend(conn=conn, embedder=embedder)
+    return get_backend()
 
 
 def _resolve_project(project_id: str | None) -> str | None:
@@ -220,14 +192,15 @@ def _search_impl(
     doc_id: str | None = None,
     level: str | None = None,
     layout_types: list[str] | None = None,
-    conn: sqlite3.Connection | None = None,
+    backend: RagBackend | None = None,
+    conn: Any | None = None,
     embedder: Any | None = None,
 ) -> list[dict[str, Any]]:
     """Run a search and return a list of result dicts."""
     if not query or not query.strip():
         raise ValueError("query must not be empty")
 
-    conn = conn or _get_conn()
+    be = _backend(backend, conn, embedder)
 
     filters = SearchFilters(
         doc_ids=[doc_id] if doc_id else None,
@@ -236,19 +209,7 @@ def _search_impl(
         layout_types=_resolve_layout_types(layout_types),
     )
 
-    if mode in ("vector", "hybrid"):
-        emb = embedder or _get_embedder()
-        query_vec = emb.embed_one(query)
-    else:
-        query_vec = None
-
-    if mode == "vector":
-        results = vector_search(conn, query_vec, k=k, filters=filters)  # type: ignore[arg-type]
-    elif mode == "keyword":
-        results = keyword_search(conn, query, k=k, filters=filters)
-    else:
-        results = hybrid_search(conn, query_vec, query, k=k, filters=filters)  # type: ignore[arg-type]
-
+    results = be.search(query, mode=mode, k=k, filters=filters)
     return [_shape_chunk(r) for r in results]
 
 
@@ -256,11 +217,12 @@ def _get_chunk_impl(
     chunk_id: str,
     *,
     include_neighbors: bool = False,
-    conn: sqlite3.Connection | None = None,
+    backend: RagBackend | None = None,
+    conn: Any | None = None,
 ) -> dict[str, Any] | None:
     """Fetch a chunk by ID. If include_neighbors, also embed prev/next/parent text."""
-    conn = conn or _get_conn()
-    chunk = store_get_chunk(conn, chunk_id)
+    be = _backend(backend, conn)
+    chunk = be.get_chunk(chunk_id)
     if chunk is None:
         return None
     out = _shape_chunk(chunk)
@@ -272,7 +234,7 @@ def _get_chunk_impl(
             ("next", chunk.next_id),
         ]:
             if nid:
-                nchunk = store_get_chunk(conn, nid)
+                nchunk = be.get_chunk(nid)
                 neighbors[key] = _shape_chunk(nchunk) if nchunk else None
             else:
                 neighbors[key] = None
@@ -287,30 +249,21 @@ def _navigate_impl(
     chunk_id: str,
     direction: Direction,
     *,
-    conn: sqlite3.Connection | None = None,
+    backend: RagBackend | None = None,
+    conn: Any | None = None,
 ) -> list[dict[str, Any]]:
     """Step through the chunk graph.
 
     Returns a list because ``children`` is one-to-many; the other directions
     return at most one element.
     """
-    conn = conn or _get_conn()
-    chunk = store_get_chunk(conn, chunk_id)
+    be = _backend(backend, conn)
+    chunk = be.get_chunk(chunk_id)
     if chunk is None:
         return []
 
     if direction == "children":
-        # Children aren't denormalised onto the chunk row — query by parent_id.
-        rows = conn.execute(
-            "SELECT id FROM chunks WHERE parent_id = ? ORDER BY rowid",
-            (chunk_id,),
-        ).fetchall()
-        out: list[dict[str, Any]] = []
-        for row in rows:
-            child = store_get_chunk(conn, row["id"])
-            if child is not None:
-                out.append(_shape_chunk(child))
-        return out
+        return [_shape_chunk(c) for c in be.get_children(chunk_id)]
 
     target_id: str | None
     if direction == "parent":
@@ -328,42 +281,8 @@ def _navigate_impl(
 
     if target_id is None:
         return []
-    target = store_get_chunk(conn, target_id)
+    target = be.get_chunk(target_id)
     return [_shape_chunk(target)] if target else []
-
-
-def _derived_doc_fields(conn: sqlite3.Connection, doc_id: str) -> dict[str, Any]:
-    """Query chunks to derive fields not stored in the metadata sidecar."""
-    row = conn.execute(
-        "SELECT doc_title FROM chunks WHERE doc_id = ? AND doc_title != '' LIMIT 1",
-        (doc_id,),
-    ).fetchone()
-    title = row["doc_title"] if row else None
-
-    page_row = conn.execute(
-        """
-        SELECT page_numbers FROM chunks
-         WHERE doc_id = ? AND page_numbers IS NOT NULL AND page_numbers != '[]'
-         ORDER BY rowid DESC
-         LIMIT 1
-        """,
-        (doc_id,),
-    ).fetchone()
-    page_count: int | None = None
-    if page_row:
-        try:
-            pages = json.loads(page_row["page_numbers"])
-            if pages:
-                page_count = max(pages)
-        except (ValueError, TypeError):
-            pass
-
-    out: dict[str, Any] = {}
-    if title:
-        out["doc_title"] = title
-    if page_count is not None:
-        out["page_count"] = page_count
-    return out
 
 
 def _list_documents_impl(
@@ -372,20 +291,17 @@ def _list_documents_impl(
     group: str | None = None,
     mpn: str | None = None,
     manufacturer: str | None = None,
-    conn: sqlite3.Connection | None = None,
+    backend: RagBackend | None = None,
+    conn: Any | None = None,
 ) -> list[dict[str, Any]]:
     """List documents in the metadata sidecar, optionally filtered."""
-    conn = conn or _get_conn()
-    docs = list_docs(
-        conn,
+    be = _backend(backend, conn)
+    docs = be.list_documents(
         project_id=_resolve_project(project_id),
         group_name=group,
         mpn=mpn,
+        manufacturer=manufacturer,
     )
-    # list_docs doesn't filter by manufacturer; do it client-side.
-    if manufacturer is not None:
-        docs = [d for d in docs if d.manufacturer == manufacturer]
-
     return [
         {
             "doc_id": d.doc_id,
@@ -396,7 +312,8 @@ def _list_documents_impl(
             "subsystem": d.subsystem,
             "doc_type": d.doc_type,
             "tags": d.tags,
-            **_derived_doc_fields(conn, d.doc_id),
+            **({"doc_title": d.doc_title} if d.doc_title else {}),
+            **({"page_count": d.page_count} if d.page_count is not None else {}),
         }
         for d in docs
     ]
@@ -405,14 +322,23 @@ def _list_documents_impl(
 def _get_document_metadata_impl(
     doc_id: str,
     *,
-    conn: sqlite3.Connection | None = None,
+    backend: RagBackend | None = None,
+    conn: Any | None = None,
 ) -> dict[str, Any] | None:
-    conn = conn or _get_conn()
-    meta = get_metadata(conn, doc_id)
+    be = _backend(backend, conn)
+    meta = be.get_metadata(doc_id)
     if meta is None:
         return None
     result = meta.model_dump(exclude_none=False)
-    result.update(_derived_doc_fields(conn, doc_id))
+    title, page_count = None, None
+    for d in be.list_documents():
+        if d.doc_id == doc_id:
+            title, page_count = d.doc_title, d.page_count
+            break
+    if title:
+        result["doc_title"] = title
+    if page_count is not None:
+        result["page_count"] = page_count
     return result
 
 
@@ -430,6 +356,7 @@ def _compress_for_mcp(image_bytes: bytes, fmt: str) -> tuple[bytes, str]:
         return image_bytes, fmt
 
     import io
+
     from PIL import Image
 
     img = Image.open(io.BytesIO(image_bytes))
@@ -445,44 +372,11 @@ def _compress_for_mcp(image_bytes: bytes, fmt: str) -> tuple[bytes, str]:
     return buf.getvalue(), "jpg"
 
 
-def _figure_image_bytes(chunk: Any) -> tuple[bytes, str, Path | None]:
-    """Read a figure chunk's image, returning ``(bytes, format, resolved_path)``.
-
-    Reads from the local cropped file (``figure_image_path``) when it's
-    actually present on disk — avoiding a network round-trip during local
-    development — and otherwise falls back to S3 (``figure_s3_key``).
-    Ingestion may run on a different machine than the MCP server, so a
-    stale or missing local path is expected, not an error: it just means
-    S3 is the source of truth. Raises only if neither yields bytes.
-    ``resolved_path`` is the absolute filesystem path when read from disk,
-    ``None`` for S3-sourced figures.
-    """
-    if chunk.figure_image_path:
-        path = Path(chunk.figure_image_path)
-        if path.is_file():
-            fmt = path.suffix.lstrip(".").lower() or "png"
-            return path.read_bytes(), fmt, path
-
-    if chunk.figure_s3_key:
-        from aws_rag.aws import s3_client
-
-        settings = get_settings()
-        client = s3_client()
-        resp = client.get_object(Bucket=settings.s3_bucket, Key=chunk.figure_s3_key)
-        data = resp["Body"].read()
-        ext = Path(chunk.figure_s3_key).suffix.lstrip(".").lower() or "png"
-        return data, ext, None
-
-    raise ValueError(
-        f"chunk {chunk.id} has no usable figure source — "
-        f"figure_image_path is missing locally and figure_s3_key is unset."
-    )
-
-
 def _get_figure_impl(
     chunk_id: str,
     *,
-    conn: sqlite3.Connection | None = None,
+    backend: RagBackend | None = None,
+    conn: Any | None = None,
 ) -> dict[str, Any]:
     """Return everything needed to render and cite a figure.
 
@@ -492,39 +386,22 @@ def _get_figure_impl(
     - ``caption``, ``description`` — text the agent can use for reasoning
     - ``citation`` — page / section / doc for showing the user where it came from
 
-    Tests exercise this directly; the MCP tool wrapper repackages the
-    bytes into an MCP ``Image`` content block.
+    The figure bytes come from the backend, which reads them from the local
+    figure store (local mode) or fetches them over HTTP from the server
+    (remote mode). Tests exercise this directly; the MCP tool wrapper
+    repackages the bytes into an MCP ``Image`` content block.
     """
-    conn = conn or _get_conn()
-    chunk = store_get_chunk(conn, chunk_id)
-    if chunk is None:
-        raise ValueError(f"unknown chunk_id: {chunk_id}")
-    if chunk.metadata.layout_type != LayoutType.FIGURE:
-        raise ValueError(
-            f"chunk {chunk_id} is not a figure "
-            f"(layout_type={chunk.metadata.layout_type.value})"
-        )
-
-    image_bytes, fmt, resolved_path = _figure_image_bytes(chunk)
-
-    pages = chunk.metadata.page_numbers
-    page = (str(pages[0]) if len(pages) == 1
-            else f"{pages[0]}-{pages[-1]}" if pages else "")
-
+    be = _backend(backend, conn)
+    fig = be.get_figure_bytes(chunk_id)
     return {
-        "chunk_id": chunk.id,
-        "doc_id": chunk.doc_id,
-        "image_bytes": image_bytes,
-        "format": fmt,
-        "local_path": str(resolved_path) if resolved_path else None,
-        "caption": chunk.figure_caption or "",
-        "description": chunk.figure_description or "",
-        "citation": {
-            "doc_id": chunk.doc_id,
-            "page": page,
-            "section": chunk.metadata.section_title or "",
-            "chapter": chunk.metadata.chapter_title or "",
-        },
+        "chunk_id": fig.chunk_id,
+        "doc_id": fig.doc_id,
+        "image_bytes": fig.image_bytes(),
+        "format": fig.format,
+        "local_path": fig.local_path,
+        "caption": fig.caption,
+        "description": fig.description,
+        "citation": fig.citation.model_dump(),
     }
 
 
@@ -532,42 +409,14 @@ def _stats_impl(
     *,
     project_id: str | None = None,
     doc_id: str | None = None,
-    conn: sqlite3.Connection | None = None,
+    backend: RagBackend | None = None,
+    conn: Any | None = None,
 ) -> dict[str, Any]:
     """Return chunk counts. Useful for the agent to sanity-check the corpus size."""
-    conn = conn or _get_conn()
+    be = _backend(backend, conn)
     pid = _resolve_project(project_id)
-
-    total = count_chunks(conn, doc_id=doc_id, project_id=pid)
-
-    by_level: dict[str, int] = {}
-    where: list[str] = []
-    params: list[Any] = []
-    if doc_id:
-        where.append("doc_id = ?")
-        params.append(doc_id)
-    if pid:
-        where.append("project_id = ?")
-        params.append(pid)
-    where_sql = (" WHERE " + " AND ".join(where)) if where else ""
-
-    rows = conn.execute(
-        f"SELECT level, COUNT(*) AS c FROM chunks{where_sql} GROUP BY level",
-        params,
-    ).fetchall()
-    for row in rows:
-        try:
-            name = ChunkLevel(int(row["level"])).name
-        except ValueError:
-            name = str(row["level"])
-        by_level[name] = int(row["c"])
-
-    return {
-        "total_chunks": total,
-        "by_level": by_level,
-        "project_id": pid,
-        "doc_id": doc_id,
-    }
+    result = be.stats(project_id=pid, doc_id=doc_id)
+    return result.model_dump()
 
 
 # ---------------------------------------------------------------------------
@@ -945,6 +794,9 @@ def build_server() -> Any:
             page:   1-based starting page number (passed as URL hash).
         """
         try:
+            # Fetch via the backend (HTTP in remote mode) and prime the
+            # viewer cache so the loopback server can serve it locally.
+            pdf_viewer.prime_pdf_cache(doc_id, get_backend().get_pdf_bytes(doc_id))
             url = pdf_viewer.viewer_url(doc_id, page=page)
         except FileNotFoundError as exc:
             return [TextContent(type="text", text=f"Error: {exc}")]
@@ -980,10 +832,11 @@ def build_server() -> Any:
         """
         import base64
         import io
+
         from pdf2image import convert_from_bytes
 
         try:
-            pdf_bytes = pdf_viewer.load_pdf_bytes(doc_id)
+            pdf_bytes = get_backend().get_pdf_bytes(doc_id)
         except FileNotFoundError as exc:
             return [TextContent(type="text", text=f"Error: {exc}")]
         except Exception as exc:
@@ -1109,15 +962,20 @@ def main() -> None:
 
     server = build_server()
     settings = get_settings()
+    mode = backend_mode()
     print(
         json.dumps({
             "event": "rag-mcp.start",
-            "db_path": str(settings.sqlite_db_path),
+            "mode": mode,
+            "server_url": settings.server_url,
+            "db_path": str(settings.sqlite_db_path) if mode == "local" else None,
             "default_project_id": settings.default_project_id,
             "embedding_model_id": settings.embedding_model_id,
         }),
         file=sys.stderr,
     )
+    # In local mode, emit the one-line notice too (consistent with the CLI).
+    emit_local_notice()
     # Pre-fetch PDF.js in the background so the first show_pdf call returns
     # instantly. Errors are silently ignored — pdf_viewer fetches lazily on
     # first /static/ request and surfaces a helpful error if that also fails.

@@ -1,0 +1,260 @@
+"""Remote backend — an HTTP client to the FastAPI RAG server.
+
+Every method maps to one request. Models round-trip as JSON via pydantic
+``model_dump(mode="json")`` / ``model_validate``; figure and PDF bytes ride
+base64 (figures) or raw streaming (PDF). The server embeds query text, so
+this client never loads an embedding model.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+from aws_rag.backend.base import FigureUploads, RagBackend, RagServerError, SearchMode
+from aws_rag.backend.models import (
+    DocSummary,
+    FigureBytes,
+    IngestedDoc,
+    IngestResult,
+    MetadataPatch,
+    StatsResult,
+)
+from aws_rag.models.chunk import Chunk, ChunkGraph
+from aws_rag.store import DocMetadata, SearchFilters, SearchResult
+
+_EXCLUDE_VECS = {"content_embedding", "context_embedding"}
+
+
+class RemoteBackend(RagBackend):
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        token: str | None = None,
+        timeout: float = 120.0,
+    ):
+        import httpx
+
+        headers = {}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        self._client = httpx.Client(
+            base_url=base_url.rstrip("/"), timeout=timeout, headers=headers
+        )
+
+    def close(self) -> None:
+        self._client.close()
+
+    # -- helpers -------------------------------------------------------
+    def _request(self, method: str, path: str, **kw: Any) -> Any:
+        import httpx
+
+        try:
+            resp = self._client.request(method, path, **kw)
+        except httpx.HTTPError as exc:  # connection refused, timeout, etc.
+            raise RagServerError(0, str(exc)) from exc
+        if resp.status_code >= 400:
+            detail = resp.text
+            try:
+                detail = resp.json().get("detail", detail)
+            except Exception:
+                pass
+            raise RagServerError(resp.status_code, detail)
+        return resp
+
+    def _json(self, method: str, path: str, **kw: Any) -> Any:
+        return self._request(method, path, **kw).json()
+
+    # -- search --------------------------------------------------------
+    def search(
+        self,
+        query: str,
+        *,
+        mode: SearchMode = "hybrid",
+        k: int = 10,
+        filters: SearchFilters | None = None,
+    ) -> list[SearchResult]:
+        body = {
+            "query": query,
+            "mode": mode,
+            "k": k,
+            "filters": filters.model_dump(mode="json") if filters else None,
+        }
+        data = self._json("POST", "/search", json=body)
+        return [SearchResult.model_validate(r) for r in data["results"]]
+
+    # -- chunk reads ---------------------------------------------------
+    def get_chunk(self, chunk_id: str) -> Chunk | None:
+        resp = self._request("GET", f"/chunks/{chunk_id}")
+        if resp.status_code == 204:
+            return None
+        return Chunk.model_validate(resp.json())
+
+    def get_children(self, chunk_id: str) -> list[Chunk]:
+        data = self._json("GET", f"/chunks/{chunk_id}/children")
+        return [Chunk.model_validate(c) for c in data["chunks"]]
+
+    def count_chunks(
+        self, *, doc_id: str | None = None, project_id: str | None = None
+    ) -> int:
+        params = _drop_none(doc_id=doc_id, project_id=project_id)
+        return int(self._json("GET", "/chunks/count", params=params)["count"])
+
+    # -- documents -----------------------------------------------------
+    def list_documents(
+        self,
+        *,
+        project_id: str | None = None,
+        group_name: str | None = None,
+        mpn: str | None = None,
+        manufacturer: str | None = None,
+    ) -> list[DocSummary]:
+        params = _drop_none(
+            project_id=project_id,
+            group_name=group_name,
+            mpn=mpn,
+            manufacturer=manufacturer,
+        )
+        data = self._json("GET", "/documents", params=params)
+        return [DocSummary.model_validate(d) for d in data["documents"]]
+
+    def get_ingested_docs(
+        self, *, project_id: str | None = None
+    ) -> list[IngestedDoc]:
+        params = _drop_none(project_id=project_id)
+        data = self._json("GET", "/documents/ingested", params=params)
+        return [IngestedDoc.model_validate(d) for d in data["documents"]]
+
+    def get_doc_titles(self) -> dict[str, str]:
+        return self._json("GET", "/documents/titles")["titles"]
+
+    def set_doc_title(self, doc_id: str, title: str) -> int:
+        data = self._json("PUT", f"/documents/{doc_id}/title", json={"title": title})
+        return int(data["updated"])
+
+    def resolve_doc_id(self, doc_id: str) -> str:
+        return self._json("GET", f"/documents/resolve/{doc_id}")["doc_id"]
+
+    # -- metadata ------------------------------------------------------
+    def get_metadata(self, doc_id: str) -> DocMetadata | None:
+        resp = self._request("GET", f"/documents/{doc_id}/metadata")
+        if resp.status_code == 204:
+            return None
+        return DocMetadata.model_validate(resp.json())
+
+    def set_metadata(self, doc_id: str, patch: MetadataPatch) -> DocMetadata:
+        data = self._json(
+            "PATCH",
+            f"/documents/{doc_id}/metadata",
+            json=patch.model_dump(mode="json"),
+        )
+        return DocMetadata.model_validate(data)
+
+    def list_docs(
+        self,
+        *,
+        project_id: str | None = None,
+        group_name: str | None = None,
+        mpn: str | None = None,
+    ) -> list[DocMetadata]:
+        params = _drop_none(project_id=project_id, group_name=group_name, mpn=mpn)
+        data = self._json("GET", "/metadata", params=params)
+        return [DocMetadata.model_validate(d) for d in data["documents"]]
+
+    def apply_metadata_to_chunks(self, doc_id: str) -> int:
+        return int(
+            self._json("POST", f"/documents/{doc_id}/apply-metadata")["updated"]
+        )
+
+    # -- stats ---------------------------------------------------------
+    def stats(
+        self, *, project_id: str | None = None, doc_id: str | None = None
+    ) -> StatsResult:
+        params = _drop_none(project_id=project_id, doc_id=doc_id)
+        return StatsResult.model_validate(self._json("GET", "/stats", params=params))
+
+    # -- figures -------------------------------------------------------
+    def list_figure_chunks(
+        self,
+        *,
+        doc_id: str | None = None,
+        project_id: str | None = None,
+        only_with_image: bool = True,
+    ) -> list[Chunk]:
+        params = _drop_none(
+            doc_id=doc_id,
+            project_id=project_id,
+            only_with_image=only_with_image,
+        )
+        data = self._json("GET", "/figures", params=params)
+        return [Chunk.model_validate(c) for c in data["chunks"]]
+
+    def get_figure_bytes(self, chunk_id: str) -> FigureBytes:
+        return FigureBytes.model_validate(
+            self._json("GET", f"/figures/{chunk_id}/bytes")
+        )
+
+    def update_figure_description(
+        self, chunk_id: str, description: str, *, update_context_text: bool = True
+    ) -> bool:
+        data = self._json(
+            "PUT",
+            f"/figures/{chunk_id}/description",
+            json={
+                "description": description,
+                "update_context_text": update_context_text,
+            },
+        )
+        return bool(data["updated"])
+
+    # -- source PDF ----------------------------------------------------
+    def get_pdf_bytes(self, doc_id: str) -> bytes:
+        return self._request("GET", f"/documents/{doc_id}/pdf").content
+
+    # -- ingestion -----------------------------------------------------
+    def ingest_chunk_graph(
+        self,
+        graph: ChunkGraph,
+        *,
+        figures: FigureUploads | None = None,
+        project_id: str | None = None,
+        group_name: str | None = None,
+        metadata: MetadataPatch | None = None,
+        embed: bool = True,
+        describe_figures: bool = False,
+        infer_title: bool = False,
+        title_hints: dict[str, str] | None = None,
+    ) -> IngestResult:
+        payload = {
+            "graph": graph.model_dump(mode="json", exclude=_chunk_excludes(graph)),
+            "project_id": project_id,
+            "group_name": group_name,
+            "metadata": metadata.model_dump(mode="json") if metadata else None,
+            "embed": embed,
+            "describe_figures": describe_figures,
+            "infer_title": infer_title,
+            "title_hints": title_hints,
+        }
+        files: list[tuple[str, tuple[str, bytes, str]]] = [
+            ("payload", ("payload.json", json.dumps(payload).encode(), "application/json"))
+        ]
+        for chunk_id, (img_bytes, ext) in (figures or {}).items():
+            ext = (ext or "png").lstrip(".")
+            files.append(
+                ("figures", (f"{chunk_id}.{ext}", img_bytes, f"image/{ext}"))
+            )
+        data = self._json("POST", "/ingest", files=files)
+        return IngestResult.model_validate(data)
+
+    def delete_doc(self, doc_id: str) -> int:
+        return int(self._json("DELETE", f"/documents/{doc_id}")["deleted"])
+
+
+def _drop_none(**kw: Any) -> dict[str, Any]:
+    return {k: v for k, v in kw.items() if v is not None}
+
+
+def _chunk_excludes(graph: ChunkGraph) -> dict[str, Any]:
+    """Exclude embedding vectors from each chunk in the serialized graph."""
+    return {"chunks": {cid: _EXCLUDE_VECS for cid in graph.chunks}}
