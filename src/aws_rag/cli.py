@@ -685,7 +685,10 @@ def embed(
 
     _s = get_settings()
     if _s.embedding_backend == "local":
-        console.print(f"Embedding with local Ollama model {_s.local_embedding_model!r}…")
+        console.print(
+            f"Embedding with local {_s.local_embedding_runtime} model "
+            f"{_s.local_embedding_model!r}…"
+        )
     else:
         console.print("Embedding with Bedrock Titan v2…")
     embedder = get_embedder(verbose=verbose)
@@ -1576,7 +1579,10 @@ def _ingest_one(
         return cost
 
     if settings.embedding_backend == "local":
-        console.print(f"  Embedding with local Ollama model {settings.local_embedding_model!r}…")
+        console.print(
+            f"  Embedding with local {settings.local_embedding_runtime} model "
+            f"{settings.local_embedding_model!r}…"
+        )
     else:
         console.print("  Embedding with Bedrock Titan v2…")
     embedder = get_embedder(verbose=True)
