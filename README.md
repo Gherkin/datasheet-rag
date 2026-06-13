@@ -90,35 +90,43 @@ Each local runtime knob is **`huggingface`** (in-process via PyTorch/CUDA — fu
 precision, robust, precise VRAM control, any HF model id) or **`ollama`** (the
 [Ollama](https://ollama.com) server — lighter deps, GGUF/quantized).
 
-**Recommended on a consumer GPU: the hybrid** — local embeddings + text, but
-**Bedrock for vision**. A 7-8B VLM is the largest that fits ~12 GB and it trails
-Claude on complex diagrams (Haiku-parity needs a ~32B VLM / ~24 GB VRAM); and
-Bedrock figure descriptions cost only ~$1-2 one-time for a whole corpus.
+**Recommended on a consumer GPU: embeddings-only-local.** Embeddings are the
+search hot path (query embedding is ~71 ms locally vs ~325 ms Bedrock RTT),
+run offline with no credentials, are at quality parity, and cost ~nothing
+either way — so local is a pure win there. Text and vision stay on Bedrock:
+text (titles/summaries) is *slightly* better on Haiku at negligible cost, and
+vision is well above any 12 GB-local VLM. Total Bedrock spend for a whole
+corpus is ~$1-2 one-time (mostly figure descriptions).
 
 ```bash
-pip install 'aws-rag[local,local-hf]'   # httpx (Ollama) + transformers/sentence-transformers
-ollama serve                            # for the ollama text runtime
-ollama pull qwen2.5:7b                   # local text model
-# embeddings + (optional) local vision download from the HF Hub on first use
+pip install 'aws-rag[local-hf]'   # sentence-transformers (embeddings); torch/CUDA
+# embeddings download from the HF Hub on first use
 ```
 
 ```env
-# Hybrid (recommended on 12 GB):
+# Recommended hybrid (embeddings local, the rest on Bedrock):
 RAG_EMBEDDING_BACKEND=local
-RAG_TEXT_BACKEND=local
+RAG_TEXT_BACKEND=bedrock
 RAG_VISION_BACKEND=bedrock
 
 RAG_LOCAL_EMBEDDING_RUNTIME=huggingface
 RAG_LOCAL_EMBEDDING_MODEL=BAAI/bge-m3      # HF repo id; output dim must match ↓
 RAG_EMBEDDING_DIMENSIONS=1024
+```
 
-RAG_LOCAL_TEXT_RUNTIME=ollama
-RAG_LOCAL_TEXT_MODEL=qwen2.5:7b
+For more-local setups, flip `RAG_TEXT_BACKEND` / `RAG_VISION_BACKEND` to `local`
+and set the runtime/model (needs `aws-rag[local]` for Ollama and `ollama serve`,
+or `aws-rag[local-hf]` for in-process). Vision example:
 
-# For fully-local vision (bigger GPU): RAG_VISION_BACKEND=local
+```env
+RAG_VISION_BACKEND=local
 RAG_LOCAL_VISION_RUNTIME=huggingface
 RAG_LOCAL_VISION_MODEL=Qwen/Qwen2.5-VL-3B-Instruct  # 3B fits 12GB; 7B/32B/72B need more
-# RAG_LOCAL_HF_LOAD_4BIT=true              # 4-bit (bitsandbytes) to fit 7B+ on a 12-24GB GPU
+# RAG_LOCAL_HF_LOAD_4BIT=true              # 4-bit (bitsandbytes) to fit 7B+ on 12-24GB
+RAG_TEXT_BACKEND=local
+RAG_LOCAL_TEXT_RUNTIME=ollama              # ollama pull qwen2.5:7b
+RAG_LOCAL_TEXT_MODEL=qwen2.5:7b
+```
 ```
 
 Vision model vs VRAM (4-bit): ~8B → ~6-8 GB (12 GB GPU, *below* Haiku on diagrams);
