@@ -1,5 +1,7 @@
 {
-  "//": "Copy this to your electronics project's repo as `.mcp.json` so Claude Code launches an aws-rag MCP server scoped to that project. Adjust RAG_DEFAULT_PROJECT_ID and RAG_SQLITE_DB_PATH per project.",
+  "//": "Copy this to your electronics project's repo as `.mcp.json` so Claude Code launches an aws-rag MCP server scoped to that project. Pick ONE of the two server blocks below (local or remote) and delete the other.",
+
+  "//local": "LOCAL mode — opens the SQLite db on this machine directly. Adjust RAG_DEFAULT_PROJECT_ID and RAG_SQLITE_DB_PATH per project.",
   "mcpServers": {
     "aws-rag": {
       "command": "rag-mcp",
@@ -10,6 +12,19 @@
         "RAG_DEFAULT_PROJECT_ID": "pcb-rev-a",
         "AWS_REGION": "eu-west-1",
         "AWS_PROFILE": "default"
+      }
+    }
+  },
+
+  "//remote": "REMOTE mode — talk to a shared aws-rag server over HTTP. The server owns the db, embedder, figures, and PDFs, so no local SQLite/S3/AWS config is needed. Set RAG_SERVER_TOKEN only if the server requires auth. To use this, rename this block to `mcpServers` and remove the local one above.",
+  "mcpServers_remote_example": {
+    "aws-rag": {
+      "command": "rag-mcp",
+      "args": [],
+      "env": {
+        "RAG_SERVER_URL": "https://rag.internal:8080",
+        "RAG_SERVER_TOKEN": "your-read-or-ingest-token",
+        "RAG_DEFAULT_PROJECT_ID": "pcb-rev-a"
       }
     }
   }

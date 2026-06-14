@@ -968,6 +968,7 @@ def main() -> None:
             "event": "rag-mcp.start",
             "mode": mode,
             "server_url": settings.server_url,
+            "server_token_set": bool(settings.server_token) if mode == "remote" else None,
             "db_path": str(settings.sqlite_db_path) if mode == "local" else None,
             "default_project_id": settings.default_project_id,
             "embedding_model_id": settings.embedding_model_id,

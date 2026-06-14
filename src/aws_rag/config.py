@@ -398,6 +398,7 @@ class Settings(BaseSettings):
 
     @field_validator(
         "figures_dir", "pdf_dir", "output_dir", "sqlite_db_path", "default_project_id",
+        "server_url", "server_token", "s3_bucket",
         mode="before",
     )
     @classmethod

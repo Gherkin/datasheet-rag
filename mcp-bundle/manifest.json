@@ -2,9 +2,9 @@
   "manifest_version": "0.3",
   "name": "aws-rag-mcp",
   "display_name": "AWS RAG – Electronics Datasheet Search",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Search and navigate a multi-scale RAG database of electronics datasheets and reference manuals.",
-  "long_description": "Exposes a local SQLite-backed RAG store as MCP tools. Supports hybrid (BM25 + dense vector) search, hierarchical chunk navigation, figure retrieval, and document metadata lookup. Embeddings are computed via AWS Bedrock (Titan v2). Designed for scoped, per-project usage from Claude Code.",
+  "long_description": "Exposes a multi-scale RAG store of electronics datasheets as MCP tools: hybrid (BM25 + dense vector) search, hierarchical chunk navigation, figure retrieval, inline PDF page rendering, and document metadata lookup.\n\nTwo modes, chosen by configuration:\n• Local — opens a SQLite database on this machine directly (set the SQLite Database Path). Embeddings/figures are read from the local store.\n• Remote — talks to a shared aws-rag server over HTTP (set the Server URL and, if the server requires it, an Access Token). The server owns the database, embedder, figures, and PDFs; nothing local is needed. This mirrors how the CLI selects its backend.\n\nIf a Server URL is set it takes precedence (remote mode); otherwise the extension runs in local mode against the SQLite path.",
   "author": {
     "name": "niyohn",
     "email": "hector@stekligan.se"
@@ -28,6 +28,8 @@
         "${__dirname}/server/main.py"
       ],
       "env": {
+        "RAG_SERVER_URL": "${user_config.server_url}",
+        "RAG_SERVER_TOKEN": "${user_config.server_token}",
         "RAG_SQLITE_DB_PATH": "${user_config.db_path}",
         "RAG_S3_BUCKET": "${user_config.s3_bucket}",
         "AWS_REGION": "${user_config.aws_region}",
@@ -96,22 +98,37 @@
     }
   },
   "user_config": {
+    "server_url": {
+      "type": "string",
+      "title": "Server URL (remote mode)",
+      "description": "Base URL of a shared aws-rag server, e.g. https://rag.internal:8080. Set this to use REMOTE mode — the server owns the database, embedder, figures, and PDFs, and the fields below (SQLite path, S3 bucket, AWS region) are not needed. Leave blank to use LOCAL mode.",
+      "required": false,
+      "default": ""
+    },
+    "server_token": {
+      "type": "string",
+      "title": "Access Token (remote mode)",
+      "description": "Bearer token sent to the remote server, if it requires authentication (RAG_SERVER_TOKEN — a read or ingest key). Leave blank for an open/trusted-LAN server or for local mode.",
+      "required": false,
+      "sensitive": true,
+      "default": ""
+    },
     "db_path": {
       "type": "file",
-      "title": "SQLite Database Path",
-      "description": "Path to the RAG SQLite database file (output/rag.sqlite in your project directory).",
-      "required": true
+      "title": "SQLite Database Path (local mode)",
+      "description": "Path to the RAG SQLite database file (e.g. output/rag.sqlite in your project directory). Required for LOCAL mode; ignored when a Server URL is set.",
+      "required": false
     },
     "s3_bucket": {
       "type": "string",
-      "title": "S3 Bucket",
-      "description": "S3 bucket name used for PDF storage and Textract output (RAG_S3_BUCKET).",
-      "required": true
+      "title": "S3 Bucket (local mode)",
+      "description": "S3 bucket name used for PDF storage and Textract output (RAG_S3_BUCKET). Only used in local mode; ignored when a Server URL is set.",
+      "required": false
     },
     "aws_region": {
       "type": "string",
-      "title": "AWS Region",
-      "description": "AWS region for Bedrock and S3 (e.g. eu-west-1).",
+      "title": "AWS Region (local mode)",
+      "description": "AWS region for Bedrock and S3 (e.g. eu-west-1). Only used in local mode.",
       "default": "eu-west-1",
       "required": false
     },
@@ -124,8 +141,8 @@
     },
     "figures_dir": {
       "type": "directory",
-      "title": "Figures Directory",
-      "description": "Directory holding cropped figure PNGs. Used to serve images over a loopback HTTP server so Claude Desktop can render them inline (file:// is blocked by the renderer). Leave blank to use <db_path parent>/figures.",
+      "title": "Figures Directory (local mode)",
+      "description": "Directory holding cropped figure PNGs. Used in local mode to serve images over a loopback HTTP server so Claude Desktop can render them inline (file:// is blocked by the renderer). Leave blank to use <db_path parent>/figures. Ignored in remote mode — figures are fetched from the server.",
       "required": false
     }
   }

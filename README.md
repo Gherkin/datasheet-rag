@@ -242,6 +242,31 @@ Claude Code will launch one `rag-mcp` process per project; tools come
 back scoped to that project unless the agent explicitly overrides
 `project_id` in a tool call.
 
+To point the same MCP server at a **shared remote server** instead of a
+local SQLite file, drop the local-store env vars and set `RAG_SERVER_URL`
+(plus `RAG_SERVER_TOKEN` if the server requires auth) — exactly like the
+CLI. The server then owns the database, embedder, figures, and PDFs:
+
+```json
+{
+  "mcpServers": {
+    "aws-rag": {
+      "command": "rag-mcp",
+      "env": {
+        "RAG_SERVER_URL": "https://rag.internal:8080",
+        "RAG_SERVER_TOKEN": "your-read-or-ingest-token",
+        "RAG_DEFAULT_PROJECT_ID": "pcb-rev-a"
+      }
+    }
+  }
+}
+```
+
+Whenever `RAG_SERVER_URL` is set it takes precedence (remote mode);
+otherwise the server runs locally against `RAG_SQLITE_DB_PATH`. The
+Claude Desktop `.mcpb` bundle exposes the same choice as **Server URL** /
+**Access Token** vs **SQLite Database Path** fields in its config UI.
+
 ## Shell completion
 
 `rag` is a Click CLI, which ships built-in tab completion for bash, zsh,
