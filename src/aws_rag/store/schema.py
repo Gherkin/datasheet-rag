@@ -95,6 +95,11 @@ def connect(
         _check_embedding_dim(conn, embedding_dim)
         _migrate_if_needed(conn)
 
+    # Control-plane tables (api keys + audit log) are independent of the
+    # chunk schema version and embedding dim, so ensure them on every open
+    # — IF NOT EXISTS makes this idempotent and brings older DBs forward.
+    _ensure_control_tables(conn)
+
     return conn
 
 
@@ -152,6 +157,55 @@ def _check_embedding_dim(conn: sqlite3.Connection, embedding_dim: int) -> None:
             f"dim={stored_dim} but caller requested dim={embedding_dim}. "
             f"Re-create the DB or change settings.embedding_dimensions."
         )
+
+
+def _ensure_control_tables(conn: sqlite3.Connection) -> None:
+    """Create the auth + audit tables if absent (idempotent).
+
+    These hold the server's control plane — per-client API keys and the
+    ingest-path audit trail — and are unrelated to the chunk/vector schema,
+    so they live outside ``init_schema``/``SCHEMA_VERSION`` and are ensured
+    on every connection open.
+    """
+    cur = conn.cursor()
+    # ---- api_keys --------------------------------------------------------
+    # Only the SHA-256 hash of the token is stored; the plaintext is shown
+    # once at creation and never persisted. ``scopes`` is a JSON array.
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS api_keys (
+            id           TEXT PRIMARY KEY,
+            label        TEXT NOT NULL,
+            token_sha256 TEXT NOT NULL UNIQUE,
+            scopes       TEXT NOT NULL,
+            created_at   TEXT DEFAULT CURRENT_TIMESTAMP,
+            revoked_at   TEXT
+        )
+        """
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS ix_api_keys_sha ON api_keys(token_sha256)"
+    )
+    # ---- audit_log -------------------------------------------------------
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS audit_log (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts          TEXT NOT NULL,
+            key_label   TEXT,
+            client_ip   TEXT,
+            action      TEXT NOT NULL,
+            doc_id      TEXT,
+            project_id  TEXT,
+            detail_json TEXT,
+            status      TEXT NOT NULL,
+            error       TEXT
+        )
+        """
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS ix_audit_doc ON audit_log(doc_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS ix_audit_ts ON audit_log(ts)")
+    conn.commit()
 
 
 def init_schema(conn: sqlite3.Connection, *, embedding_dim: int) -> None:

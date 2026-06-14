@@ -1,0 +1,27 @@
+# Caddy reverse proxy for the RAG server (LAN-only, manually-issued cert).
+#
+# TLS terminates here; rag-server speaks plain HTTP on the internal docker
+# network only. Caddy sets X-Forwarded-For so the server's audit log records
+# the real client IP.
+#
+# The cert is obtained out-of-band via the manual DNS-01 flow (see
+# `deploy/get-cert.sh` — certbot prints the TXT record for you to paste into
+# your DNS zone). Caddy just serves the resulting fullchain.pem / privkey.pem,
+# so it never needs ACME access, a DNS-provider API token, or inbound :80.
+
+{
+	# We supply the cert ourselves; turn off Caddy's own ACME machinery and
+	# the HTTP->HTTPS redirect so only :443 is needed on a LAN-only box.
+	auto_https disable_redirects
+}
+
+{$RAG_DOMAIN} {
+	encode gzip
+
+	# Cert mounted from ./certs (certbot's letsencrypt layout).
+	tls /certs/live/{$RAG_DOMAIN}/fullchain.pem /certs/live/{$RAG_DOMAIN}/privkey.pem
+
+	reverse_proxy rag-server:8080 {
+		header_up X-Forwarded-For {remote_host}
+	}
+}

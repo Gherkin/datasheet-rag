@@ -1,0 +1,24 @@
+# Keep the build context small — only pyproject.toml + src/ are needed
+# (see Dockerfile). Everything below is irrelevant to the image.
+.venv
+venv
+.git
+.github
+*.egg-info
+__pycache__
+**/__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+.mypy_cache
+data
+rag-data
+certs
+*.sqlite
+*.sqlite-*
+.env
+tests
+docs
+*.md
+.vscode
+.idea

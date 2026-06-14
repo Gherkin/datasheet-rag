@@ -1,0 +1,46 @@
+# TLS reverse-proxy overlay for the RAG server (LAN-only, manual DNS-01 cert).
+#
+# Use ON TOP of docker-compose.yml:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.proxy.yml up -d
+#
+# Caddy terminates TLS and proxies plain HTTP to rag-server on the internal
+# docker network. The rag-server port is NO LONGER published to the host (the
+# `ports` mapping is overridden away below) — only Caddy's :443 is reachable.
+#
+# Prerequisites (one-time):
+#   1. ./deploy/get-cert.sh rag.example.com you@example.com
+#      → certbot prints a TXT record; paste it into your DNS zone, then continue.
+#      → cert lands in ./certs/live/rag.example.com/
+#   2. Point an A record for rag.example.com at this host's LAN IP (192.168.x.x).
+#
+# Then:  RAG_DOMAIN=rag.example.com docker compose \
+#          -f docker-compose.yml -f docker-compose.proxy.yml up -d
+#
+# Clients use:  export RAG_SERVER_URL=https://rag.example.com
+
+services:
+  rag-server:
+    # Stop publishing 8080 to the host; reachable only via Caddy internally.
+    ports: !reset []
+    expose:
+      - "8080"
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - rag-server
+    ports:
+      - "443:443"
+    environment:
+      RAG_DOMAIN: ${RAG_DOMAIN:?set RAG_DOMAIN to your hostname (e.g. rag.example.com)}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./certs:/certs:ro          # cert from deploy/get-cert.sh
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  caddy-data:
+  caddy-config:

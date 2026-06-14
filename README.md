@@ -398,6 +398,80 @@ Re-run the generation step whenever subcommands or options change.
 └─────────────────────────────────────────────────────────┘
 ```
 
+## Remote server & security
+
+A team can share one corpus by running the FastAPI server (`rag-server`, or the
+Docker image) and pointing clients at it with `RAG_SERVER_URL`. The server owns
+the sqlite DB + embedder; clients talk to it over HTTP.
+
+### Auth tiers
+
+Reads are cheap; ingest induces real cost (Bedrock/LLM embed + figure
+description). Auth is therefore tiered:
+
+- **Shared read token** — `RAG_SERVER_READ_TOKEN` (or mount a secret file via
+  `RAG_SERVER_TOKEN_FILE`). Everyone allowed to search uses it. Sent by clients
+  as `RAG_SERVER_TOKEN`. Until a read token *or* any API key exists, reads are
+  open (trusted-LAN default).
+- **Per-client ingest keys** — each ingesting client gets its own key, so
+  cost-inducing actions are individually attributable and revocable. Scopes:
+  `read` / `ingest` / `admin` (each implies the lower).
+
+Bootstrap the first admin key (writes straight to the DB), then manage keys at
+runtime via the admin API — no restart, revocation is immediate:
+
+```bash
+# one-time bootstrap (inside the container or wherever the DB lives)
+rag-server create-key --label bootstrap --scope admin
+
+# mint a per-client ingest key
+curl -H "Authorization: Bearer <admin-token>" \
+     -H 'Content-Type: application/json' \
+     -d '{"label":"alice-laptop","scopes":["ingest"]}' \
+     https://rag.example.com/admin/keys
+# → returns the plaintext token ONCE; paste it into that client's `rag init`.
+
+# revoke a client
+curl -X DELETE -H "Authorization: Bearer <admin-token>" \
+     https://rag.example.com/admin/keys/<id>
+```
+
+### Traceability
+
+Every ingest / figure-description / title-inference / delete is recorded in the
+`audit_log` table (who, what, when, outcome) and mirrored as a structured log
+line. Read it via `GET /audit` (admin scope).
+
+### TLS (LAN-only, real Let's Encrypt cert)
+
+Terminate TLS at the bundled **Caddy** reverse proxy; the app stays plain HTTP
+on the internal docker network. The server has no inbound internet, so prove
+domain ownership with the **manual DNS-01** challenge — `deploy/get-cert.sh`
+runs certbot in a container, prints a TXT record to add to your own DNS zone,
+then **polls public DNS and continues automatically once the record is live**
+(no keypress, no guessing about propagation). The cert lands in `./certs/`. No
+DNS-provider API or plugin needed; works with any public domain whose
+nameservers answer public queries.
+
+```bash
+# 1. Get a cert (prints _acme-challenge.<domain> TXT, waits until it resolves):
+./deploy/get-cert.sh rag.example.com you@example.com
+
+# 2. Point an A record for rag.example.com at this host's LAN IP (192.168.x.x).
+
+# 3. Start the server behind Caddy (only :443 is published; 8080 stays internal):
+RAG_DOMAIN=rag.example.com \
+  docker compose -f docker-compose.yml -f docker-compose.proxy.yml up -d
+```
+
+Clients then use `export RAG_SERVER_URL=https://rag.example.com`. Certs last
+~90 days; re-run `get-cert.sh` to renew (fresh TXT each time, auto-detected),
+then `docker compose ... restart caddy`. (For a non-Docker host, `rag-server
+tls-setup` does the same certbot flow locally.)
+
+Also lock CORS via `RAG_SERVER_CORS_ORIGINS` (empty = no cross-origin access;
+server-to-server CLI/MCP traffic is unaffected).
+
 ## Roadmap / Ideas
 
 ### Formula extraction / description (not implemented)

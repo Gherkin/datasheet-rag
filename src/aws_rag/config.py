@@ -73,9 +73,37 @@ class Settings(BaseSettings):
         default=None,
         alias="RAG_SERVER_TOKEN",
         description=(
-            "Optional bearer token sent to the remote server. The server "
-            "requires it only when it has RAG_SERVER_TOKEN set too. Stage-1 "
-            "auth extension point; unset = no auth."
+            "Bearer token sent by the client to the remote server (read or "
+            "ingest key). On the server side this is the legacy alias for "
+            "RAG_SERVER_READ_TOKEN (shared read token) when the latter is unset."
+        ),
+    )
+    server_read_token: str | None = Field(
+        default=None,
+        alias="RAG_SERVER_READ_TOKEN",
+        description=(
+            "Server-side shared read token. When set, read/search endpoints "
+            "require 'Authorization: Bearer <token>'. Ingest/admin always "
+            "require a per-client API key regardless. Unset (and no API keys) "
+            "= open mode (trusted-LAN dev)."
+        ),
+    )
+    server_token_file: Path | None = Field(
+        default=None,
+        alias="RAG_SERVER_TOKEN_FILE",
+        description=(
+            "Optional path to a file holding the shared read token (e.g. a "
+            "Docker/K8s secret mount). Read at startup; takes precedence over "
+            "RAG_SERVER_READ_TOKEN/RAG_SERVER_TOKEN when present."
+        ),
+    )
+    server_cors_origins: str | None = Field(
+        default=None,
+        alias="RAG_SERVER_CORS_ORIGINS",
+        description=(
+            "Comma-separated allowlist of browser origins permitted via CORS. "
+            "Empty/unset = no cross-origin access (server-to-server CLI/MCP "
+            "traffic is unaffected). Never use '*' with credentials."
         ),
     )
     server_timeout: float = Field(
@@ -384,6 +412,23 @@ class Settings(BaseSettings):
         if isinstance(v, str) and v.strip() == "":
             return None
         return v
+
+    def effective_read_token(self) -> str | None:
+        """Resolve the shared read token: file mount > read_token > legacy token."""
+        if self.server_token_file is not None:
+            try:
+                tok = Path(self.server_token_file).read_text().strip()
+            except OSError:
+                tok = ""
+            if tok:
+                return tok
+        return self.server_read_token or self.server_token
+
+    def cors_origins_list(self) -> list[str]:
+        """Parse the CORS allowlist into a list (empty when unset)."""
+        if not self.server_cors_origins:
+            return []
+        return [o.strip() for o in self.server_cors_origins.split(",") if o.strip()]
 
     # MCP server scoping
     default_project_id: str | None = Field(

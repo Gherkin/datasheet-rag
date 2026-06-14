@@ -14,6 +14,17 @@ classes, mirroring the style of `aws_rag.storage` and `aws_rag.aws`.
 
 from __future__ import annotations
 
+from aws_rag.store.control import (
+    ApiKeyRecord,
+    count_api_keys,
+    create_api_key,
+    hash_token,
+    list_api_keys,
+    list_audit,
+    lookup_api_key,
+    record_audit,
+    revoke_api_key,
+)
 from aws_rag.store.metadata import (
     DocMetadata,
     apply_metadata_to_chunks,
@@ -46,26 +57,35 @@ from aws_rag.store.sqlite import (
 )
 
 __all__ = [
+    "ApiKeyRecord",
     "DocMetadata",
     "SearchFilters",
     "SearchResult",
     "apply_metadata_to_chunks",
     "connect",
+    "count_api_keys",
     "count_chunks",
+    "create_api_key",
     "delete_doc",
     "get_chunk",
     "get_doc_titles",
     "get_ingested_docs",
     "get_metadata",
+    "hash_token",
     "hybrid_search",
     "init_schema",
     "insert_chunk_graph",
     "insert_chunks",
     "keyword_search",
+    "list_api_keys",
+    "list_audit",
     "list_docs",
     "list_figure_chunks",
+    "lookup_api_key",
+    "record_audit",
     "resolve_doc_id",
     "resolve_figure_path",
+    "revoke_api_key",
     "set_doc_title",
     "set_metadata",
     "to_relative_figure_path",

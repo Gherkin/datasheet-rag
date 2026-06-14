@@ -71,14 +71,32 @@ def _require_local_db(db_path: Path | None) -> Path:
     return get_settings().sqlite_db_path
 
 
+def _friendly_server_error(e) -> click.ClickException:
+    """Turn a RagServerError into an actionable CLI message (esp. auth)."""
+    code = getattr(e, "status_code", None)
+    if code == 401:
+        return click.ClickException(
+            "Server rejected the credentials (401). Check RAG_SERVER_TOKEN — "
+            "it may be missing, wrong, or revoked."
+        )
+    if code == 403:
+        return click.ClickException(
+            "Insufficient scope (403): this token is read-only. Ingesting and "
+            "writes need a per-client ingest key (rag-server create-key --scope ingest)."
+        )
+    return click.ClickException(str(e))
+
+
 def _backend_resolve(be, doc_id: str) -> str:
     """Resolve a doc_id prefix via the backend, turning errors into ClickException."""
     from aws_rag.backend import RagServerError
 
     try:
         return be.resolve_doc_id(doc_id)
-    except (ValueError, RagServerError) as e:
+    except ValueError as e:
         raise click.ClickException(str(e)) from e
+    except RagServerError as e:
+        raise _friendly_server_error(e) from e
 
 
 _SLUG_RE = re.compile(r"[^a-zA-Z0-9]+")
@@ -177,8 +195,13 @@ def init(force: bool) -> None:
     chosen: dict[str, str] = {}
     if server_url:
         chosen["RAG_SERVER_URL"] = server_url
+        console.print(
+            "[dim]Paste the shared read token for a read-only client, or this "
+            "machine's own ingest key (an ingest key also reads). Ask the "
+            "server admin to mint one with `rag-server create-key`.[/]"
+        )
         token = click.prompt(
-            "Server bearer token (blank = none)", default="", show_default=False
+            "Server token / API key (blank = none)", default="", show_default=False
         ).strip()
         if token:
             chosen["RAG_SERVER_TOKEN"] = token
@@ -836,15 +859,20 @@ def embed(
                     figures_upload[c.id] = (p.read_bytes(), p.suffix.lstrip(".") or "png")
 
     console.print("Embedding & writing via the backend…")
-    result = be.ingest_chunk_graph(
-        graph,
-        figures=figures_upload,
-        project_id=project_id,
-        group_name=group_name,
-        metadata=MetadataPatch(),
-        embed=True,
-        describe_figures=False,
-    )
+    from aws_rag.backend import RagServerError
+
+    try:
+        result = be.ingest_chunk_graph(
+            graph,
+            figures=figures_upload,
+            project_id=project_id,
+            group_name=group_name,
+            metadata=MetadataPatch(),
+            embed=True,
+            describe_figures=False,
+        )
+    except RagServerError as e:
+        raise _friendly_server_error(e) from e
     console.print(f"[green]Inserted[/] {result.inserted} chunks.")
 
 
@@ -909,7 +937,7 @@ def search(
     try:
         results = be.search(query, mode=mode, k=top_k, filters=filters)
     except RagServerError as e:
-        raise click.ClickException(str(e)) from e
+        raise _friendly_server_error(e) from e
 
     if not results:
         console.print("[yellow]No results.[/]")
@@ -1665,17 +1693,22 @@ def _ingest_one(
     if pdf_meta_title:
         title_hints["pdf_meta_title"] = pdf_meta_title
 
-    result = backend_obj.ingest_chunk_graph(
-        graph,
-        figures=figures_upload,
-        project_id=project_id,
-        group_name=group_name,
-        metadata=meta_patch,
-        embed=True,
-        describe_figures=do_describe,
-        infer_title=infer_title,
-        title_hints=title_hints or None,
-    )
+    from aws_rag.backend import RagServerError
+
+    try:
+        result = backend_obj.ingest_chunk_graph(
+            graph,
+            figures=figures_upload,
+            project_id=project_id,
+            group_name=group_name,
+            metadata=meta_patch,
+            embed=True,
+            describe_figures=do_describe,
+            infer_title=infer_title,
+            title_hints=title_hints or None,
+        )
+    except RagServerError as e:
+        raise _friendly_server_error(e) from e
     console.print(f"  [green]Upserted[/] {result.inserted} chunks")
     if result.described:
         console.print(f"  [green]{result.described}[/] figure descriptions generated")
@@ -2809,3 +2842,140 @@ def eval_review(
     from aws_rag.eval.review import serve
 
     serve(set_path, db_path=db_path, port=port, k=top_k, open_browser=open_browser)
+
+
+# ---------------------------------------------------------------------------
+# Remote admin — manage API keys + read the audit log over HTTP.
+# ---------------------------------------------------------------------------
+
+
+def _admin_request(method: str, path: str, *, token: str | None, **kwargs):
+    """Call an admin endpoint on the configured remote server.
+
+    Admin operates over HTTP against RAG_SERVER_URL (managing the *server's*
+    keys), so it requires remote mode. The bearer token must carry the
+    ``admin`` scope; default is RAG_SERVER_TOKEN, overridable with --token.
+    """
+    import httpx
+
+    settings = get_settings()
+    base = settings.server_url
+    if not base:
+        raise click.ClickException(
+            "admin commands talk to a remote server — set RAG_SERVER_URL "
+            "(and use an admin-scoped token). To manage a local DB instead, "
+            "run `rag-server create-key` on the server host."
+        )
+    bearer = token or settings.server_token
+    headers = {"Authorization": f"Bearer {bearer}"} if bearer else {}
+    try:
+        resp = httpx.request(
+            method, base.rstrip("/") + path, headers=headers,
+            timeout=settings.server_timeout, **kwargs,
+        )
+    except httpx.HTTPError as exc:
+        raise click.ClickException(f"could not reach {base}: {exc}") from exc
+    if resp.status_code == 401:
+        raise click.ClickException("401: missing/invalid token (need an admin key).")
+    if resp.status_code == 403:
+        raise click.ClickException("403: this token lacks the 'admin' scope.")
+    if resp.status_code == 404:
+        raise click.ClickException(f"404: {resp.json().get('detail', resp.text)}")
+    if resp.status_code >= 400:
+        raise click.ClickException(f"{resp.status_code}: {resp.text}")
+    return resp.json()
+
+
+@cli.group()
+def admin() -> None:
+    """Administer a remote RAG server: API keys and audit log.
+
+    Talks to RAG_SERVER_URL with an admin-scoped bearer token (RAG_SERVER_TOKEN
+    or --token). Bootstrap the very first admin key on the server host with
+    `rag-server create-key --label bootstrap --scope admin`.
+    """
+
+
+@admin.group()
+def key() -> None:
+    """Create, list and revoke per-client API keys."""
+
+
+@key.command("create")
+@click.option("--label", required=True, help="Client identity for the key (shown in audit).")
+@click.option(
+    "--scope", "scopes", multiple=True,
+    type=click.Choice(["read", "ingest", "admin"]), default=("ingest",),
+    help="Scope(s) for the key (repeatable). Default: ingest.",
+)
+@click.option("--token", default=None, help="Admin token (default: RAG_SERVER_TOKEN).")
+def key_create(label: str, scopes: tuple[str, ...], token: str | None) -> None:
+    """Mint a key. The plaintext token is shown ONCE — copy it now."""
+    data = _admin_request(
+        "POST", "/admin/keys", token=token,
+        json={"label": label, "scopes": list(scopes)},
+    )
+    console.print(f"[green]Created[/] key '{data['label']}' "
+                  f"(id={data['id']}, scopes={data['scopes']})")
+    console.print("\n[bold]Token (shown once — store it now):[/]\n")
+    console.print(f"  {data['token']}\n")
+
+
+@key.command("list")
+@click.option("--token", default=None, help="Admin token (default: RAG_SERVER_TOKEN).")
+def key_list(token: str | None) -> None:
+    """List API keys (never shows secrets)."""
+    data = _admin_request("GET", "/admin/keys", token=token)
+    keys = data.get("keys", [])
+    if not keys:
+        console.print("[yellow]No API keys.[/]")
+        return
+    table = Table(title=f"API keys · {len(keys)}")
+    for col in ("id", "label", "scopes", "created_at", "revoked_at"):
+        table.add_column(col)
+    for k in keys:
+        table.add_row(
+            k["id"], k["label"], ",".join(k["scopes"]),
+            k.get("created_at") or "—",
+            "[red]revoked[/]" if k.get("revoked_at") else "—",
+        )
+    console.print(table)
+
+
+@key.command("revoke")
+@click.argument("key_id", type=str)
+@click.option("--token", default=None, help="Admin token (default: RAG_SERVER_TOKEN).")
+def key_revoke(key_id: str, token: str | None) -> None:
+    """Revoke a key by id (takes effect immediately, no restart)."""
+    _admin_request("DELETE", f"/admin/keys/{key_id}", token=token)
+    console.print(f"[green]Revoked[/] key {key_id}")
+
+
+@admin.command("audit")
+@click.option("--doc-id", default=None, help="Filter to one document.")
+@click.option("--since", default=None, help="ISO timestamp lower bound (e.g. 2026-06-01).")
+@click.option("--limit", default=50, type=int, help="Max rows (newest first).")
+@click.option("--token", default=None, help="Admin token (default: RAG_SERVER_TOKEN).")
+def audit_cmd(doc_id: str | None, since: str | None, limit: int, token: str | None) -> None:
+    """Show the ingest-path audit trail."""
+    params = {"limit": limit}
+    if doc_id:
+        params["doc_id"] = doc_id
+    if since:
+        params["since"] = since
+    data = _admin_request("GET", "/audit", token=token, params=params)
+    entries = data.get("entries", [])
+    if not entries:
+        console.print("[yellow]No audit entries.[/]")
+        return
+    table = Table(title=f"Audit · {len(entries)} entries")
+    for col in ("ts", "action", "status", "key_label", "client_ip", "doc_id", "detail"):
+        table.add_column(col, overflow="fold")
+    for e in entries:
+        table.add_row(
+            (e.get("ts") or "")[:19], e.get("action") or "", e.get("status") or "",
+            e.get("key_label") or "—", e.get("client_ip") or "—",
+            (e.get("doc_id") or "—")[:12],
+            e.get("detail_json") or (e.get("error") or "—"),
+        )
+    console.print(table)

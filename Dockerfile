@@ -27,9 +27,13 @@ WORKDIR /app
 COPY pyproject.toml ./
 COPY src ./src
 
-# Default: server + Bedrock embeddings + docling (for any server-side parsing).
-# Swap to '.[server,local,local-hf]' (and a GPU runtime) for local embeddings.
-RUN pip install --no-cache-dir '.[server,docling]'
+# Which optional-dependency extras to install. Default keeps the image light
+# (Bedrock + docling). For in-process local embeddings (e.g. BAAI/bge-m3 via
+# sentence-transformers) build with:
+#   docker build --build-arg RAG_EXTRAS=server,local-hf -t aws-rag-server .
+# (docker-compose.yml passes this through.) local-hf pulls torch — much larger.
+ARG RAG_EXTRAS=server,docling
+RUN pip install --no-cache-dir ".[${RAG_EXTRAS}]"
 
 ENV RAG_HOME=/data \
     RAG_SERVER_HOST=0.0.0.0 \

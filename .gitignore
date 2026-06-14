@@ -26,3 +26,10 @@ eval/trace.jsonl
 # product, kept out of history because of size/churn (binary crops, a
 # growing plan that'll be superseded once the work lands)
 docs/table-structure-repair/
+
+# TLS certs/keys obtained via deploy/get-cert.sh — NEVER commit private keys.
+certs/
+
+# Bind-mounted server data dir (sqlite + figures + pdfs) when RAG_DATA_DIR
+# points inside the repo — never commit the corpus.
+rag-data/

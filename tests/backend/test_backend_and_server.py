@@ -202,3 +202,137 @@ def test_server_token_required_when_set(conn, monkeypatch) -> None:
     assert c.get("/stats", headers={"Authorization": "Bearer secret"}).status_code == 200
     # health stays open.
     assert c.get("/health").status_code == 200
+
+
+# ---- tiered auth + admin key lifecycle + audit --------------------------
+
+
+def _auth(token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _make_client(conn, monkeypatch, *, read_token: str | None = None):
+    from fastapi.testclient import TestClient
+
+    from aws_rag.config import get_settings
+    from aws_rag.server import deps
+    from aws_rag.server.app import build_app
+
+    s = get_settings()
+    monkeypatch.setattr(s, "server_token", None)
+    monkeypatch.setattr(s, "server_read_token", read_token)
+    monkeypatch.setattr(s, "server_token_file", None)
+    monkeypatch.setattr(s, "server_cors_origins", None)
+    deps.get_backend.cache_clear()
+    app = build_app()
+    app.dependency_overrides[deps.get_backend] = lambda: LocalBackend(conn=conn)
+    return TestClient(app)
+
+
+def _ingest_payload(did: str) -> list:
+    g = _graph_with_figure(did)
+    payload = {
+        "graph": g.model_dump(mode="json"),
+        "project_id": "proj",
+        "embed": False,
+        "describe_figures": False,
+    }
+    png = b"\x89PNG\r\n\x1a\nXY"
+    return [
+        ("payload", ("payload.json", json.dumps(payload).encode(), "application/json")),
+        ("figures", (f"{did}:L2:0.png", png, "image/png")),
+    ]
+
+
+def test_open_mode_allows_everything(conn, monkeypatch) -> None:
+    c = _make_client(conn, monkeypatch, read_token=None)
+    assert c.get("/stats").status_code == 200
+    r = c.post("/ingest", files=_ingest_payload("d" * 64))
+    assert r.status_code == 200, r.text
+
+
+def test_read_token_gates_read_but_not_ingest(conn, monkeypatch) -> None:
+    c = _make_client(conn, monkeypatch, read_token="readme")
+    # no creds → 401
+    assert c.get("/stats").status_code == 401
+    # read token → read OK, ingest forbidden (read scope only)
+    assert c.get("/stats", headers=_auth("readme")).status_code == 200
+    r = c.post("/ingest", files=_ingest_payload("e" * 64), headers=_auth("readme"))
+    assert r.status_code == 403, r.text
+
+
+def test_admin_key_lifecycle_and_ingest(conn, monkeypatch) -> None:
+    from aws_rag.store import create_api_key, hash_token
+
+    # Bootstrap an admin key directly in the DB (like `rag-server create-key`).
+    _, admin_token = create_api_key(conn, label="boot", scopes=["admin"])
+    c = _make_client(conn, monkeypatch, read_token="readme")
+
+    # Plaintext is not stored — only its hash.
+    rows = conn.execute("SELECT token_sha256 FROM api_keys").fetchall()
+    assert all(r["token_sha256"] != admin_token for r in rows)
+    assert any(r["token_sha256"] == hash_token(admin_token) for r in rows)
+
+    # Non-admin (read token) is forbidden from admin routes.
+    assert c.post("/admin/keys", json={"label": "x"}, headers=_auth("readme")).status_code == 403
+
+    # Mint a per-client ingest key via the admin API.
+    r = c.post(
+        "/admin/keys",
+        json={"label": "alice", "scopes": ["ingest"]},
+        headers=_auth(admin_token),
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    ingest_token, key_id = body["token"], body["id"]
+
+    # Ingest key can ingest (and read via implied scope).
+    assert c.get("/stats", headers=_auth(ingest_token)).status_code == 200
+    did = "f" * 64
+    assert c.post("/ingest", files=_ingest_payload(did), headers=_auth(ingest_token)).status_code == 200
+
+    # Audit row recorded with the key's label, never the token.
+    audit = c.get("/audit", headers=_auth(admin_token)).json()["entries"]
+    ing = [e for e in audit if e["action"] == "ingest" and e["status"] == "ok"]
+    assert ing and ing[0]["key_label"] == "alice" and ing[0]["doc_id"] == did
+    assert all(ingest_token not in json.dumps(e) for e in audit)
+
+    # Revoke → immediately locked out, no restart.
+    assert c.delete(f"/admin/keys/{key_id}", headers=_auth(admin_token)).status_code == 200
+    assert c.post("/ingest", files=_ingest_payload("0" * 64), headers=_auth(ingest_token)).status_code == 401
+
+
+def test_cors_preflight(conn, monkeypatch) -> None:
+    from fastapi.testclient import TestClient
+
+    from aws_rag.config import get_settings
+    from aws_rag.server import deps
+    from aws_rag.server.app import build_app
+
+    s = get_settings()
+    monkeypatch.setattr(s, "server_token", None)
+    monkeypatch.setattr(s, "server_read_token", None)
+    monkeypatch.setattr(s, "server_token_file", None)
+    monkeypatch.setattr(s, "server_cors_origins", "https://ok.example.com")
+    deps.get_backend.cache_clear()
+    app = build_app()
+    app.dependency_overrides[deps.get_backend] = lambda: LocalBackend(conn=conn)
+    c = TestClient(app)
+
+    allowed = c.options(
+        "/search",
+        headers={
+            "Origin": "https://ok.example.com",
+            "Access-Control-Request-Method": "POST",
+        },
+    )
+    assert allowed.headers.get("access-control-allow-origin") == "https://ok.example.com"
+
+    denied = c.options(
+        "/search",
+        headers={
+            "Origin": "https://evil.example.com",
+            "Access-Control-Request-Method": "POST",
+        },
+    )
+    assert "access-control-allow-origin" not in denied.headers

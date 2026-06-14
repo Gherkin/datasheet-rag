@@ -10,7 +10,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from fastapi import Depends, FastAPI, File, HTTPException, Response, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -21,8 +22,21 @@ from aws_rag.backend.models import (
 )
 from aws_rag.config import get_settings
 from aws_rag.models.chunk import Chunk, ChunkGraph
-from aws_rag.server.deps import get_backend, require_token
-from aws_rag.store import SearchFilters, SearchResult
+from aws_rag.server.audit import audit
+from aws_rag.server.deps import (
+    get_backend,
+    require_admin,
+    require_ingest,
+    require_read,
+)
+from aws_rag.store import (
+    SearchFilters,
+    SearchResult,
+    create_api_key,
+    list_api_keys,
+    list_audit,
+    revoke_api_key,
+)
 
 # Vectors are always None post-retrieval; never ship them.
 _CHUNK_EXCLUDE = {"content_embedding", "context_embedding"}
@@ -74,6 +88,11 @@ class InferTitleBody(BaseModel):
     dry_run: bool = False
 
 
+class CreateKeyBody(BaseModel):
+    label: str
+    scopes: list[str] = ["ingest"]
+
+
 def build_app() -> FastAPI:
     app = FastAPI(
         title="aws-rag server",
@@ -81,7 +100,22 @@ def build_app() -> FastAPI:
         version="0.1.0",
     )
 
-    dep = [Depends(require_token)]
+    origins = get_settings().cors_origins_list()
+    if origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=origins,
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+
+    # Per-route scope gates. Read endpoints take `read`; cost/write endpoints
+    # take `ingest`; key management takes `admin` (each implies the lower).
+    read_dep = [require_read]
+    ingest_dep = [require_ingest]
+    admin_dep = [require_admin]
+    dep = read_dep  # default for plain read routes
 
     @app.exception_handler(RagServerError)
     async def _rag_err(_: Any, exc: RagServerError) -> JSONResponse:
@@ -96,10 +130,11 @@ def build_app() -> FastAPI:
     # -- health (unauthenticated) ----------------------------------------
     @app.get("/health")
     def health() -> dict[str, Any]:
+        # Unauthenticated — keep the body minimal (no filesystem paths or
+        # other internal detail that could aid an attacker).
         s = get_settings()
         return {
             "status": "ok",
-            "db_path": str(s.sqlite_db_path),
             "embedding_backend": s.embedding_backend,
             "embedding_dimensions": s.embedding_dimensions,
         }
@@ -163,27 +198,41 @@ def build_app() -> FastAPI:
             return Response(status_code=204)
         return JSONResponse(md.model_dump(mode="json"))
 
-    @app.patch("/documents/{doc_id}/metadata", dependencies=dep)
+    @app.patch("/documents/{doc_id}/metadata", dependencies=ingest_dep)
     def document_set_metadata(
         doc_id: str, patch: MetadataPatch, be: LocalBackend = Depends(get_backend)
     ) -> dict:
         return be.set_metadata(doc_id, patch).model_dump(mode="json")
 
-    @app.put("/documents/{doc_id}/title", dependencies=dep)
+    @app.put("/documents/{doc_id}/title", dependencies=ingest_dep)
     def document_set_title(
         doc_id: str, body: TitleBody, be: LocalBackend = Depends(get_backend)
     ) -> dict:
         return {"updated": be.set_doc_title(doc_id, body.title)}
 
-    @app.post("/documents/{doc_id}/apply-metadata", dependencies=dep)
+    @app.post("/documents/{doc_id}/apply-metadata", dependencies=ingest_dep)
     def document_apply_metadata(
         doc_id: str, be: LocalBackend = Depends(get_backend)
     ) -> dict:
         return {"updated": be.apply_metadata_to_chunks(doc_id)}
 
-    @app.delete("/documents/{doc_id}", dependencies=dep)
-    def document_delete(doc_id: str, be: LocalBackend = Depends(get_backend)) -> dict:
-        return {"deleted": be.delete_doc(doc_id)}
+    @app.delete("/documents/{doc_id}", dependencies=ingest_dep)
+    def document_delete(
+        doc_id: str, request: Request, be: LocalBackend = Depends(get_backend)
+    ) -> dict:
+        try:
+            deleted = be.delete_doc(doc_id)
+        except Exception as exc:
+            audit(
+                request, be, action="delete_doc", status="error",
+                doc_id=doc_id, error=str(exc),
+            )
+            raise
+        audit(
+            request, be, action="delete_doc", status="ok",
+            doc_id=doc_id, detail={"deleted": deleted},
+        )
+        return {"deleted": deleted}
 
     @app.get("/documents", dependencies=dep)
     def documents(
@@ -238,7 +287,7 @@ def build_app() -> FastAPI:
     def figure_bytes(chunk_id: str, be: LocalBackend = Depends(get_backend)) -> dict:
         return be.get_figure_bytes(chunk_id).model_dump(mode="json")
 
-    @app.put("/figures/{chunk_id}/description", dependencies=dep)
+    @app.put("/figures/{chunk_id}/description", dependencies=ingest_dep)
     def figure_description(
         chunk_id: str,
         body: FigureDescriptionBody,
@@ -249,33 +298,58 @@ def build_app() -> FastAPI:
         )
         return {"updated": updated}
 
-    @app.post("/figures/describe", dependencies=dep)
+    @app.post("/figures/describe", dependencies=ingest_dep)
     def figures_describe(
-        body: DescribeFiguresBody, be: LocalBackend = Depends(get_backend)
+        body: DescribeFiguresBody,
+        request: Request,
+        be: LocalBackend = Depends(get_backend),
     ) -> dict:
-        descriptions, stats = be.describe_figures(
-            doc_id=body.doc_id,
-            project_id=body.project_id,
-            missing_only=body.missing_only,
-            limit=body.limit,
-            model_id=body.model_id,
-            dry_run=body.dry_run,
+        try:
+            descriptions, stats = be.describe_figures(
+                doc_id=body.doc_id,
+                project_id=body.project_id,
+                missing_only=body.missing_only,
+                limit=body.limit,
+                model_id=body.model_id,
+                dry_run=body.dry_run,
+            )
+        except Exception as exc:
+            audit(
+                request, be, action="describe_figures", status="error",
+                doc_id=body.doc_id, project_id=body.project_id, error=str(exc),
+            )
+            raise
+        audit(
+            request, be, action="describe_figures", status="ok",
+            doc_id=body.doc_id, project_id=body.project_id, detail=stats,
         )
         return {"descriptions": descriptions, "stats": stats}
 
-    @app.post("/documents/{doc_id}/infer-title", dependencies=dep)
+    @app.post("/documents/{doc_id}/infer-title", dependencies=ingest_dep)
     def document_infer_title(
-        doc_id: str, body: InferTitleBody, be: LocalBackend = Depends(get_backend)
+        doc_id: str,
+        body: InferTitleBody,
+        request: Request,
+        be: LocalBackend = Depends(get_backend),
     ) -> dict:
-        return {
-            "title": be.infer_title(
-                doc_id, model_id=body.model_id, dry_run=body.dry_run
+        try:
+            title = be.infer_title(doc_id, model_id=body.model_id, dry_run=body.dry_run)
+        except Exception as exc:
+            audit(
+                request, be, action="infer_title", status="error",
+                doc_id=doc_id, error=str(exc),
             )
-        }
+            raise
+        audit(
+            request, be, action="infer_title", status="ok",
+            doc_id=doc_id, detail={"title": title, "dry_run": body.dry_run},
+        )
+        return {"title": title}
 
     # -- ingestion -------------------------------------------------------
-    @app.post("/ingest", dependencies=dep)
+    @app.post("/ingest", dependencies=ingest_dep)
     async def ingest(
+        request: Request,
         payload: UploadFile = File(...),
         figures: list[UploadFile] = File(default=[]),
         be: LocalBackend = Depends(get_backend),
@@ -292,17 +366,77 @@ def build_app() -> FastAPI:
             if data.get("metadata")
             else None
         )
-        result = be.ingest_chunk_graph(
-            graph,
-            figures=fig_uploads or None,
-            project_id=data.get("project_id"),
-            group_name=data.get("group_name"),
-            metadata=metadata,
-            embed=data.get("embed", True),
-            describe_figures=data.get("describe_figures", False),
-            infer_title=data.get("infer_title", False),
-            title_hints=data.get("title_hints"),
+        try:
+            result = be.ingest_chunk_graph(
+                graph,
+                figures=fig_uploads or None,
+                project_id=data.get("project_id"),
+                group_name=data.get("group_name"),
+                metadata=metadata,
+                embed=data.get("embed", True),
+                describe_figures=data.get("describe_figures", False),
+                infer_title=data.get("infer_title", False),
+                title_hints=data.get("title_hints"),
+            )
+        except Exception as exc:
+            audit(
+                request, be, action="ingest", status="error",
+                project_id=data.get("project_id"), error=str(exc),
+            )
+            raise
+        audit(
+            request, be, action="ingest", status="ok",
+            doc_id=result.doc_id, project_id=data.get("project_id"),
+            detail={
+                "inserted": result.inserted,
+                "described": result.described,
+                "embed": data.get("embed", True),
+                "figures": len(fig_uploads),
+            },
         )
         return result.model_dump(mode="json")
+
+    # -- admin: API key management ---------------------------------------
+    @app.post("/admin/keys", dependencies=admin_dep)
+    def admin_create_key(
+        body: CreateKeyBody, be: LocalBackend = Depends(get_backend)
+    ) -> dict:
+        with be.write_lock:
+            rec, token = create_api_key(be.conn, label=body.label, scopes=body.scopes)
+        # Plaintext token returned exactly once; never stored or shown again.
+        return {"id": rec.id, "label": rec.label, "scopes": rec.scopes, "token": token}
+
+    @app.get("/admin/keys", dependencies=admin_dep)
+    def admin_list_keys(be: LocalBackend = Depends(get_backend)) -> dict:
+        keys = list_api_keys(be.conn)
+        return {
+            "keys": [
+                {
+                    "id": k.id,
+                    "label": k.label,
+                    "scopes": k.scopes,
+                    "created_at": k.created_at,
+                    "revoked_at": k.revoked_at,
+                }
+                for k in keys
+            ]
+        }
+
+    @app.delete("/admin/keys/{key_id}", dependencies=admin_dep)
+    def admin_revoke_key(key_id: str, be: LocalBackend = Depends(get_backend)) -> dict:
+        with be.write_lock:
+            revoked = revoke_api_key(be.conn, key_id)
+        if not revoked:
+            raise HTTPException(status_code=404, detail="key not found or already revoked")
+        return {"revoked": key_id}
+
+    @app.get("/audit", dependencies=admin_dep)
+    def audit_list(
+        doc_id: str | None = None,
+        since: str | None = None,
+        limit: int = 200,
+        be: LocalBackend = Depends(get_backend),
+    ) -> dict:
+        return {"entries": list_audit(be.conn, doc_id=doc_id, since=since, limit=limit)}
 
     return app
