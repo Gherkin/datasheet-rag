@@ -8,13 +8,16 @@ import random
 import re
 import socket
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import click
 from rich.console import Console
 from rich.table import Table
 
 from aws_rag.config import get_settings
+
+if TYPE_CHECKING:
+    from aws_rag.costs import CostEstimate
 
 console = Console()
 
