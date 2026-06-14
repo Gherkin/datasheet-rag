@@ -36,6 +36,7 @@ from tenacity import Retrying, retry_if_exception, stop_after_attempt, wait_expo
 from aws_rag.aws import s3_client
 from aws_rag.config import get_settings
 from aws_rag.models.chunk import Chunk, LayoutType
+from aws_rag.store import resolve_figure_path
 
 console = Console()
 
@@ -127,8 +128,8 @@ def _load_figure_bytes(chunk: Chunk) -> tuple[bytes, str]:
     Prefers ``figure_image_path`` (local file). Falls back to S3 via
     ``figure_s3_key``. Raises a clear error if neither resolves.
     """
-    if chunk.figure_image_path:
-        path = Path(chunk.figure_image_path)
+    path = resolve_figure_path(chunk.figure_image_path)
+    if path is not None:
         if not path.is_file():
             raise FileNotFoundError(
                 f"figure_image_path on chunk {chunk.id} points to a missing "

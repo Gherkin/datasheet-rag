@@ -44,8 +44,10 @@ from aws_rag.store import (
     list_docs,
     list_figure_chunks,
     resolve_doc_id,
+    resolve_figure_path,
     set_doc_title,
     set_metadata,
+    to_relative_figure_path,
     update_figure_description,
     vector_search,
 )
@@ -86,6 +88,20 @@ class LocalBackend(RagBackend):
 
                 self._embedder = get_embedder()
             return self._embedder
+
+    @property
+    def conn(self) -> sqlite3.Connection:
+        """The underlying sqlite connection (lazily opened).
+
+        Exposed so the server's control plane (API keys + audit log) can read
+        and write the auth/audit tables on the same connection.
+        """
+        return self._get_conn()
+
+    @property
+    def write_lock(self) -> Lock:
+        """The write serialisation lock, shared with control-plane writes."""
+        return self._write_lock
 
     def close(self) -> None:
         with self._conn_lock:
@@ -287,8 +303,8 @@ class LocalBackend(RagBackend):
 
     def _read_figure_image(self, chunk: Chunk) -> tuple[bytes, str, Path | None]:
         """Read a figure's bytes from disk (figure_image_path) or S3."""
-        if chunk.figure_image_path:
-            path = Path(chunk.figure_image_path)
+        path = resolve_figure_path(chunk.figure_image_path)
+        if path is not None:
             if path.is_file():
                 fmt = path.suffix.lstrip(".").lower() or "png"
                 return path.read_bytes(), fmt, path
@@ -424,7 +440,8 @@ class LocalBackend(RagBackend):
                 dest.write_bytes(img_bytes)
                 chunk = graph.chunks.get(chunk_id)
                 if chunk is not None:
-                    chunk.figure_image_path = str(dest)
+                    # Store relative to figures_dir so the DB stays portable.
+                    chunk.figure_image_path = to_relative_figure_path(dest)
 
         with self._write_lock:
             conn = self._get_conn()

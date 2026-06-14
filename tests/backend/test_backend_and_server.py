@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 
@@ -114,9 +115,12 @@ def test_local_ingest_rewrites_uploaded_figure_path(
     )
     assert res.inserted == 2
     ch = backend.get_chunk(f"{did}:L2:0")
-    # Path must be rewritten to the server-side figures_dir, not the client path.
+    # Path is stored RELATIVE to figures_dir (portable) — not the client path,
+    # and not absolute.
     assert "/client/only/path" not in (ch.figure_image_path or "")
-    assert str(tmp_path) in ch.figure_image_path
+    assert not Path(ch.figure_image_path).is_absolute()
+    assert ch.figure_image_path.startswith(did)  # <doc_id>/<chunk>.png
+    # Resolution joins figures_dir, so the bytes still come back.
     fig = backend.get_figure_bytes(f"{did}:L2:0")
     assert fig.image_bytes() == png
 

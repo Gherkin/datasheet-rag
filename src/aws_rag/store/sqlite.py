@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Iterable, Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -26,6 +27,43 @@ from aws_rag.models.chunk import (
     ChunkMetadata,
     LayoutType,
 )
+
+# ---------------------------------------------------------------------------
+# Figure path portability
+#
+# Figure image paths are stored RELATIVE to ``figures_dir`` so the database is
+# portable across machines and containers (a server's figures_dir differs from
+# the client's). Absolute paths are still honoured on read for backward
+# compatibility with stores written before this change.
+# ---------------------------------------------------------------------------
+
+
+def to_relative_figure_path(path: Path | str) -> str:
+    """Return *path* relative to ``figures_dir`` for storage (portable).
+
+    Falls back to the path as-is when it lives outside ``figures_dir`` (rare).
+    """
+    from aws_rag.config import get_settings
+
+    p = Path(path)
+    try:
+        return str(p.relative_to(get_settings().figures_dir))
+    except ValueError:
+        return str(p)
+
+
+def resolve_figure_path(stored: str | None) -> Path | None:
+    """Resolve a stored figure path to an absolute path on this machine.
+
+    Relative paths join ``figures_dir``; absolute paths (legacy) are returned
+    unchanged.
+    """
+    if not stored:
+        return None
+    from aws_rag.config import get_settings
+
+    p = Path(stored)
+    return p if p.is_absolute() else get_settings().figures_dir / p
 
 # Columns inserted in the order below — keeping the SQL and the parameter
 # tuple aligned is the single source of truth for the row shape.

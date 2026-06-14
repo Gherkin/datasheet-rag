@@ -39,7 +39,9 @@ from aws_rag.store.sqlite import (
     insert_chunks,
     list_figure_chunks,
     resolve_doc_id,
+    resolve_figure_path,
     set_doc_title,
+    to_relative_figure_path,
     update_figure_description,
 )
 
@@ -63,8 +65,10 @@ __all__ = [
     "list_docs",
     "list_figure_chunks",
     "resolve_doc_id",
+    "resolve_figure_path",
     "set_doc_title",
     "set_metadata",
+    "to_relative_figure_path",
     "update_figure_description",
     "vector_search",
 ]
