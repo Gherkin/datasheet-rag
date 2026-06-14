@@ -12,10 +12,13 @@ Tools surfaced to the LLM agent:
 
 Project scoping
 ---------------
-The server is intended to be launched **once per project** by Claude Code via
-a ``.mcp.json`` entry. The default project is read from the
-``RAG_DEFAULT_PROJECT_ID`` env var (or ``settings.default_project_id``); every
-tool accepts an optional ``project_id`` override.
+The default project is resolved per call by ``_resolve_project``: an explicit
+``project_id`` argument wins, then a ``.rag.toml`` discovered by walking up
+from the server's working directory (same discovery as the CLI), then the
+``RAG_DEFAULT_PROJECT_ID`` env var (or ``settings.default_project_id``).
+Running Claude Code inside a checkout with a ``.rag.toml`` therefore scopes
+every tool call to that project automatically, without per-project
+``.mcp.json``/env configuration.
 
 Connection / embedder caching
 -----------------------------
@@ -71,11 +74,21 @@ def _backend(
 def _resolve_project(project_id: str | None) -> str | None:
     """Resolve the effective project_id for a tool call.
 
-    Priority: explicit arg → settings.default_project_id (RAG_DEFAULT_PROJECT_ID env).
-    Returns None if neither set, meaning "search globally".
+    Priority: explicit arg → ``.rag.toml`` discovered from the server's cwd →
+    settings.default_project_id (RAG_DEFAULT_PROJECT_ID env). Returns None if
+    none are set, meaning "search globally". The ``.rag.toml`` lookup mirrors
+    ``resolve_cli_project_id`` so the MCP server scopes itself the same way
+    the CLI does when launched inside a project checkout.
     """
     if project_id:
         return project_id
+
+    from aws_rag.project_config import get_project_config
+
+    config = get_project_config()
+    if config is not None and config.project_id:
+        return config.project_id
+
     return get_settings().default_project_id or None
 
 
