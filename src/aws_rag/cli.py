@@ -1855,6 +1855,7 @@ def ingest(
     console.rule(f"[bold magenta]Bulk ingest — {len(pdf_files)} PDFs under {pdf_path}[/]")
     total_cost = CostEstimate()
     skipped = 0
+    failed: list[tuple[Path, str]] = []
     for i, pdf in enumerate(pdf_files, 1):
         console.rule(f"[bold cyan]({i}/{len(pdf_files)}) {pdf.relative_to(pdf_path)}[/]")
         did = content_hash(pdf)
@@ -1865,7 +1866,12 @@ def ingest(
             )
             skipped += 1
             continue
-        result = _ingest_one(pdf, doc_id=None, **common)
+        try:
+            result = _ingest_one(pdf, doc_id=None, **common)
+        except click.ClickException as e:
+            console.print(f"  [red]Failed:[/] {e.format_message()}")
+            failed.append((pdf, e.format_message()))
+            continue
         if result is not None:
             total_cost.items.extend(result.items)
             total_cost.notes.extend(result.notes)
@@ -1888,10 +1894,16 @@ def ingest(
                 f"{len(pdf_files) - skipped} of {len(pdf_files)} documents"
             ),
         )
+    processed = len(pdf_files) - skipped - len(failed)
+    summary_color = "yellow" if failed else "green"
     console.rule(
-        f"[bold green]Bulk ingest done[/] — {len(pdf_files)} PDFs, "
-        f"{len(pdf_files) - skipped} processed, {skipped} skipped"
+        f"[bold {summary_color}]Bulk ingest done[/] — {len(pdf_files)} PDFs, "
+        f"{processed} processed, {skipped} skipped, {len(failed)} failed"
     )
+    if failed:
+        console.print("[bold yellow]Failed documents:[/]")
+        for pdf, msg in failed:
+            console.print(f"  [red]{pdf.relative_to(pdf_path)}[/]: {msg.splitlines()[0]}")
 
 
 def _ingest_one(
@@ -2712,7 +2724,9 @@ def metadata() -> None:
               help="Override doc_title on every chunk row (manual title fix).")
 @click.option("--project-id", default=None)
 @click.option("--group", "group_name", default=None)
-@click.option("--mpn", default=None, help="Manufacturer part number, e.g. STM32H743VIT6.")
+@click.option("--mpn", default=None, help="Manufacturer part number, e.g. STM32H743VIT6. Replaces the current value.")
+@click.option("--mpn-alias", "mpn_aliases", multiple=True,
+              help="Add an MPN alias without replacing existing ones (repeatable).")
 @click.option("--manufacturer", default=None)
 @click.option("--subsystem", default=None, help="e.g. power, rf, mcu.")
 @click.option("--doc-type", default=None,
@@ -2741,6 +2755,7 @@ def metadata_set(
     project_id: str | None,
     group_name: str | None,
     mpn: str | None,
+    mpn_aliases: tuple[str, ...],
     manufacturer: str | None,
     subsystem: str | None,
     doc_type: str | None,
@@ -2751,7 +2766,16 @@ def metadata_set(
     db_path: Path | None,
     apply_to_chunks: bool,
 ) -> None:
-    """Upsert document metadata. Only fields you pass are updated."""
+    """Upsert document metadata. Only fields you pass are updated.
+
+    Multiple MPNs (variants/aliases) can be stored on the same document.
+    Use --mpn to set the primary MPN and --mpn-alias to append extras:
+
+        rag metadata set <doc_id> --mpn INA226 --mpn-alias INA226A --mpn-alias INA226B
+
+    Filtering with --mpn on 'metadata list' or via the MCP tools matches
+    any token in the comma-separated list.
+    """
     from aws_rag.backend import MetadataPatch
     from aws_rag.project_config import get_project_config
 
@@ -2778,6 +2802,22 @@ def metadata_set(
 
     be = _backend_for(db_path)
     doc_id = be.resolve_doc_id(doc_id)
+
+    # Merge --mpn-alias values into the mpn field as a comma-separated list.
+    if mpn_aliases:
+        if mpn is None:
+            # No --mpn given; read existing to append aliases without clobbering
+            existing_meta = be.get_metadata(doc_id)
+            base = existing_meta.mpn if existing_meta else None
+        else:
+            base = mpn
+        all_mpns: list[str] = []
+        if base:
+            all_mpns = [t.strip() for t in base.split(",") if t.strip()]
+        for alias in mpn_aliases:
+            if alias not in all_mpns:
+                all_mpns.append(alias)
+        mpn = ",".join(all_mpns)
 
     if doc_title is not None:
         updated = be.set_doc_title(doc_id, doc_title)

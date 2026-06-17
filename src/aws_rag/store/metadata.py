@@ -205,8 +205,11 @@ def list_docs(
         clauses.append("group_name = ?")
         params.append(group_name)
     if mpn is not None:
-        clauses.append("mpn = ?")
-        params.append(mpn)
+        # mpn column may hold comma-separated aliases; match any token
+        clauses.append(
+            "(mpn = ? OR mpn LIKE ? OR mpn LIKE ? OR mpn LIKE ?)"
+        )
+        params.extend([mpn, f"{mpn},%", f"%,{mpn},%", f"%,{mpn}"])
 
     where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
     rows = conn.execute(

@@ -525,6 +525,64 @@ def test_metadata_set_get_update_and_apply(conn: sqlite3.Connection) -> None:
     assert all(r.chunk.doc_id == "doc1" for r in hits)
 
 
+def _append_mpn_aliases(
+    conn: sqlite3.Connection, doc_id: str, *aliases: str
+) -> str:
+    """Replicate the CLI --mpn-alias merge logic in isolation."""
+    existing = get_metadata(conn, doc_id)
+    base = existing.mpn if existing else None
+    all_mpns: list[str] = [t.strip() for t in base.split(",") if t.strip()] if base else []
+    for alias in aliases:
+        if alias not in all_mpns:
+            all_mpns.append(alias)
+    merged = ",".join(all_mpns)
+    set_metadata(conn, doc_id, mpn=merged)
+    return merged
+
+
+def test_mpn_alias_append_and_dedup(conn: sqlite3.Connection) -> None:
+    set_metadata(conn, "doc-x", mpn="INA226")
+
+    # Append two aliases
+    _append_mpn_aliases(conn, "doc-x", "INA226A", "INA226B")
+    md = get_metadata(conn, "doc-x")
+    assert md is not None
+    assert md.mpn == "INA226,INA226A,INA226B"
+
+    # Appending a duplicate is a no-op
+    _append_mpn_aliases(conn, "doc-x", "INA226A")
+    md = get_metadata(conn, "doc-x")
+    assert md is not None
+    assert md.mpn == "INA226,INA226A,INA226B"
+
+    # All three aliases are now findable via list_docs
+    for token in ("INA226", "INA226A", "INA226B"):
+        matches = list_docs(conn, mpn=token)
+        assert any(m.doc_id == "doc-x" for m in matches), f"token {token!r} not found"
+
+
+def test_list_docs_mpn_filter_comma_separated(conn: sqlite3.Connection) -> None:
+    set_metadata(conn, "doc-a", mpn="INA226")
+    set_metadata(conn, "doc-b", mpn="INA226,INA226A")
+    set_metadata(conn, "doc-c", mpn="INA226A,INA226B")
+    set_metadata(conn, "doc-d", mpn="INA226B")
+    set_metadata(conn, "doc-e", mpn="OTHER")
+
+    def ids(mpn: str) -> list[str]:
+        return [m.doc_id for m in list_docs(conn, mpn=mpn)]
+
+    # exact single match
+    assert ids("INA226") == ["doc-a", "doc-b"]
+    # alias in the middle / at the end
+    assert ids("INA226A") == ["doc-b", "doc-c"]
+    # alias only at start of multi-value
+    assert ids("INA226B") == ["doc-c", "doc-d"]
+    # unrelated MPN returns nothing
+    assert ids("NOTHERE") == []
+    # token that is a prefix of another MPN must NOT match (INA226 ≠ INA226A)
+    assert "doc-c" not in ids("INA226")
+
+
 def test_apply_metadata_noops_when_missing(conn: sqlite3.Connection) -> None:
     # No sidecar row at all.
     assert apply_metadata_to_chunks(conn, "doc-unknown") == 0
