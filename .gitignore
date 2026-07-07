@@ -5,6 +5,9 @@ __pycache__/
 dist/
 build/
 .venv/
+lib/
+pyvenv.cfg
+CACHEDIR.TAG
 .env
 *.pdf
 output/
