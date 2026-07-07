@@ -663,19 +663,50 @@ def extract_text(doc_id: str, output: Path | None) -> None:
 # ---------------------------------------------------------------------------
 
 
-@cli.command("inspect-layout")
-@click.argument("doc_id", type=str)
-def inspect_layout(doc_id: str) -> None:
-    """Show a summary of Textract block types and layout structure.
+def _resolve_layout_input(arg: str) -> tuple[str, str, Path]:
+    """Resolve *arg* to a cached layout artifact from either ingestion backend.
 
-    DOC_ID is a doc_id (full hash or unambiguous prefix) resolved to the cached
-    ``{doc_id}_blocks.json``; an explicit blocks-JSON path is also accepted.
+    The two backends leave different layout artifacts on disk: Textract writes
+    ``{doc_id}_blocks.json`` (raw blocks) and Docling writes
+    ``{doc_id}_outline.json`` (a serialized `DocumentOutline`). *arg* is either
+    an explicit path to one of those, or a doc_id (full hash or unambiguous
+    prefix) resolved against the cache — preferring the Docling outline when
+    both exist, since Docling is the default backend.
+
+    Returns ``(doc_id, backend, path)`` where *backend* is ``"docling"`` or
+    ``"textract"``.
     """
-    from aws_rag.textract import extract_layout_elements
+    p = Path(arg)
+    if p.is_file():
+        if p.name.endswith("_outline.json"):
+            return p.stem.removesuffix("_outline"), "docling", p
+        if p.name.endswith("_blocks.json"):
+            return p.stem.removesuffix("_blocks"), "textract", p
+        raise click.ClickException(
+            f"{p.name} is not a recognised layout artifact — expected a "
+            "Docling '_outline.json' or Textract '_blocks.json' file."
+        )
 
-    _, blocks_json = _doc_input(doc_id, "_blocks.json")
-    with open(blocks_json) as f:
-        blocks = json.load(f)
+    settings = get_settings()
+    for suffix, backend in (("_outline.json", "docling"), ("_blocks.json", "textract")):
+        if sorted(settings.output_dir.glob(f"{arg}*{suffix}")):
+            doc_id = _resolve_cached_doc_id(arg, suffix)
+            return doc_id, backend, _cache_path(doc_id, suffix)
+
+    raise click.ClickException(
+        f"No cached layout artifact matching doc_id {arg!r} in "
+        f"{settings.output_dir}. Run `rag ingest` for this document first "
+        "(Docling writes '_outline.json', Textract writes '_blocks.json')."
+    )
+
+
+# Rows of the section/layout listing to show before truncating (unless --full).
+_INSPECT_LAYOUT_PREVIEW = 30
+
+
+def _inspect_textract_layout(blocks: list, full: bool = False) -> None:
+    """Render the block-type summary and layout hierarchy for Textract output."""
+    from aws_rag.textract import extract_layout_elements
 
     by_type = extract_layout_elements(blocks)
 
@@ -692,7 +723,8 @@ def inspect_layout(doc_id: str) -> None:
     layout_blocks = [b for b in blocks if b.get("BlockType", "").startswith("LAYOUT_")]
     if layout_blocks:
         console.print(f"\n[bold]Layout blocks ({len(layout_blocks)}):[/]")
-        for lb in layout_blocks[:30]:
+        shown = layout_blocks if full else layout_blocks[:_INSPECT_LAYOUT_PREVIEW]
+        for lb in shown:
             bt = lb["BlockType"]
             page = lb.get("Page", "?")
             top = lb.get("Geometry", {}).get("BoundingBox", {}).get("Top", 0)
@@ -701,8 +733,76 @@ def inspect_layout(doc_id: str) -> None:
                 text_preview = lb["Text"][:80]
             console.print(f"  p{page} {bt:30s} top={top:.3f}  {text_preview}")
 
-        if len(layout_blocks) > 30:
-            console.print(f"  … and {len(layout_blocks) - 30} more")
+        if len(layout_blocks) > len(shown):
+            console.print(
+                f"  … and {len(layout_blocks) - len(shown)} more (pass --full to show all)"
+            )
+
+
+def _inspect_docling_layout(outline, full: bool = False) -> None:
+    """Render the element-type summary and section hierarchy for Docling output."""
+    summary = outline.summary()
+
+    table = Table(title="Docling Element Types")
+    table.add_column("Element Type", style="cyan")
+    table.add_column("Count", justify="right")
+    for et, count in sorted(summary["elements_by_type"].items(), key=lambda x: -x[1]):
+        table.add_row(et, str(count))
+    console.print(table)
+
+    console.print(
+        f"\n{summary['top_level_sections']} chapters, "
+        f"{summary['total_sections']} sections, "
+        f"{summary['total_elements']} elements "
+        f"across {summary['total_pages']} pages."
+    )
+
+    # Show the section hierarchy (depth-first, indented by level).
+    flat = outline.all_sections_flat
+    if flat:
+        console.print(f"\n[bold]Section hierarchy ({len(flat)}):[/]")
+        shown = flat if full else flat[:_INSPECT_LAYOUT_PREVIEW]
+        for section in shown:
+            indent = "  " * (section.level + 1)
+            pages = (
+                f"p{section.page_start}"
+                if section.page_start == section.page_end
+                else f"p{section.page_start}-{section.page_end}"
+            )
+            title = (section.title or "(untitled)")[:80]
+            console.print(
+                f"{indent}{title}  [dim]{pages}, {section.element_count} elements[/]"
+            )
+        if len(flat) > len(shown):
+            console.print(f"  … and {len(flat) - len(shown)} more (pass --full to show all)")
+
+
+@cli.command("inspect-layout")
+@click.argument("doc_id", type=str)
+@click.option("--full", is_flag=True, default=False,
+              help="Show the entire section/layout listing instead of the first "
+                   f"{_INSPECT_LAYOUT_PREVIEW} rows.")
+def inspect_layout(doc_id: str, full: bool) -> None:
+    """Show a summary of the parsed layout structure for a document.
+
+    Works with either ingestion backend: the cached Docling
+    ``{doc_id}_outline.json`` (element types + section hierarchy) or the
+    Textract ``{doc_id}_blocks.json`` (block types + layout blocks). DOC_ID is
+    a doc_id (full hash or unambiguous prefix) resolved against the cache, or an
+    explicit path to one of those artifacts.
+    """
+    resolved_id, backend, path = _resolve_layout_input(doc_id)
+    with open(path) as f:
+        data = json.load(f)
+
+    console.print(f"doc_id [cyan]{resolved_id}[/] — [cyan]{backend}[/] backend")
+
+    if backend == "docling":
+        from aws_rag.chunking.layout_parser import DocumentOutline
+
+        _inspect_docling_layout(DocumentOutline.from_dict(data["outline"]), full=full)
+    else:
+        _inspect_textract_layout(data, full=full)
 
 
 # ---------------------------------------------------------------------------
