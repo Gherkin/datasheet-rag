@@ -6,60 +6,53 @@ A multi-scale, context-aware RAG pipeline that performs layout-aware OCR on
 electronics datasheets, embeds them using hierarchical chunking with concept
 linking, and provides a ReAct agent for intelligent retrieval.
 
-## Quick Start
+## Installation
+
+You can either run without a dedicated backend, with the files stored on
+your local disk, or with a remote backend. Then for actually doing 
+ingestation, you need to chose between Textract and Docling for PDF handling,
+and then if you want to run the models used for image-handling, cleanup and 
+embedding locally or through Bedrock.  
+
+These choices are handled via extras on the python package. The available
+options are:
+* aws - required for running any part of the pipeline with AWS
+* docling - required if not using Textract for PDF-handling
+* local-hf - required for running models locally using huggingface
+* server - required for serving the backend over HTTP
+* token - used for more accurate token usage counting towards AWS
+* dev - test requirements
+
+The recommended setup for running the backend:
+* Docling for PDFhandling since Textract becomes expensive fast. Note: Docling requires the PDFs to contain text, and not be scanned.
+* Use AWS Bedrock for some models, primarily the image description unless
+you have a lot of memory for running models.
+* Embedding model locally using huggingface, less latency and its quite small.  
+
+To install just the base for running with an external backend:
 
 ```bash
-# Install
-pip install -e ".[dev]"
-
-# Configure
-cp .env.example .env
-# Edit .env with your AWS settings
-
-# Upload a datasheet
-rag upload path/to/datasheet.pdf
-
-# Run Textract analysis (async, multi-page)
-rag analyze <doc_id>
-
-# Or quick single-page sync analysis
-rag analyze path/to/single-page.pdf --mode sync
-
-# Extract text preserving layout
-rag extract-text output/<doc_id>_blocks.json
-
-# Inspect Textract block structure
-rag inspect-layout output/<doc_id>_blocks.json
-
-# Chunk into multi-scale graph
-rag chunk output/<doc_id>_blocks.json
-
-# Embed and store (Bedrock Titan v2 → SQLite + sqlite-vec + FTS5)
-rag embed output/<doc_id>_chunks.json --project-id my-board
-
-# Generate vision-LLM descriptions for figure chunks (Bedrock Claude 3 Haiku)
-rag describe-figures --project-id my-board --missing-only
-
-# Tag the document (sidecar — no re-ingest needed)
-rag metadata set <doc_id> --mpn STM32H743VIT6 --manufacturer ST --subsystem mcu
-
-# Backfill AI-inferred titles for documents with blank/generic titles
-rag fix-titles
-
-# Save a document's source PDF to disk
-rag download <doc_id> [-o path/or/dir/]
-
-# Print clickable URLs to read a document's PDF in the browser
-rag open <doc_id>
-
-# Search the store (hybrid by default)
-rag search "I2C clock stretching" --project-id my-board -k 5
-rag search "ESD HBM rating" --mode keyword
-rag search "thermal resistance junction-to-ambient" --mode vector
-
-# List uploaded documents
-rag list
+pip install "git+https://github.com/Gherkin/aws-rag.git"
 ```
+To run the recommended setup locally (no server)
+```bash
+pip install "aws-rag[[aws,docling,local-hf] @ git+https://github.com/Gherkin/aws-rag.git"
+```
+
+You can also run the backend as a dedicated server. This is recommended even if you run fully local, since there is quite a bit of latency overhead in restarting the stack every time you run a query.  
+
+TODO: document how to install the docker container (with/without the HTTPS proxy)
+
+TODO: explain integration into harnesses, MCP or the straight runnable
+
+## Configuration
+
+## Usage
+
+### Ingestation
+
+
+-- ai crap beyond this -- 
 
 ## Global config options
 
@@ -596,46 +589,3 @@ settled.
   is a 10-minute change whenever we do flip the default — not worth doing
   speculatively.
 
-## AWS Services Used
-
-| Service              | Purpose                                 |
-|---------------------|-----------------------------------------|
-| S3                  | PDF storage, Textract output            |
-| Textract            | Layout-aware OCR (LAYOUT, TABLES, FORMS)|
-| Bedrock (Titan/Cohere) | Embeddings                           |
-| OpenSearch Serverless| Vector database with metadata filtering |
-| DynamoDB            | Chunk graph, concept associations       |
-| Bedrock (Claude)    | Concept extraction, ReAct agent         |
-
-## Project Structure
-
-```
-src/aws_rag/
-├── __init__.py
-├── config.py           # Pydantic settings
-├── aws.py              # AWS client factory
-├── storage.py          # S3 operations
-├── textract.py         # Textract analysis + layout parsing
-├── cli.py              # Click CLI
-├── models/             # (Phase 2) Data models
-│   ├── chunk.py        #   Hierarchical chunk model
-│   └── concept.py      #   Concept graph model
-├── chunking/           # (Phase 2) Chunking pipeline
-│   ├── splitter.py     #   Multi-scale text splitting
-│   └── context.py      #   Context enrichment
-├── embedding/          # (Phase 2.5) Bedrock Titan v2 wrapper
-│   └── embedder.py     #   Concurrent batched embedding + retries
-├── store/              # (Phase 2.5) Local SQLite store
-│   ├── schema.py       #   Connect + DDL (chunks, vecs, fts, sidecar)
-│   ├── sqlite.py       #   CRUD helpers
-│   ├── search.py       #   vector / keyword / hybrid (RRF)
-│   └── metadata.py     #   Doc-level metadata sidecar
-├── mcp/                # (Phase 3) MCP server for Claude Code
-│   └── server.py       #   FastMCP tools: search, navigate, zoom, …
-├── concepts/           # (Phase 3) Concept extraction (planned)
-│   ├── extractor.py    #   LLM-based concept extraction
-│   └── graph.py        #   Concept graph operations
-└── agent/              # (Phase 4) ReAct agent (planned)
-    ├── tools.py        #   Agent tool definitions
-    └── agent.py        #   ReAct loop
-```
