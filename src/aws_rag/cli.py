@@ -28,13 +28,74 @@ SHORT_DOC_ID_LEN = 12
 
 
 def _resolve_doc_id(conn, doc_id: str) -> str:
-    """CLI wrapper around `resolve_doc_id`: turns ambiguity/misses into ClickException."""
+    """CLI wrapper around the **store-backed** `resolve_doc_id`: turns
+    ambiguity/misses into ClickException.
+
+    Domain: the sqlite index — only resolves docs that have been *embedded*.
+    For commands that operate on on-disk cache artifacts (blocks/chunks/outline)
+    before a doc is embedded, use `_resolve_cached_doc_id` instead.
+    """
     from aws_rag.store import resolve_doc_id
 
     try:
         return resolve_doc_id(conn, doc_id)
     except ValueError as e:
         raise click.ClickException(str(e)) from e
+
+
+def _cache_path(doc_id: str, suffix: str) -> Path:
+    """Return the conventional cache-artifact path for *doc_id*.
+
+    All local pipeline artifacts live under ``settings.output_dir`` keyed by
+    doc_id, e.g. ``{doc_id}_blocks.json`` / ``{doc_id}_chunks.json`` /
+    ``{doc_id}_outline.json``.
+    """
+    return get_settings().output_dir / f"{doc_id}{suffix}"
+
+
+def _resolve_cached_doc_id(doc_id: str, suffix: str = "_outline.json") -> str:
+    """Resolve a possibly-abbreviated doc_id against the local cache dir.
+
+    Domain: the filesystem cache (``settings.output_dir``). Globs
+    ``{output_dir}/{doc_id}*{suffix}`` and returns the single full doc_id that
+    matches. Unlike the store-backed `_resolve_doc_id`, this sees documents
+    that have a cached artifact but have not been embedded yet — which is the
+    normal state for `chunk`/`embed`/`extract-*` inputs.
+
+    Raises ClickException on zero or ambiguous matches (consistent message).
+    """
+    settings = get_settings()
+    matches = sorted(settings.output_dir.glob(f"{doc_id}*{suffix}"))
+    if not matches:
+        raise click.ClickException(
+            f"No cached {suffix.lstrip('_')} matching doc_id {doc_id!r} in "
+            f"{settings.output_dir}. Run the earlier pipeline stage for this "
+            "document first."
+        )
+    resolved = {p.name.removesuffix(suffix) for p in matches}
+    if len(resolved) > 1:
+        names = ", ".join(sorted(resolved))
+        raise click.ClickException(f"doc_id {doc_id!r} is ambiguous — matches: {names}")
+    return next(iter(resolved))
+
+
+def _doc_input(arg: str, suffix: str) -> tuple[str, Path]:
+    """Resolve a smart positional that is *either* a doc_id or an explicit file path.
+
+    If *arg* is an existing file, use it directly and infer the doc_id from its
+    stem (dropping the artifact suffix, e.g. ``_blocks``). Otherwise treat *arg*
+    as a doc_id prefix, resolve it against the cache (`_resolve_cached_doc_id`),
+    and return the conventional ``{doc_id}{suffix}`` path.
+
+    Returns ``(doc_id, path)``.
+    """
+    p = Path(arg)
+    if p.is_file():
+        stem_suffix = suffix.removesuffix(".json")  # e.g. "_blocks"
+        doc_id = p.stem.removesuffix(stem_suffix)
+        return doc_id, p
+    doc_id = _resolve_cached_doc_id(arg, suffix)
+    return doc_id, _cache_path(doc_id, suffix)
 
 
 def _backend_for(db_path: Path | None = None):
@@ -290,7 +351,13 @@ def upload(pdf_paths: tuple[Path, ...], doc_id: str | None) -> None:
 def analyze(target: str, mode: str, wait: bool, output: Path | None) -> None:
     """Run Textract analysis on a PDF.
 
-    TARGET is either a local file path (sync mode) or a doc_id (async mode).
+    TARGET's meaning follows --mode:
+      • sync  — TARGET is a local PDF path; its doc_id is its content hash.
+      • async — TARGET is a doc_id (full hash or unambiguous prefix) of a PDF
+                already uploaded to S3 with `rag upload`.
+
+    Either way the blocks are saved to the cached ``{doc_id}_blocks.json`` (or
+    --output).
     """
     from aws_rag.textract import (
         analyze_document_sync,
@@ -303,26 +370,34 @@ def analyze(target: str, mode: str, wait: bool, output: Path | None) -> None:
     settings = get_settings()
 
     if mode == "sync":
+        from aws_rag.docling_parser import content_hash
+
         pdf_path = Path(target)
         if not pdf_path.is_file():
             raise click.BadParameter(f"File not found: {pdf_path}")
+        doc_id = content_hash(pdf_path)
         response = analyze_document_sync(pdf_path)
         blocks = response.get("Blocks", [])
     else:
-        # async — target is a doc_id; we need to find its S3 key
+        # async — target is a doc_id (prefix-resolved against S3 uploads).
         from aws_rag.storage import list_documents
 
         docs = list_documents()
-        match = [d for d in docs if d["doc_id"] == target]
-        if not match:
+        matches = [d for d in docs if d["doc_id"].startswith(target)]
+        if not matches:
             raise click.BadParameter(
                 f"doc_id '{target}' not found. Upload the PDF first with `rag upload`."
             )
+        if len({d["doc_id"] for d in matches}) > 1:
+            names = ", ".join(sorted({d["doc_id"][:SHORT_DOC_ID_LEN] for d in matches}))
+            raise click.BadParameter(f"doc_id '{target}' is ambiguous — matches: {names}")
+        doc_id = matches[0]["doc_id"]
+
         # Find the actual PDF key under the prefix
         from aws_rag.aws import s3_client
 
         client = s3_client()
-        prefix = match[0]["prefix"]
+        prefix = matches[0]["prefix"]
         resp = client.list_objects_v2(Bucket=settings.s3_bucket, Prefix=prefix)
         pdf_keys = [
             obj["Key"]
@@ -333,7 +408,7 @@ def analyze(target: str, mode: str, wait: bool, output: Path | None) -> None:
             raise click.ClickException(f"No PDF found under s3://{settings.s3_bucket}/{prefix}")
 
         s3_key = pdf_keys[0]
-        job_id = start_analysis(target, s3_key)
+        job_id = start_analysis(doc_id, s3_key)
 
         if not wait:
             console.print(f"Job ID: {job_id}")
@@ -348,7 +423,7 @@ def analyze(target: str, mode: str, wait: bool, output: Path | None) -> None:
 
     # Save output
     if output is None:
-        output = settings.output_dir / f"{target.replace('/', '_')}_blocks.json"
+        output = _cache_path(doc_id, "_blocks.json")
 
     save_blocks(blocks, output)
 
@@ -558,12 +633,18 @@ def open_doc(doc_id: str, page: int, db_path: Path | None, launch: bool) -> None
 
 
 @cli.command("extract-text")
-@click.argument("blocks_json", type=click.Path(exists=True, path_type=Path))
+@click.argument("doc_id", type=str)
 @click.option("--output", "-o", type=click.Path(path_type=Path), default=None)
-def extract_text(blocks_json: Path, output: Path | None) -> None:
-    """Extract readable text from Textract blocks JSON, preserving layout order."""
+def extract_text(doc_id: str, output: Path | None) -> None:
+    """Extract readable text from a document's Textract blocks, preserving layout order.
+
+    DOC_ID is a doc_id (full hash or unambiguous prefix); the blocks are read
+    from the cached ``{doc_id}_blocks.json``. An explicit blocks-JSON path is
+    also accepted in place of a doc_id.
+    """
     from aws_rag.textract import build_text_from_layout
 
+    _, blocks_json = _doc_input(doc_id, "_blocks.json")
     with open(blocks_json) as f:
         blocks = json.load(f)
 
@@ -583,11 +664,16 @@ def extract_text(blocks_json: Path, output: Path | None) -> None:
 
 
 @cli.command("inspect-layout")
-@click.argument("blocks_json", type=click.Path(exists=True, path_type=Path))
-def inspect_layout(blocks_json: Path) -> None:
-    """Show a summary of Textract block types and layout structure."""
+@click.argument("doc_id", type=str)
+def inspect_layout(doc_id: str) -> None:
+    """Show a summary of Textract block types and layout structure.
+
+    DOC_ID is a doc_id (full hash or unambiguous prefix) resolved to the cached
+    ``{doc_id}_blocks.json``; an explicit blocks-JSON path is also accepted.
+    """
     from aws_rag.textract import extract_layout_elements
 
+    _, blocks_json = _doc_input(doc_id, "_blocks.json")
     with open(blocks_json) as f:
         blocks = json.load(f)
 
@@ -625,20 +711,20 @@ def inspect_layout(blocks_json: Path) -> None:
 
 
 @cli.command("extract-figures")
-@click.argument("blocks_json", type=click.Path(exists=True, path_type=Path))
-@click.argument("pdf_path", type=click.Path(exists=True, path_type=Path))
-@click.option("--doc-id", default=None, help="Document ID (inferred from blocks filename if omitted).")
+@click.argument("doc_id", type=str)
+@click.option("--pdf", "pdf_path", type=click.Path(exists=True, path_type=Path), default=None,
+              help="Source PDF path (defaults to the cached {pdf_dir}/{doc_id}.pdf).")
 @click.option("--dpi", default=300, type=int, help="Render DPI for PDF pages.")
 @click.option("--format", "image_format", default="png", type=click.Choice(["png", "jpg", "webp"]))
 @click.option("--padding", default=0.02, type=float, help="Padding around figures (fraction of page).")
 @click.option("--upload/--no-upload", default=False,
               help="Also upload figures to S3 (opt-in — the local store under "
                    "~/.rag/figures/ is the default and MCP reads from it directly).")
-@click.option("--output-dir", "-o", type=click.Path(path_type=Path), default=None)
+@click.option("--output-dir", "-o", type=click.Path(path_type=Path), default=None,
+              help="Output directory for figure images (defaults to the doc's figures cache).")
 def extract_figures_cmd(
-    blocks_json: Path,
-    pdf_path: Path,
-    doc_id: str | None,
+    doc_id: str,
+    pdf_path: Path | None,
     dpi: int,
     image_format: str,
     padding: float,
@@ -647,17 +733,28 @@ def extract_figures_cmd(
 ) -> None:
     """Extract figure images from a PDF using Textract layout detection.
 
+    DOC_ID is a doc_id (full hash or unambiguous prefix); the blocks are read
+    from the cached ``{doc_id}_blocks.json`` and the source PDF from
+    ``{pdf_dir}/{doc_id}.pdf`` (override with --pdf). An explicit blocks-JSON
+    path is also accepted in place of a doc_id.
+
     Crops each LAYOUT_FIGURE region and saves as individual images.
     Generates a manifest JSON with metadata, captions, and context.
     """
     from aws_rag.figures import extract_figures, upload_figures_to_s3
 
+    doc_id, blocks_json = _doc_input(doc_id, "_blocks.json")
     with open(blocks_json) as f:
         blocks = json.load(f)
 
-    # Infer doc_id from filename if not provided
-    if doc_id is None:
-        doc_id = blocks_json.stem.replace("_blocks", "")
+    settings = get_settings()
+    if pdf_path is None:
+        pdf_path = settings.pdf_dir / f"{doc_id}.pdf"
+        if not pdf_path.is_file():
+            raise click.ClickException(
+                f"No cached PDF for doc_id={doc_id} at {pdf_path}. Pass --pdf "
+                "with the source PDF, or run `rag ingest`/`rag upload` first."
+            )
 
     manifest = extract_figures(
         pdf_path=pdf_path,
@@ -673,7 +770,6 @@ def extract_figures_cmd(
         manifest = upload_figures_to_s3(manifest)
 
     # Save manifest
-    settings = get_settings()
     manifest_dir = output_dir or settings.output_dir / "figures" / doc_id
     manifest.save(manifest_dir / "manifest.json")
 
@@ -704,8 +800,7 @@ def extract_figures_cmd(
 
 
 @cli.command("chunk")
-@click.argument("blocks_json", type=click.Path(exists=True, path_type=Path))
-@click.option("--doc-id", default=None, help="Document ID (inferred from filename if omitted).")
+@click.argument("doc_id", type=str)
 @click.option(
     "--figures-manifest",
     type=click.Path(exists=True, path_type=Path),
@@ -722,15 +817,19 @@ def extract_figures_cmd(
 )
 @click.option("--output", "-o", type=click.Path(path_type=Path), default=None)
 def chunk_cmd(
-    blocks_json: Path,
-    doc_id: str | None,
+    doc_id: str,
     figures_manifest: Path | None,
     micro_tokens: int,
     meso_tokens: int,
     summarizer: str,
     output: Path | None,
 ) -> None:
-    """Run the multi-scale chunking pipeline on Textract blocks.
+    """Run the multi-scale chunking pipeline on a document's Textract blocks.
+
+    DOC_ID is a doc_id (full hash or unambiguous prefix); the blocks are read
+    from the cached ``{doc_id}_blocks.json`` and chunks are written to
+    ``{doc_id}_chunks.json`` unless --output is given. An explicit blocks-JSON
+    path is also accepted in place of a doc_id.
 
     Produces a hierarchical chunk graph at three levels (MACRO/MESO/MICRO)
     with navigation links, context enrichment, and chapter summaries.
@@ -738,11 +837,9 @@ def chunk_cmd(
     from aws_rag.chunking.pipeline import run_chunking_pipeline, save_chunk_graph
     from aws_rag.chunking.splitter import SplitterConfig
 
+    doc_id, blocks_json = _doc_input(doc_id, "_blocks.json")
     with open(blocks_json) as f:
         blocks = json.load(f)
-
-    if doc_id is None:
-        doc_id = blocks_json.stem.replace("_blocks", "")
 
     # Load figure manifest if provided
     figure_manifest = None
@@ -803,7 +900,7 @@ def chunk_cmd(
 
 
 @cli.command()
-@click.argument("chunks_json", type=click.Path(exists=True, path_type=Path))
+@click.argument("doc_id", type=str)
 @click.option("--db", "db_path", type=click.Path(path_type=Path), default=None,
               help="SQLite DB path. Defaults to settings.sqlite_db_path.")
 @click.option("--project-id", default=None, help="Project ID to attach to every chunk.")
@@ -811,14 +908,18 @@ def chunk_cmd(
 @click.option("--verbose/--quiet", default=True, help="Print per-batch progress.")
 @click.option("--dry-run", is_flag=True, help="Embed but do not write to the store.")
 def embed(
-    chunks_json: Path,
+    doc_id: str,
     db_path: Path | None,
     project_id: str | None,
     group_name: str | None,
     verbose: bool,
     dry_run: bool,
 ) -> None:
-    """Embed a chunk graph (produced by `rag chunk`) and store it.
+    """Embed a document's chunk graph (produced by `rag chunk`) and store it.
+
+    DOC_ID is a doc_id (full hash or unambiguous prefix); the chunk graph is
+    read from the cached ``{doc_id}_chunks.json``. An explicit chunks-JSON path
+    is also accepted in place of a doc_id.
 
     Embedding + insert run through the backend, so this writes to the remote
     server (which embeds) when RAG_SERVER_URL is set, or the local sqlite
@@ -827,6 +928,8 @@ def embed(
     from aws_rag.backend import MetadataPatch, backend_mode
     from aws_rag.chunking.pipeline import load_chunk_graph
     from aws_rag.project_config import get_project_config
+
+    _, chunks_json = _doc_input(doc_id, "_chunks.json")
 
     proj_cfg = get_project_config()
     if proj_cfg is not None:
@@ -1071,8 +1174,8 @@ def describe_figures_cmd(
     descriptions show up in vector search:
 
         rag describe-figures --doc-id <doc>
-        rag chunk output/<doc>_blocks.json --figures-manifest ...   # if needed
-        rag embed output/<doc>_chunks.json --project-id <p>
+        rag chunk <doc> --figures-manifest ...   # if needed
+        rag embed <doc> --project-id <p>
     """
     be = _backend_for(db_path)
     if doc_id:
@@ -1103,7 +1206,7 @@ def describe_figures_cmd(
     elif descriptions:
         console.print("[green]Descriptions written to chunks + context_text.[/]")
         console.print(
-            "  Re-run `rag embed <chunks.json>` (or implement an "
+            "  Re-run `rag embed <doc-id>` (or implement an "
             "updated-only re-embed) to refresh the vectors."
         )
 
@@ -1927,21 +2030,8 @@ def table_structure_sweep_cmd(doc_id: str, list_flagged: bool, sample_n: int) ->
         _table_cells_to_compact_text,
     )
 
-    settings = get_settings()
-    matches = sorted(settings.output_dir.glob(f"{doc_id}*_outline.json"))
-    if not matches:
-        raise click.ClickException(
-            f"No cached layout outline matching doc_id {doc_id!r} in "
-            f"{settings.output_dir}. Run `rag ingest` (Docling backend) on "
-            "this document first — the sweep only inspects an existing "
-            "outline, it doesn't convert."
-        )
-    if len(matches) > 1:
-        names = ", ".join(p.name.removesuffix("_outline.json") for p in matches)
-        raise click.ClickException(f"doc_id {doc_id!r} is ambiguous — matches: {names}")
-
-    outline_path = matches[0]
-    did = outline_path.name.removesuffix("_outline.json")
+    did = _resolve_cached_doc_id(doc_id, "_outline.json")
+    outline_path = _cache_path(did, "_outline.json")
 
     with open(outline_path) as f:
         cached = json.load(f)
@@ -2135,22 +2225,9 @@ def repair_tables_cmd(
             return "data rows disagree on column count — can't trust C"
         return None
 
-    settings = get_settings()
-    matches = sorted(settings.output_dir.glob(f"{doc_id}*_outline.json"))
-    if not matches:
-        raise click.ClickException(
-            f"No cached layout outline matching doc_id {doc_id!r} in "
-            f"{settings.output_dir}. Run `rag ingest` (Docling backend) on "
-            "this document first — repair-tables only patches an existing "
-            "outline, it doesn't convert."
-        )
-    if len(matches) > 1:
-        names = ", ".join(p.name.removesuffix("_outline.json") for p in matches)
-        raise click.ClickException(f"doc_id {doc_id!r} is ambiguous — matches: {names}")
-
-    outline_path = matches[0]
-    did = outline_path.name.removesuffix("_outline.json")
-    chunks_path = settings.output_dir / f"{did}_chunks.json"
+    did = _resolve_cached_doc_id(doc_id, "_outline.json")
+    outline_path = _cache_path(did, "_outline.json")
+    chunks_path = _cache_path(did, "_chunks.json")
 
     with open(outline_path) as f:
         cached = json.load(f)
