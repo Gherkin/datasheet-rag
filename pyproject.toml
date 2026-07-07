@@ -4,8 +4,6 @@ version = "0.1.0"
 description = "Multi-scale context-aware RAG pipeline for electronics datasheets"
 requires-python = ">=3.11"
 dependencies = [
-    "boto3>=1.35.0",
-    "botocore[crt]>=1.35.0",
     "click>=8.1.0",
     "mcp>=1.2.0",
     "numpy>=1.26.0",
@@ -16,9 +14,21 @@ dependencies = [
     "rich>=13.0.0",
     "sqlite-vec>=0.1.6",
     "tenacity>=8.2.0",
+    # Small, pure-Python HTTP client. In the base so a thin remote client
+    # (CLI/MCP against a RAG server) and the Ollama backend work with a plain
+    # `pip install aws-rag` — no extra needed.
+    "httpx>=0.27",
 ]
 
 [project.optional-dependencies]
+# AWS backends: Bedrock (embeddings/text/vision) + Textract (OCR) + S3 storage.
+# Needed whenever any RAG_*_BACKEND is "bedrock" (the default experience) or
+# RAG_STORAGE_BACKEND is "s3". The code imports boto3 lazily, so a fully-local
+# install (all backends local, local storage) runs without this extra.
+aws = [
+    "boto3>=1.35.0",
+    "botocore[crt]>=1.35.0",
+]
 dev = [
     "pytest>=8.0.0",
     "ruff>=0.5.0",
@@ -32,25 +42,14 @@ docling = [
     "docling>=2.0.0",
     "pymupdf>=1.24.0",
 ]
-# Local model backend (Ollama) — needed only when RAG_EMBEDDING_BACKEND or
-# RAG_CHAT_BACKEND is set to "local". Keeps the default install AWS-only.
-local = [
-    "httpx>=0.27",
-]
-# Remote-client support: the CLI/MCP talking to a RAG server over HTTP only
-# needs httpx (already pulled by `local`); listed explicitly so a thin client
-# can `pip install 'aws-rag[client]'` without the AWS/local-model extras.
-client = [
-    "httpx>=0.27",
-]
 # RAG HTTP server (runs in Docker, owns the sqlite db + embedder). Install
 # alongside an embedding backend, e.g. `aws-rag[server]` (Bedrock) or
-# `aws-rag[server,local,local-hf]` (fully local embeddings/vision).
+# `aws-rag[server,local-hf]` (fully local embeddings/vision). The thin remote
+# client and the Ollama backend need nothing beyond the base (httpx is there).
 server = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",
     "python-multipart>=0.0.9",
-    "httpx>=0.27",
 ]
 # In-process HuggingFace runtimes (PyTorch/CUDA): sentence-transformers for
 # embeddings, transformers for vision/text LLMs. Needed when any *_BACKEND=local

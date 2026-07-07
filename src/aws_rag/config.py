@@ -135,8 +135,9 @@ class Settings(BaseSettings):
     # incompatible — re-embed the corpus on a DB created with the matching
     # embedding_dimensions (vectors from different models are not comparable).
     #
-    # The "local" defaults require the local extras:
-    #   pip install 'aws-rag[local,local-hf]'
+    # The "local" defaults use the in-process HuggingFace runtimes, which need:
+    #   pip install 'aws-rag[local-hf]'
+    # (The Ollama runtimes need only the base install — httpx ships there.)
     # ------------------------------------------------------------------
     embedding_backend: Literal["bedrock", "local"] = Field(
         default="local",

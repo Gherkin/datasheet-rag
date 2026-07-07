@@ -50,8 +50,6 @@ from collections.abc import Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any
 
-import boto3
-from botocore.config import Config
 from rich.console import Console
 from tenacity import Retrying, retry_if_exception, stop_after_attempt, wait_exponential
 
@@ -112,6 +110,18 @@ def _bedrock_runtime_client(
     Lives here (rather than in :mod:`aws_rag.aws`) to keep this track
     self-contained. Once another caller needs it, it should migrate over.
     """
+    # Lazy import: this module also hosts the Ollama embedding path, so a
+    # fully-local install (no `aws` extra) must be able to import it. boto3 is
+    # only pulled in when a Bedrock embedding backend is actually used.
+    try:
+        import boto3
+        from botocore.config import Config
+    except ModuleNotFoundError as exc:  # pragma: no cover - guidance path
+        raise ModuleNotFoundError(
+            "The Bedrock embedding backend was selected but boto3 is not "
+            "installed. Install the AWS extra:  pip install 'aws-rag[aws]'"
+        ) from exc
+
     settings = get_settings()
     session_kwargs: dict[str, str] = {
         "region_name": region or settings.aws_region,
@@ -459,8 +469,8 @@ class OllamaEmbedder(_ChunkEmbeddingMixin):
             import httpx
         except ImportError as exc:
             raise ImportError(
-                "The local embedding backend needs the 'httpx' package. "
-                "Install the local extra:  pip install 'aws-rag[local]'"
+                "The local embedding backend needs the 'httpx' package "
+                "(part of the base install). Reinstall:  pip install aws-rag"
             ) from exc
         def _post() -> list[float] | None:
             # Use the newer /api/embed endpoint with truncate=True so inputs

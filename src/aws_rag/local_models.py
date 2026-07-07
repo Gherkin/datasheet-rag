@@ -40,7 +40,8 @@ def _import_httpx() -> Any:
         import httpx
     except ImportError as exc:  # pragma: no cover - exercised via message only
         raise ImportError(
-            "The Ollama backend needs 'httpx'. Install:  pip install 'aws-rag[local]'"
+            "The Ollama backend needs 'httpx' (part of the base install). "
+            "Reinstall:  pip install aws-rag"
         ) from exc
     return httpx
 

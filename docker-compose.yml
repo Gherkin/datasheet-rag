@@ -21,7 +21,9 @@ services:
       args:
         # Include local-hf so the server can embed in-process with bge-m3
         # (matches a local store's vectors). Pulls torch — larger image.
-        RAG_EXTRAS: ${RAG_EXTRAS:-server,local-hf}
+        # `aws` gives the boto3 clients for the Bedrock text/vision backends
+        # this compose file selects below.
+        RAG_EXTRAS: ${RAG_EXTRAS:-server,local-hf,aws}
     image: aws-rag-server
     ports:
       - "8080:8080"

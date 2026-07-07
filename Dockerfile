@@ -28,11 +28,13 @@ COPY pyproject.toml ./
 COPY src ./src
 
 # Which optional-dependency extras to install. Default keeps the image light
-# (Bedrock + docling). For in-process local embeddings (e.g. BAAI/bge-m3 via
+# (Bedrock + docling); `aws` provides the boto3 clients the Bedrock/Textract/S3
+# backends need. For in-process local embeddings (e.g. BAAI/bge-m3 via
 # sentence-transformers) build with:
-#   docker build --build-arg RAG_EXTRAS=server,local-hf -t aws-rag-server .
+#   docker build --build-arg RAG_EXTRAS=server,local-hf,aws -t aws-rag-server .
 # (docker-compose.yml passes this through.) local-hf pulls torch — much larger.
-ARG RAG_EXTRAS=server,docling
+# Drop `aws` only for a fully-local image (all backends local, local storage).
+ARG RAG_EXTRAS=server,docling,aws
 RUN pip install --no-cache-dir ".[${RAG_EXTRAS}]"
 
 ENV RAG_HOME=/data \
