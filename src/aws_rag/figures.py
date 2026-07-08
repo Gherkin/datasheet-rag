@@ -12,10 +12,21 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from pdf2image import convert_from_path
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 from PIL import Image
 from rich.console import Console
-from rich.progress import track
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    SpinnerColumn,
+    TaskProgressColumn,
+    TextColumn,
+    TimeRemainingColumn,
+    track,
+)
 
 console = Console()
 
@@ -238,34 +249,95 @@ def render_pdf_pages(
     *,
     dpi: int = 300,
     pages: list[int] | None = None,
+    cache_dir: Path | None = None,
 ) -> dict[int, Image.Image]:
     """Render PDF pages to PIL Images. Returns {page_number: Image}.
 
     Page numbers are 1-indexed to match Textract conventions.
 
-    Pages are rendered one at a time rather than as a single batch. On
-    documents where figures are scattered across thousands of pages,
-    rendering the whole min(pages)..max(pages) span in one
-    convert_from_path() call would materialise every page in that span as
-    an in-memory PIL Image simultaneously (~40 MB/page at 300 DPI) — for a
-    2,000+ page datasheet that is enough to exhaust system RAM and crash
-    the machine. Rendering page-by-page bounds memory to a single page and
-    gives per-page progress instead of one long, silent blocking call.
-    """
-    if not pages:
-        console.print(f"[blue]Rendering PDF[/] at {dpi} DPI …")
-        images = convert_from_path(str(pdf_path), dpi=dpi)
-        result = {i + 1: img for i, img in enumerate(images)}
-        console.print(f"[green]Rendered[/] {len(result)} pages")
-        return result
+    Two optimisations over the original Poppler/subprocess approach:
 
+    1. **Page render cache** — each rendered page is saved as a PNG under
+       ``cache_dir / f'p{page:04d}_{dpi}dpi.png'``. On subsequent ingests
+       (e.g. after fixing layout parsing with --force), cached pages are
+       loaded from disk instead of re-rendered, cutting Step 3 to near-zero
+       for pages that haven't changed.
+
+    2. **Parallel rendering** — pages are dispatched to a
+       ``ThreadPoolExecutor`` where each worker opens its own
+       ``fitz.Document`` (PyMuPDF is not thread-safe when sharing one
+       instance) and renders its assigned page independently. Wall-clock
+       time scales roughly as 1/n_workers.
+    """
+    import fitz  # pymupdf
+
+    # Resolve target page list — open briefly if caller passed None
+    if pages is None:
+        with fitz.open(str(pdf_path)) as probe:
+            target_pages: list[int] = list(range(1, len(probe) + 1))
+    else:
+        target_pages = sorted(set(pages))
+
+    # ---- Serve from cache where possible -----------------------------------
     result: dict[int, Image.Image] = {}
-    for page in track(sorted(set(pages)), description=f"Rendering PDF at {dpi} DPI…"):
-        page_images = convert_from_path(
-            str(pdf_path), dpi=dpi, first_page=page, last_page=page
-        )
-        if page_images:
-            result[page] = page_images[0]
+    to_render: list[int] = []
+
+    if cache_dir is not None:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        for page_no in target_pages:
+            cache_file = cache_dir / f"p{page_no:04d}_{dpi}dpi.png"
+            if cache_file.is_file():
+                img = Image.open(cache_file)
+                img.load()  # force into memory so the file handle can be released
+                result[page_no] = img
+            else:
+                to_render.append(page_no)
+        if result:
+            console.print(
+                f"[dim]Page render cache:[/] {len(result)} of {len(target_pages)} "
+                f"pages loaded, {len(to_render)} to render."
+            )
+    else:
+        to_render = list(target_pages)
+
+    # ---- Render remaining pages in parallel --------------------------------
+    if to_render:
+        pdf_path_str = str(pdf_path)
+        mat_scale = dpi / 72
+        n_workers = min(os.cpu_count() or 4, len(to_render), 8)
+
+        def _render_one(page_no: int) -> tuple[int, Image.Image]:
+            # Each worker owns its own fitz.Document — required for thread safety.
+            doc = fitz.open(pdf_path_str)
+            mat = fitz.Matrix(mat_scale, mat_scale)
+            pix = doc[page_no - 1].get_pixmap(matrix=mat)
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            doc.close()
+            if cache_dir is not None:
+                cache_file = cache_dir / f"p{page_no:04d}_{dpi}dpi.png"
+                img.save(str(cache_file), format="PNG")
+            return page_no, img
+
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            MofNCompleteColumn(),
+            TimeRemainingColumn(),
+            console=console,
+        ) as progress:
+            task = progress.add_task(
+                f"Rendering {len(to_render)} pages at {dpi} DPI · {n_workers} workers…",
+                total=len(to_render),
+            )
+            with ThreadPoolExecutor(max_workers=n_workers) as pool:
+                futures = {pool.submit(_render_one, p): p for p in to_render}
+                for fut in as_completed(futures):
+                    page_no, img = fut.result()
+                    result[page_no] = img
+                    progress.advance(task)
+
     console.print(f"[green]Rendered[/] {len(result)} pages")
     return result
 
@@ -416,7 +488,21 @@ def extract_figures_from_regions(
     )
 
     needed_pages = sorted(set(r.page for r in regions))
-    page_images = render_pdf_pages(pdf_path, dpi=dpi, pages=needed_pages)
+
+    # Derive a per-document render cache directory so re-ingests of the same
+    # document (e.g. after layout fixes with --force) skip re-rendering pages
+    # that haven't changed. Falls back to None (no cache) when settings are
+    # unavailable (e.g. in unit tests that don't configure RAG_HOME).
+    render_cache_dir: Path | None = None
+    try:
+        from aws_rag.config import get_settings
+        render_cache_dir = get_settings().rag_home / "page_render_cache" / doc_id
+    except Exception:
+        pass
+
+    page_images = render_pdf_pages(
+        pdf_path, dpi=dpi, pages=needed_pages, cache_dir=render_cache_dir
+    )
 
     crop_caps = _compute_adjacent_crop_caps(regions, padding_pct)
     if crop_caps:

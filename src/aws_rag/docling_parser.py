@@ -29,6 +29,8 @@ console = Console()
 _NATIVE_CHAR_THRESHOLD = 100  # total chars across sample pages to confirm native PDF
 _MULTI_SPACE_RE = re.compile(r" {2,}")
 _TOC_TITLES = frozenset({"table of contents", "contents", "index", "toc"})
+# "Foo (continued)" or "Foo (Continued)" — trailing page-continuation suffix
+_CONTINUED_RE = re.compile(r"\s*\(continued\)\s*$", re.IGNORECASE)
 # "Section heading ........ 12" or "Section heading        12"
 _TOC_ENTRY_RE = re.compile(r"^.+[.\s]{2,}\d+\s*$")
 
@@ -653,7 +655,7 @@ def _build_outline(
     # Last PICTURE/FORMULA element waiting for a CAPTION to be assigned.
     pending_caption_element: ContentElement | None = None
 
-    for item, _level in doc.iterate_items():
+    for item, doc_level in doc.iterate_items():
         label = item.label
 
         # --- Captions: assign to the immediately preceding figure/formula ----
@@ -704,21 +706,30 @@ def _build_outline(
             text = _clean_text(getattr(item, "text", ""))
             pending_caption_element = None
             section = DocumentSection(
-                title=text, level=1, page_start=page_no, page_end=page_no,
+                title=text, level=doc_level, page_start=page_no, page_end=page_no,
                 header_block_id=block_id,
             )
+            # Pop back to a parent that is strictly shallower than this section.
+            # This respects Docling's nesting level for documents where headings
+            # carry meaningful depth (e.g. subsections inside major sections).
+            while len(section_stack) > 1 and section_stack[-1].level >= doc_level:
+                section_stack.pop()
             if not section_stack:
-                section_stack = [section]
-                current_section = section
-            else:
-                parent = section_stack[0]
+                # Nothing in the stack yet — start a new root branch.
+                section_stack.append(section)
+            elif section_stack[-1].level < doc_level:
+                # Found a proper shallower parent.
+                parent = section_stack[-1]
                 parent.children.append(section)
                 parent.page_end = page_no
-                if len(section_stack) > 1:
-                    section_stack[1] = section
-                else:
-                    section_stack.append(section)
-                current_section = section
+                section_stack.append(section)
+            else:
+                # One item left at the same or deeper level — sibling of the
+                # current root; flush the old root and start fresh.
+                _flush(section_stack, sections)
+                section_stack.clear()
+                section_stack.append(section)
+            current_section = section
             continue
 
         # --- Content elements ---
@@ -839,6 +850,8 @@ def _build_outline(
             current_section.page_end = page_no
 
     _flush(section_stack, sections)
+    sections = _filter_repeated_section_headings(sections, total_pages=len(doc.pages))
+    sections = _merge_continued_sections(sections)
     sections = _restructure_degenerate_outline(sections)
     sections = _filter_toc_sections(sections)
 
@@ -1119,6 +1132,122 @@ def _restructure_degenerate_outline(sections: list[DocumentSection]) -> list[Doc
         f"rebuilding chapter structure from numeric heading prefixes."
     )
     return _restructure_flat_chapter(chapter)
+
+
+def _merge_continued_sections(sections: list[DocumentSection]) -> list[DocumentSection]:
+    """Collapse 'Foo (continued)' sections back into their preceding 'Foo' base section.
+
+    PDFs that span a logical section across multiple pages re-emit the section
+    heading on each new page with a "(continued)" suffix. Each re-emission
+    becomes a separate DocumentSection in the outline, fragmenting what is
+    logically one section into many. This function merges them:
+
+    - Any section whose title ends with " (continued)" (case-insensitive) is
+      matched to the most recent preceding sibling whose base title (with the
+      suffix stripped) matches case-insensitively.
+    - The continuation's elements and children are appended to the matched
+      base section, and its page_end is extended accordingly.
+    - If no matching base exists in the current sibling list, the continuation
+      is kept as-is (its base title may be in a parent scope).
+
+    Applied recursively so continuations at any nesting depth are merged.
+    """
+
+    def _merge(sects: list[DocumentSection]) -> list[DocumentSection]:
+        result: list[DocumentSection] = []
+        # Maps casefold(base_title) -> index into result for the latest base section
+        title_to_idx: dict[str, int] = {}
+
+        for s in sects:
+            # Recurse into children before processing this section
+            s.children = _merge(s.children)
+
+            if _CONTINUED_RE.search(s.title):
+                base_key = _CONTINUED_RE.sub("", s.title).strip().casefold()
+                if base_key in title_to_idx:
+                    target = result[title_to_idx[base_key]]
+                    target.elements.extend(s.elements)
+                    target.children.extend(s.children)
+                    target.page_end = max(target.page_end, s.page_end)
+                    console.print(
+                        f"[dim]Merge:[/] folded '{s.title}' (p{s.page_start}) "
+                        f"into '{target.title}'"
+                    )
+                    continue  # drop the continuation — absorbed into base
+                # No matching base in this sibling list — keep and register
+                # (so later continuations at this level can still find it)
+                title_to_idx[_CONTINUED_RE.sub("", s.title).strip().casefold()] = len(result)
+            else:
+                title_to_idx[s.title.strip().casefold()] = len(result)
+
+            result.append(s)
+
+        return result
+
+    return _merge(sections)
+
+
+# Minimum number of times a zero-element section title must appear for it to
+# be treated as a repeating page watermark rather than a real heading.  Both
+# the absolute count and the fraction of total pages must be satisfied.
+_REPEATED_SECTION_MIN_COUNT = 3
+_REPEATED_SECTION_MIN_PAGE_FRACTION = 0.04
+
+
+def _filter_repeated_section_headings(
+    sections: list[DocumentSection], total_pages: int
+) -> list[DocumentSection]:
+    """Remove section headings that are repeating page watermarks misclassified as headings.
+
+    Some PDFs repeat a product name or chapter title as a visual heading on
+    every page (rather than in the true page-header zone that Docling would
+    classify as PAGE_HEADER). When Docling classifies these as SECTION_HEADER
+    they create an empty placeholder section at each page boundary that
+    pollutes the chapter's child list with noise.
+
+    A section heading is treated as a repeating watermark when its
+    case-folded, stripped title appears at least
+    ``max(_REPEATED_SECTION_MIN_COUNT, total_pages *
+    _REPEATED_SECTION_MIN_PAGE_FRACTION)`` times across the outline AND
+    *every* occurrence has zero direct elements and zero children — i.e. it
+    carries no content whatsoever.  Any children an occurrence has accumulated
+    are promoted to the parent list so no content is lost.
+    """
+    title_counts: Counter[str] = Counter()
+
+    def _count(sects: list[DocumentSection]) -> None:
+        for s in sects:
+            if not s.elements and not s.children:
+                title_counts[s.title.casefold().strip()] += 1
+            _count(s.children)
+
+    _count(sections)
+
+    threshold = max(
+        _REPEATED_SECTION_MIN_COUNT,
+        int(total_pages * _REPEATED_SECTION_MIN_PAGE_FRACTION),
+    )
+    noise_titles = {t for t, c in title_counts.items() if c >= threshold}
+    if not noise_titles:
+        return sections
+
+    for title in noise_titles:
+        console.print(
+            f"[yellow]Section filter:[/] removing {title_counts[title]} repeated "
+            f"empty section headings {title!r:.60} (likely a running page watermark)."
+        )
+
+    def _filter(sects: list[DocumentSection]) -> list[DocumentSection]:
+        result: list[DocumentSection] = []
+        for s in sects:
+            if s.title.casefold().strip() in noise_titles:
+                result.extend(_filter(s.children))
+            else:
+                s.children = _filter(s.children)
+                result.append(s)
+        return result
+
+    return _filter(sections)
 
 
 def _is_toc_section(section: DocumentSection) -> bool:
