@@ -1021,7 +1021,10 @@ def inspect_layout(doc_id: str, full: bool) -> None:
 
         _inspect_docling_layout(DocumentOutline.from_dict(data["outline"]), full=full)
     else:
-        _inspect_textract_layout(data, full=full)
+        # Accept both the plain list `save_blocks` writes and a raw Textract
+        # API response dict (e.g. a file fetched independently of `rag ingest`).
+        blocks = data.get("Blocks", []) if isinstance(data, dict) else data
+        _inspect_textract_layout(blocks, full=full)
 
 
 # ---------------------------------------------------------------------------
