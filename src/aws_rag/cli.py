@@ -701,6 +701,73 @@ def open_doc(doc_id: str, page: int, db_path: Path | None, launch: bool) -> None
         console.print("\n[dim]Stopped.[/]")
 
 
+@cli.command("get-page")
+@click.argument("doc_id", type=str)
+@click.argument("page_arg", metavar="PAGE", type=int, required=False)
+@click.option("--page", "page_opt", type=int, default=None,
+              help="1-based page number (alternative to the positional PAGE argument).")
+@click.option("--output", "-o", "output_path", type=click.Path(path_type=Path), default=None,
+              help="Where to save the image. Defaults to a name derived from the "
+                   "doc_id and page in the current directory. If a directory, the "
+                   "default filename is placed inside it.")
+@click.option("--dpi", default=150, type=int, help="Render DPI.")
+@click.option("--db", "db_path", type=click.Path(path_type=Path), default=None)
+def get_page_cmd(
+    doc_id: str,
+    page_arg: int | None,
+    page_opt: int | None,
+    output_path: Path | None,
+    dpi: int,
+    db_path: Path | None,
+) -> None:
+    """Render a single PDF page to a PNG and save it to disk.
+
+    PAGE may be given positionally (``rag get-page <doc_id> 5``) or via
+    ``--page`` (``rag get-page <doc_id> --page 5``) — pass exactly one. This
+    is the CLI equivalent of the MCP `show_page` tool, minus the inline
+    chat rendering (see `rag open` for the interactive, scrollable viewer
+    the MCP `show_pdf` tool uses).
+    """
+    if page_arg is not None and page_opt is not None:
+        raise click.UsageError(
+            "Pass PAGE either positionally or via --page, not both."
+        )
+    page = page_arg if page_arg is not None else page_opt
+    if page is None:
+        raise click.UsageError("PAGE is required — pass it positionally or via --page.")
+
+    from pdf2image import convert_from_bytes
+
+    be = _backend_for(db_path)
+    doc_id = _backend_resolve(be, doc_id)
+
+    try:
+        pdf_bytes = be.get_pdf_bytes(doc_id)
+    except FileNotFoundError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    try:
+        images = convert_from_bytes(pdf_bytes, first_page=page, last_page=page, dpi=dpi)
+    except Exception as exc:
+        raise click.ClickException(f"Failed to render page {page}: {exc}") from exc
+    if not images:
+        short_id = doc_id[:SHORT_DOC_ID_LEN]
+        raise click.ClickException(f"Page {page} not found in document {short_id}.")
+
+    default_name = f"{doc_id[:SHORT_DOC_ID_LEN]}_p{page}.png"
+    if output_path is None:
+        dest = Path(default_name)
+    elif output_path.is_dir() or str(output_path).endswith(("/", os.sep)):
+        dest = output_path / default_name
+    else:
+        dest = output_path
+
+    images[0].save(dest, format="PNG")
+    console.print(f"[green]Saved[/] page {page} → [cyan]{dest}[/]")
+
+
 # ---------------------------------------------------------------------------
 # Delete
 # ---------------------------------------------------------------------------
