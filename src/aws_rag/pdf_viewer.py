@@ -1,7 +1,7 @@
 """Loopback HTTP server that serves source PDFs as a browser-based viewer.
 
 Used by both the MCP server (``show_pdf`` tool, for the agent) and the CLI
-(``rag open``, for the human) — file:// and direct S3 URLs are blocked by
+(``rag get doc --host``, for the human) — file:// and direct S3 URLs are blocked by
 most renderers, so we serve PDF bytes + a PDF.js viewer page over
 ``http://127.0.0.1:<port>`` instead. One server per process; the port is
 ephemeral and only reachable while that process is alive.
@@ -300,7 +300,7 @@ def ensure_pdf_server() -> int:
 
     Binds ``0.0.0.0`` (reachable from the LAN / over SSH, not just
     localhost) — this is a personal dev tool for reading your own ingested
-    PDFs, not a hardened public service. ``rag open`` prints every local IP
+    PDFs, not a hardened public service. ``rag get doc --host`` prints every local IP
     so you can pick the one reachable from your browser; the MCP `show_pdf`
     tool always hands the agent a ``127.0.0.1`` URL since Claude Desktop
     runs on the same machine.

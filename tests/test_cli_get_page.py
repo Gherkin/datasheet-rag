@@ -1,4 +1,4 @@
-"""CLI-level tests for `rag get-page` (the CLI equivalent of the MCP
+"""CLI-level tests for `rag get page` (the CLI equivalent of the MCP
 ``show_page`` tool — renders a single PDF page to a static PNG on disk).
 
 Exercises the command end-to-end: a real multi-page PDF (built with
@@ -92,7 +92,7 @@ def test_get_page_positional_arg(tmp_path, db_path, monkeypatch) -> None:
     workdir.mkdir()
     monkeypatch.chdir(workdir)
 
-    result = CliRunner().invoke(cli, ["get-page", DOC_ID, "2", "--db", str(db_path)])
+    result = CliRunner().invoke(cli, ["get", "page", DOC_ID, "2", "--db", str(db_path)])
     assert result.exit_code == 0, result.output
 
     expected_name = f"{DOC_ID[:SHORT_DOC_ID_LEN]}_p2.png"
@@ -109,7 +109,7 @@ def test_get_page_via_option_flag(tmp_path, db_path, monkeypatch) -> None:
     workdir.mkdir()
     monkeypatch.chdir(workdir)
 
-    result = CliRunner().invoke(cli, ["get-page", DOC_ID, "--page", "3", "--db", str(db_path)])
+    result = CliRunner().invoke(cli, ["get", "page", DOC_ID, "--page", "3", "--db", str(db_path)])
     assert result.exit_code == 0, result.output
 
     saved = workdir / f"{DOC_ID[:SHORT_DOC_ID_LEN]}_p3.png"
@@ -128,8 +128,8 @@ def test_get_page_positional_and_option_disagree_are_distinct_renders(
     workdir.mkdir()
     monkeypatch.chdir(workdir)
 
-    r1 = CliRunner().invoke(cli, ["get-page", DOC_ID, "1", "--db", str(db_path)])
-    r2 = CliRunner().invoke(cli, ["get-page", DOC_ID, "2", "--db", str(db_path)])
+    r1 = CliRunner().invoke(cli, ["get", "page", DOC_ID, "1", "--db", str(db_path)])
+    r2 = CliRunner().invoke(cli, ["get", "page", DOC_ID, "2", "--db", str(db_path)])
     assert r1.exit_code == 0, r1.output
     assert r2.exit_code == 0, r2.output
 
@@ -141,7 +141,7 @@ def test_get_page_positional_and_option_disagree_are_distinct_renders(
 def test_get_page_both_positional_and_option_rejected(tmp_path, db_path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     result = CliRunner().invoke(
-        cli, ["get-page", DOC_ID, "2", "--page", "2", "--db", str(db_path)]
+        cli, ["get", "page", DOC_ID, "2", "--page", "2", "--db", str(db_path)]
     )
     assert result.exit_code != 0
     assert "not both" in result.output
@@ -149,7 +149,7 @@ def test_get_page_both_positional_and_option_rejected(tmp_path, db_path, monkeyp
 
 def test_get_page_neither_positional_nor_option_rejected(tmp_path, db_path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
-    result = CliRunner().invoke(cli, ["get-page", DOC_ID, "--db", str(db_path)])
+    result = CliRunner().invoke(cli, ["get", "page", DOC_ID, "--db", str(db_path)])
     assert result.exit_code != 0
     assert "PAGE is required" in result.output
 
@@ -157,7 +157,7 @@ def test_get_page_neither_positional_nor_option_rejected(tmp_path, db_path, monk
 def test_get_page_explicit_output_path(tmp_path, db_path) -> None:
     dest = tmp_path / "custom-name.png"
     result = CliRunner().invoke(
-        cli, ["get-page", DOC_ID, "1", "--db", str(db_path), "-o", str(dest)]
+        cli, ["get", "page", DOC_ID, "1", "--db", str(db_path), "-o", str(dest)]
     )
     assert result.exit_code == 0, result.output
     assert dest.exists()
@@ -168,7 +168,7 @@ def test_get_page_output_directory(tmp_path, db_path) -> None:
     out_dir = tmp_path / "pages_out"
     out_dir.mkdir()
     result = CliRunner().invoke(
-        cli, ["get-page", DOC_ID, "1", "--db", str(db_path), "-o", str(out_dir) + "/"]
+        cli, ["get", "page", DOC_ID, "1", "--db", str(db_path), "-o", str(out_dir) + "/"]
     )
     assert result.exit_code == 0, result.output
     expected = out_dir / f"{DOC_ID[:SHORT_DOC_ID_LEN]}_p1.png"
@@ -178,7 +178,7 @@ def test_get_page_output_directory(tmp_path, db_path) -> None:
 def test_get_page_abbreviated_doc_id(tmp_path, db_path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     short_id = DOC_ID[:SHORT_DOC_ID_LEN]
-    result = CliRunner().invoke(cli, ["get-page", short_id, "1", "--db", str(db_path)])
+    result = CliRunner().invoke(cli, ["get", "page", short_id, "1", "--db", str(db_path)])
     assert result.exit_code == 0, result.output
     assert (tmp_path / f"{short_id}_p1.png").exists()
 
@@ -189,7 +189,7 @@ def test_get_page_custom_dpi_changes_output(tmp_path, db_path, monkeypatch) -> N
     monkeypatch.chdir(workdir)
 
     result = CliRunner().invoke(
-        cli, ["get-page", DOC_ID, "1", "--dpi", "72", "--db", str(db_path)]
+        cli, ["get", "page", DOC_ID, "1", "--dpi", "72", "--db", str(db_path)]
     )
     assert result.exit_code == 0, result.output
     saved = workdir / f"{DOC_ID[:SHORT_DOC_ID_LEN]}_p1.png"
@@ -204,7 +204,7 @@ def test_get_page_custom_dpi_changes_output(tmp_path, db_path, monkeypatch) -> N
 def test_get_page_out_of_range_errors(tmp_path, db_path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     result = CliRunner().invoke(
-        cli, ["get-page", DOC_ID, str(PAGE_COUNT + 10), "--db", str(db_path)]
+        cli, ["get", "page", DOC_ID, str(PAGE_COUNT + 10), "--db", str(db_path)]
     )
     assert result.exit_code != 0
     assert "not found" in result.output
@@ -212,13 +212,13 @@ def test_get_page_out_of_range_errors(tmp_path, db_path, monkeypatch) -> None:
 
 def test_get_page_missing_pdf_file_errors(tmp_path, db_path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
-    result = CliRunner().invoke(cli, ["get-page", DOC_NO_PDF, "1", "--db", str(db_path)])
+    result = CliRunner().invoke(cli, ["get", "page", DOC_NO_PDF, "1", "--db", str(db_path)])
     assert result.exit_code != 0
     assert "PDF not found" in result.output
 
 
 def test_get_page_unknown_doc_id_errors(tmp_path, db_path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
-    result = CliRunner().invoke(cli, ["get-page", "z" * 64, "1", "--db", str(db_path)])
+    result = CliRunner().invoke(cli, ["get", "page", "z" * 64, "1", "--db", str(db_path)])
     assert result.exit_code != 0
     assert "No ingested document matches" in result.output

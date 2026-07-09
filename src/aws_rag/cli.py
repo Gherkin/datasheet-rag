@@ -563,8 +563,28 @@ def stats_cmd(
 
 
 # ---------------------------------------------------------------------------
-# Open (loopback PDF.js viewer URL — same server the MCP show_pdf tool uses)
+# Get (doc / page / chunk / fig — fetch something and save/show it)
 # ---------------------------------------------------------------------------
+
+
+class AliasedGroup(click.Group):
+    """A click.Group that resolves a fixed set of long-form aliases to their
+    canonical short subcommand name (``document`` -> ``doc``, ``figure`` ->
+    ``fig``) before the normal command lookup runs.
+    """
+
+    _ALIASES = {"document": "doc", "figure": "fig"}
+
+    def get_command(self, ctx: click.Context, cmd_name: str) -> click.Command | None:
+        return super().get_command(ctx, self._ALIASES.get(cmd_name, cmd_name))
+
+
+@cli.group("get", cls=AliasedGroup)
+def get_group() -> None:
+    """Fetch a document, page, chunk, or figure and save/show it.
+
+    Subcommands: doc (or document), page, chunk, fig (or figure).
+    """
 
 
 def _local_ips() -> list[str]:
@@ -613,16 +633,79 @@ def _local_ips() -> list[str]:
     return ["127.0.0.1", *sorted(ips)]
 
 
-@cli.command("download")
+@get_group.command("doc")
 @click.argument("doc_id", type=str)
 @click.option("-o", "--output", "output_path", type=click.Path(path_type=Path), default=None,
-              help="Destination file or directory (default: ./<short_doc_id>.pdf).")
+              help="Destination file or directory (default: ./<short_doc_id>.pdf). "
+                   "Ignored with --host.")
+@click.option("--host", is_flag=True,
+              help="Serve the document instead of downloading it — starts the local "
+                   "PDF.js viewer and prints browser URLs (see below).")
+@click.option("--page", default=1, type=int, help="1-based page to open to (--host only).")
+@click.option("--launch/--no-launch", default=True,
+              help="With --host, open the 127.0.0.1 URL in your default browser "
+                   "(default on — skip this if you're connecting from a different "
+                   "machine). No effect without --host.")
 @click.option("--db", "db_path", type=click.Path(path_type=Path), default=None)
-def download_doc(doc_id: str, output_path: Path | None, db_path: Path | None) -> None:
-    """Save a document's source PDF to disk (from the server / S3, or the
-    local scan fallback)."""
+def get_doc_cmd(
+    doc_id: str,
+    output_path: Path | None,
+    host: bool,
+    page: int,
+    launch: bool,
+    db_path: Path | None,
+) -> None:
+    """Fetch a document's source PDF (from the server / S3, or the local scan
+    fallback) — save it to disk, or serve it with --host.
+
+    By default, saves the PDF to disk. With --host, instead starts the
+    PDF.js viewer server — the same one the MCP `show_pdf` tool uses, bound
+    to every interface — and prints one URL per local IP address (including
+    127.0.0.1) so you can pick whichever one your browser can reach:
+    localhost if you're on the machine directly, the LAN/Tailscale/SSH
+    address if you're remote. The server runs in this process, so the link
+    only works while this command stays alive — Ctrl+C to stop serving.
+    """
     be = _backend_for(db_path)
     doc_id = _backend_resolve(be, doc_id)
+
+    if host:
+        import time
+        import webbrowser
+
+        from aws_rag import pdf_viewer
+
+        try:
+            # Fetch via the backend (HTTP in remote mode) and prime the
+            # viewer cache so the loopback server can serve it locally.
+            pdf_viewer.prime_pdf_cache(doc_id, be.get_pdf_bytes(doc_id))
+        except FileNotFoundError as exc:
+            raise click.ClickException(str(exc)) from exc
+        except Exception as exc:
+            raise click.ClickException(str(exc)) from exc
+
+        port = pdf_viewer.ensure_pdf_server()
+        local_url = f"http://127.0.0.1:{port}/viewer/{doc_id}#page={page}"
+
+        console.print("[green]PDF viewer running — pick whichever URL your browser can reach:[/]")
+        for ip in _local_ips():
+            console.print(
+                f"  http://{ip}:{port}/viewer/{doc_id}#page={page}", soft_wrap=True
+            )
+
+        if launch:
+            webbrowser.open(local_url)
+            console.print("[dim]Opened the 127.0.0.1 link in your default browser "
+                          "(use --no-launch to skip this if you're connecting remotely).[/]")
+        console.print("[dim]Serving from this process — keep it running to keep the link alive. Ctrl+C to stop.[/]")
+
+        try:
+            while True:
+                time.sleep(3600)
+        except KeyboardInterrupt:
+            console.print("\n[dim]Stopped.[/]")
+        return
+
     title = be.get_doc_titles().get(doc_id)
 
     try:
@@ -645,63 +728,7 @@ def download_doc(doc_id: str, output_path: Path | None, db_path: Path | None) ->
     console.print(f"[green]Saved[/] {len(data):,} bytes → [cyan]{dest}[/]")
 
 
-@cli.command("open")
-@click.argument("doc_id", type=str)
-@click.option("--page", default=1, type=int, help="1-based page to open to.")
-@click.option("--db", "db_path", type=click.Path(path_type=Path), default=None)
-@click.option("--launch/--no-launch", default=True,
-              help="Open the 127.0.0.1 URL in your default browser (default on — "
-                   "skip this if you're connecting from a different machine).")
-def open_doc(doc_id: str, page: int, db_path: Path | None, launch: bool) -> None:
-    """Print browser URLs to read a document's source PDF.
-
-    Starts the PDF.js viewer server — the same one the MCP `show_pdf` tool
-    uses, bound to every interface — and prints one URL per local IP address
-    (including 127.0.0.1) so you can pick whichever one your browser can
-    reach: localhost if you're on the machine directly, the LAN/Tailscale/SSH
-    address if you're remote. The server runs in this process, so the link
-    only works while this command stays alive — Ctrl+C to stop serving.
-    """
-    import time
-    import webbrowser
-
-    from aws_rag import pdf_viewer
-
-    be = _backend_for(db_path)
-    doc_id = _backend_resolve(be, doc_id)
-
-    try:
-        # Fetch via the backend (HTTP in remote mode) and prime the viewer
-        # cache so the loopback server can serve it locally.
-        pdf_viewer.prime_pdf_cache(doc_id, be.get_pdf_bytes(doc_id))
-    except FileNotFoundError as exc:
-        raise click.ClickException(str(exc)) from exc
-    except Exception as exc:
-        raise click.ClickException(str(exc)) from exc
-
-    port = pdf_viewer.ensure_pdf_server()
-    local_url = f"http://127.0.0.1:{port}/viewer/{doc_id}#page={page}"
-
-    console.print("[green]PDF viewer running — pick whichever URL your browser can reach:[/]")
-    for ip in _local_ips():
-        console.print(
-            f"  http://{ip}:{port}/viewer/{doc_id}#page={page}", soft_wrap=True
-        )
-
-    if launch:
-        webbrowser.open(local_url)
-        console.print("[dim]Opened the 127.0.0.1 link in your default browser "
-                      "(use --no-launch to skip this if you're connecting remotely).[/]")
-    console.print("[dim]Serving from this process — keep it running to keep the link alive. Ctrl+C to stop.[/]")
-
-    try:
-        while True:
-            time.sleep(3600)
-    except KeyboardInterrupt:
-        console.print("\n[dim]Stopped.[/]")
-
-
-@cli.command("get-page")
+@get_group.command("page")
 @click.argument("doc_id", type=str)
 @click.argument("page_arg", metavar="PAGE", type=int, required=False)
 @click.option("--page", "page_opt", type=int, default=None,
@@ -722,11 +749,11 @@ def get_page_cmd(
 ) -> None:
     """Render a single PDF page to a PNG and save it to disk.
 
-    PAGE may be given positionally (``rag get-page <doc_id> 5``) or via
-    ``--page`` (``rag get-page <doc_id> --page 5``) — pass exactly one. This
+    PAGE may be given positionally (``rag get page <doc_id> 5``) or via
+    ``--page`` (``rag get page <doc_id> --page 5``) — pass exactly one. This
     is the CLI equivalent of the MCP `show_page` tool, minus the inline
-    chat rendering (see `rag open` for the interactive, scrollable viewer
-    the MCP `show_pdf` tool uses).
+    chat rendering (see `rag get doc --host` for the interactive, scrollable
+    viewer the MCP `show_pdf` tool uses).
     """
     if page_arg is not None and page_opt is not None:
         raise click.UsageError(
@@ -1362,7 +1389,7 @@ def search(
         )
 
     console.print(table)
-    console.print("[dim]Fetch a full chunk with: rag get-chunk <chunk_id>[/]")
+    console.print("[dim]Fetch a full chunk with: rag get chunk <chunk_id>[/]")
 
 
 def _print_chunk_detail(chunk, *, show_context: bool = False) -> None:
@@ -1395,7 +1422,7 @@ def _print_chunk_detail(chunk, *, show_context: bool = False) -> None:
     console.print(chunk.context_text if show_context and chunk.context_text else chunk.text)
 
 
-@cli.command("get-chunk")
+@get_group.command("chunk")
 @click.argument("chunk_id", type=str)
 @click.option("--neighbors/--no-neighbors", default=False,
               help="Also print the parent/prev/next chunks (mirrors the MCP "
@@ -1509,7 +1536,7 @@ def list_figures_cmd(
     console.print(table)
 
 
-@cli.command("get-figure")
+@get_group.command("fig")
 @click.argument("chunk_id", type=str)
 @click.option("--output", "-o", "output_path", type=click.Path(path_type=Path), default=None,
               help="Where to save the image. Defaults to a name derived from the "

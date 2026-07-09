@@ -1,6 +1,6 @@
-"""CLI-level tests for chunk_id visibility and `rag get-chunk` (GH issue #5).
+"""CLI-level tests for chunk_id visibility and `rag get chunk` (GH issue #5).
 
-Exercises `rag search` and `rag get-chunk` end-to-end against a real
+Exercises `rag search` and `rag get chunk` end-to-end against a real
 on-disk SQLite store, the same way ``test_cli_scoping.py`` does — inserting
 chunks directly via ``insert_chunks`` and driving the CLI through Click's
 ``CliRunner``.
@@ -107,12 +107,12 @@ def test_search_output_includes_short_chunk_id(db_path: Path) -> None:
     expected_short_id = f"{DOC_A[:SHORT_DOC_ID_LEN]}:L2:2"
     assert expected_short_id in result.output
     assert "chunk_id" in result.output
-    assert "rag get-chunk" in result.output
+    assert "rag get chunk" in result.output
 
 
 def test_get_chunk_by_full_id(db_path: Path) -> None:
     full_id = f"{DOC_A}:L2:2"
-    result = _run(db_path, "get-chunk", full_id)
+    result = _run(db_path, "get", "chunk", full_id)
     assert result.exit_code == 0, result.output
     assert full_id in result.output
     assert "gizmo derates above 85C" in result.output
@@ -121,20 +121,20 @@ def test_get_chunk_by_full_id(db_path: Path) -> None:
 
 def test_get_chunk_by_abbreviated_doc_id(db_path: Path) -> None:
     short_id = f"{DOC_A[:SHORT_DOC_ID_LEN]}:L2:2"
-    result = _run(db_path, "get-chunk", short_id)
+    result = _run(db_path, "get", "chunk", short_id)
     assert result.exit_code == 0, result.output
     assert f"{DOC_A}:L2:2" in result.output
     assert "gizmo derates above 85C" in result.output
 
 
 def test_get_chunk_not_found(db_path: Path) -> None:
-    result = _run(db_path, "get-chunk", f"{DOC_A}:L2:999")
+    result = _run(db_path, "get", "chunk", f"{DOC_A}:L2:999")
     assert result.exit_code != 0
     assert "No chunk found" in result.output
 
 
 def test_get_chunk_invalid_format_rejected(db_path: Path) -> None:
-    result = _run(db_path, "get-chunk", "not-a-chunk-id")
+    result = _run(db_path, "get", "chunk", "not-a-chunk-id")
     assert result.exit_code != 0
     assert "doesn't look like a chunk ID" in result.output
 
@@ -144,14 +144,14 @@ def test_get_chunk_ambiguous_doc_prefix(db_path: Path) -> None:
     # DOC_B) isn't ambiguous; force an ambiguous prefix by using one that
     # matches both ('a' would only match DOC_A here) — instead assert the
     # unresolvable-prefix path via a prefix that matches neither doc.
-    result = _run(db_path, "get-chunk", "zzzzzzzzzzzz:L2:2")
+    result = _run(db_path, "get", "chunk", "zzzzzzzzzzzz:L2:2")
     assert result.exit_code != 0
     assert "No ingested document matches" in result.output
 
 
 def test_get_chunk_with_neighbors(db_path: Path) -> None:
     full_id = f"{DOC_A}:L2:2"
-    result = _run(db_path, "get-chunk", full_id, "--neighbors")
+    result = _run(db_path, "get", "chunk", full_id, "--neighbors")
     assert result.exit_code == 0, result.output
     assert "Widget operates below 40C ambient." in result.output
     assert "Cooling fan engages at 70C." in result.output
@@ -174,6 +174,6 @@ def test_list_figures_chunk_id_round_trips_through_get_chunk(db_path: Path) -> N
     short_id = f"{DOC_A[:SHORT_DOC_ID_LEN]}:L2:4"
     assert short_id in listed.output
 
-    fetched = _run(db_path, "get-chunk", short_id)
+    fetched = _run(db_path, "get", "chunk", short_id)
     assert fetched.exit_code == 0, fetched.output
     assert "Fig 1: Thermal derating curve" in fetched.output

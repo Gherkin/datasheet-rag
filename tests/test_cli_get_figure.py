@@ -1,4 +1,4 @@
-"""CLI-level tests for `rag get-figure` (the CLI equivalent of the MCP
+"""CLI-level tests for `rag get fig` (the CLI equivalent of the MCP
 ``get_figure`` tool — GH follow-up to issue #5's chunk-id fix).
 
 Exercises the command end-to-end against a real on-disk SQLite store with a
@@ -113,7 +113,7 @@ def test_get_figure_saves_exact_bytes_by_full_id(
     workdir.mkdir()
     monkeypatch.chdir(workdir)
 
-    result = CliRunner().invoke(cli, ["get-figure", full_id, "--db", str(db_path)])
+    result = CliRunner().invoke(cli, ["get", "fig", full_id, "--db", str(db_path)])
     assert result.exit_code == 0, result.output
 
     expected_name = f"{DOC_A[:SHORT_DOC_ID_LEN]}_L2_0.png"
@@ -135,7 +135,7 @@ def test_get_figure_by_abbreviated_doc_id(
     workdir.mkdir()
     monkeypatch.chdir(workdir)
 
-    result = CliRunner().invoke(cli, ["get-figure", short_id, "--db", str(db_path)])
+    result = CliRunner().invoke(cli, ["get", "fig", short_id, "--db", str(db_path)])
     assert result.exit_code == 0, result.output
     saved = workdir / f"{DOC_A[:SHORT_DOC_ID_LEN]}_L2_0.png"
     assert saved.exists()
@@ -146,7 +146,7 @@ def test_get_figure_explicit_output_path(tmp_path: Path, db_path: Path) -> None:
     full_id = f"{DOC_A}:L2:0"
     dest = tmp_path / "custom-name.png"
     result = CliRunner().invoke(
-        cli, ["get-figure", full_id, "--db", str(db_path), "-o", str(dest)]
+        cli, ["get", "fig", full_id, "--db", str(db_path), "-o", str(dest)]
     )
     assert result.exit_code == 0, result.output
     assert dest.exists()
@@ -158,7 +158,7 @@ def test_get_figure_output_directory(tmp_path: Path, db_path: Path) -> None:
     out_dir = tmp_path / "figs_out"
     out_dir.mkdir()
     result = CliRunner().invoke(
-        cli, ["get-figure", full_id, "--db", str(db_path), "-o", str(out_dir) + "/"]
+        cli, ["get", "fig", full_id, "--db", str(db_path), "-o", str(out_dir) + "/"]
     )
     assert result.exit_code == 0, result.output
     expected = out_dir / f"{DOC_A[:SHORT_DOC_ID_LEN]}_L2_0.png"
@@ -171,7 +171,7 @@ def test_get_figure_rejects_non_figure_chunk(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     full_id = f"{DOC_A}:L2:1"
-    result = CliRunner().invoke(cli, ["get-figure", full_id, "--db", str(db_path)])
+    result = CliRunner().invoke(cli, ["get", "fig", full_id, "--db", str(db_path)])
     assert result.exit_code != 0
     assert "not a figure" in result.output
 
@@ -181,7 +181,7 @@ def test_get_figure_missing_image_source(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     full_id = f"{DOC_A}:L2:2"
-    result = CliRunner().invoke(cli, ["get-figure", full_id, "--db", str(db_path)])
+    result = CliRunner().invoke(cli, ["get", "fig", full_id, "--db", str(db_path)])
     assert result.exit_code != 0
     assert "no usable figure source" in result.output
 
@@ -190,7 +190,7 @@ def test_get_figure_unknown_chunk_id(
     tmp_path: Path, db_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    result = CliRunner().invoke(cli, ["get-figure", f"{DOC_A}:L2:999", "--db", str(db_path)])
+    result = CliRunner().invoke(cli, ["get", "fig", f"{DOC_A}:L2:999", "--db", str(db_path)])
     assert result.exit_code != 0
     assert "unknown chunk_id" in result.output
 
@@ -199,6 +199,6 @@ def test_get_figure_invalid_chunk_id_format(
     tmp_path: Path, db_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    result = CliRunner().invoke(cli, ["get-figure", "not-a-chunk-id", "--db", str(db_path)])
+    result = CliRunner().invoke(cli, ["get", "fig", "not-a-chunk-id", "--db", str(db_path)])
     assert result.exit_code != 0
     assert "doesn't look like a chunk ID" in result.output
