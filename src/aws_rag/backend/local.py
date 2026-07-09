@@ -34,6 +34,7 @@ from aws_rag.store import (
     connect,
     count_chunks,
     delete_doc,
+    delete_metadata,
     get_chunk,
     get_doc_titles,
     get_ingested_docs,
@@ -532,5 +533,13 @@ class LocalBackend(RagBackend):
         )
 
     def delete_doc(self, doc_id: str) -> int:
+        from aws_rag.delete import purge_local_files, purge_s3_objects
+
         with self._write_lock:
-            return delete_doc(self._get_conn(), doc_id)
+            conn = self._get_conn()
+            n = delete_doc(conn, doc_id)
+            delete_metadata(conn, doc_id)
+
+        purge_local_files(doc_id)
+        purge_s3_objects(doc_id)
+        return n

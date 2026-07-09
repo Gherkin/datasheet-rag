@@ -628,6 +628,57 @@ def open_doc(doc_id: str, page: int, db_path: Path | None, launch: bool) -> None
 
 
 # ---------------------------------------------------------------------------
+# Delete
+# ---------------------------------------------------------------------------
+
+
+@cli.command("delete")
+@click.argument("doc_id", type=str)
+@click.option("--db", "db_path", type=click.Path(path_type=Path), default=None)
+@click.option("--dry-run", is_flag=True, help="Show what would be deleted without deleting anything.")
+@click.option("-y", "--yes", "assume_yes", is_flag=True, help="Skip the confirmation prompt.")
+def delete_doc_cmd(doc_id: str, db_path: Path | None, dry_run: bool, assume_yes: bool) -> None:
+    """Permanently delete a document.
+
+    Removes its chunks, vectors and metadata from the store, its local PDF
+    and figure-crop files, cached pipeline artifacts, and (if S3 is
+    configured) the matching S3 objects. There is no undo — the document
+    must be re-ingested from the source PDF to get it back.
+    """
+    be = _backend_for(db_path)
+    doc_id = _backend_resolve(be, doc_id)
+    title = be.get_doc_titles().get(doc_id)
+    chunk_count = be.count_chunks(doc_id=doc_id)
+    label = f"{title!r} ({doc_id[:SHORT_DOC_ID_LEN]})" if title else doc_id[:SHORT_DOC_ID_LEN]
+
+    if dry_run:
+        console.print(f"[yellow]--dry-run:[/] would delete {chunk_count} chunk(s) for {label}")
+        console.print(
+            "  Also removes: local PDF, figure-crop directory, cached pipeline "
+            "artifacts, and any S3 objects under "
+            f"[cyan]{get_settings().s3_pdf_prefix}{doc_id}/[/] and "
+            f"[cyan]figures/{doc_id}/[/] (if S3 is configured)."
+        )
+        return
+
+    if not assume_yes:
+        if not click.confirm(
+            f"Delete {chunk_count} chunk(s) for {label}? This also removes local "
+            "PDF/figure files and any S3 content, and cannot be undone.",
+            default=False,
+        ):
+            console.print("[yellow]Aborted.[/]")
+            return
+
+    try:
+        deleted = be.delete_doc(doc_id)
+    except Exception as exc:  # RagServerError, etc.
+        raise click.ClickException(str(exc)) from exc
+
+    console.print(f"[green]Deleted[/] {deleted} chunk(s) for {label}.")
+
+
+# ---------------------------------------------------------------------------
 # Extract text (from saved Textract JSON)
 # ---------------------------------------------------------------------------
 

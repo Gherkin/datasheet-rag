@@ -27,6 +27,7 @@ from aws_rag.models.chunk import (
 )
 from aws_rag.store.metadata import (
     apply_metadata_to_chunks,
+    delete_metadata,
     get_metadata,
     list_docs,
     set_metadata,
@@ -299,6 +300,20 @@ def test_delete_doc_cascades(conn: sqlite3.Connection) -> None:
     # FTS5 must no longer return doc1 results.
     kw_hits = keyword_search(conn, "clock stretching", k=10)
     assert all(r.chunk.doc_id != "doc1" for r in kw_hits)
+
+
+def test_delete_metadata(conn: sqlite3.Connection) -> None:
+    # doc_metadata is a sidecar (not FK'd to chunks), so it needs its own
+    # delete — this covers the gap `delete_doc`'s cascade doesn't reach.
+    set_metadata(conn, "doc1", mpn="M1", manufacturer="Acme")
+    assert get_metadata(conn, "doc1") is not None
+
+    deleted = delete_metadata(conn, "doc1")
+    assert deleted == 1
+    assert get_metadata(conn, "doc1") is None
+
+    # No-op (returns 0) when there's no sidecar row for that doc_id.
+    assert delete_metadata(conn, "doc1") == 0
 
 
 # ---------------------------------------------------------------------------

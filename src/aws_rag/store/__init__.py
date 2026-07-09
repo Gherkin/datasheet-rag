@@ -28,6 +28,7 @@ from aws_rag.store.control import (
 from aws_rag.store.metadata import (
     DocMetadata,
     apply_metadata_to_chunks,
+    delete_metadata,
     get_metadata,
     list_docs,
     set_metadata,
@@ -67,6 +68,7 @@ __all__ = [
     "count_chunks",
     "create_api_key",
     "delete_doc",
+    "delete_metadata",
     "get_chunk",
     "get_doc_titles",
     "get_ingested_docs",

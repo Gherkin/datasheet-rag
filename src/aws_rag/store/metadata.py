@@ -172,6 +172,22 @@ def set_metadata(
     return refreshed
 
 
+def delete_metadata(conn: sqlite3.Connection, doc_id: str) -> int:
+    """Delete the sidecar row for ``doc_id``, if any.
+
+    Not covered by the ``chunks`` cascade (`doc_metadata` is intentionally
+    not FK'd to `chunks` — see module docstring), so callers that fully
+    delete a document must call this alongside :func:`aws_rag.store.sqlite.delete_doc`.
+
+    Returns the number of rows deleted (0 or 1).
+    """
+    cur = conn.cursor()
+    cur.execute("DELETE FROM doc_metadata WHERE doc_id = ?", (doc_id,))
+    deleted = cur.rowcount
+    conn.commit()
+    return int(deleted)
+
+
 def list_docs(
     conn: sqlite3.Connection,
     *,

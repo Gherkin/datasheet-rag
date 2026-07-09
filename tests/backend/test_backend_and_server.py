@@ -125,6 +125,54 @@ def test_local_ingest_rewrites_uploaded_figure_path(
     assert fig.image_bytes() == png
 
 
+def test_local_delete_doc_purges_local_files(
+    backend: LocalBackend, tmp_path, monkeypatch
+) -> None:
+    from aws_rag.config import get_settings
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "pdf_dir", tmp_path / "pdfs")
+    monkeypatch.setattr(settings, "figures_dir", tmp_path / "figs")
+    monkeypatch.setattr(settings, "output_dir", tmp_path / "cache")
+    monkeypatch.setattr(settings, "rag_home", tmp_path)
+    for d in (settings.pdf_dir, settings.figures_dir, settings.output_dir):
+        d.mkdir(parents=True, exist_ok=True)
+
+    did = "c" * 64
+    g = _graph_with_figure(did)
+    png = b"\x89PNG\r\n\x1a\nfake"
+    backend.ingest_chunk_graph(
+        g,
+        figures={f"{did}:L2:0": (png, "png")},
+        metadata=MetadataPatch(mpn="M1"),
+        embed=False,
+    )
+
+    # Artifacts a real ingest run would also leave behind: the source PDF
+    # and pipeline caches, both keyed by doc_id alone (no DB lookup needed).
+    pdf_path = settings.pdf_dir / f"{did}.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4 fake")
+    cache_path = settings.output_dir / f"{did}_chunks.json"
+    cache_path.write_text("{}")
+    render_cache_dir = settings.rag_home / "page_render_cache" / did
+    render_cache_dir.mkdir(parents=True)
+    (render_cache_dir / "page-1.png").write_bytes(b"x")
+    figures_dir = settings.figures_dir / did
+    assert figures_dir.is_dir()  # written by ingest_chunk_graph above
+
+    assert backend.get_metadata(did) is not None
+
+    deleted = backend.delete_doc(did)
+
+    assert deleted == 2
+    assert backend.count_chunks(doc_id=did) == 0
+    assert backend.get_metadata(did) is None
+    assert not pdf_path.exists()
+    assert not figures_dir.exists()
+    assert not cache_path.exists()
+    assert not render_cache_dir.exists()
+
+
 # ---- FastAPI server via TestClient --------------------------------------
 
 
