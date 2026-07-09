@@ -1395,6 +1395,58 @@ def list_figures_cmd(
     console.print(table)
 
 
+@cli.command("get-figure")
+@click.argument("chunk_id", type=str)
+@click.option("--output", "-o", "output_path", type=click.Path(path_type=Path), default=None,
+              help="Where to save the image. Defaults to a name derived from the "
+                   "chunk_id in the current directory. If a directory, the default "
+                   "filename is placed inside it.")
+@click.option("--db", "db_path", type=click.Path(path_type=Path), default=None)
+def get_figure_cmd(chunk_id: str, output_path: Path | None, db_path: Path | None) -> None:
+    """Fetch a figure chunk's image and save it to disk.
+
+    CHUNK_ID accepts the full id or an abbreviated form using a doc_id
+    prefix, e.g. ``ab12cd34ef56:L2:143`` as printed by `rag list-figures` /
+    `rag search`. This is the CLI equivalent of the MCP `get_figure` tool.
+    """
+    from aws_rag.backend import RagServerError
+
+    be = _backend_for(db_path)
+    full_id = _resolve_chunk_id(be, chunk_id)
+
+    try:
+        fig = be.get_figure_bytes(full_id)
+    except RagServerError as e:
+        raise _friendly_server_error(e) from e
+    except (ValueError, FileNotFoundError) as e:
+        raise click.ClickException(str(e)) from e
+
+    default_name = _short_chunk_id(fig.chunk_id, fig.doc_id).replace(":", "_") + f".{fig.format}"
+    if output_path is None:
+        dest = Path(default_name)
+    elif output_path.is_dir() or str(output_path).endswith(("/", os.sep)):
+        dest = output_path / default_name
+    else:
+        dest = output_path
+
+    data = fig.image_bytes()
+    dest.write_bytes(data)
+    console.print(f"[green]Saved[/] {len(data):,} bytes → [cyan]{dest}[/]")
+
+    if fig.caption:
+        console.print(f"  caption: {fig.caption}")
+    if fig.description:
+        console.print(f"  description: {fig.description}")
+
+    citation = fig.citation
+    loc_bits = [f"doc={citation.doc_id[:SHORT_DOC_ID_LEN]}"]
+    if citation.page:
+        loc_bits.append(f"page={citation.page}")
+    if citation.section:
+        loc_bits.append(f"section={citation.section}")
+    console.print(f"  [dim]{' '.join(loc_bits)}[/]")
+
+
 # ---------------------------------------------------------------------------
 # describe-figures (Bedrock Claude vision → figure_description)
 # ---------------------------------------------------------------------------
