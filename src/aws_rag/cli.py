@@ -515,6 +515,53 @@ def list_docs(db_path: Path | None, project_id: str | None, is_global: bool, sho
     console.print(table)
 
 
+@cli.command("stats")
+@click.option("--project-id", default=None,
+              help="Restrict to a project (default: scoped by .rag.toml if present).")
+@click.option("--global", "-g", "is_global", is_flag=True,
+              help="Show stats across every project, ignoring any .rag.toml scoping.")
+@click.option("--doc-id", default=None, help="Restrict to a single document.")
+@click.option("--db", "db_path", type=click.Path(path_type=Path), default=None)
+def stats_cmd(
+    project_id: str | None,
+    is_global: bool,
+    doc_id: str | None,
+    db_path: Path | None,
+) -> None:
+    """Show chunk counts — total and by zoom level — for a scope.
+
+    A quick sanity check on corpus size (e.g. after ingesting: does the
+    chunk count look right?). Same rollup as the MCP `stats` tool.
+    """
+    from aws_rag.backend import RagServerError
+    from aws_rag.project_config import resolve_cli_project_id
+
+    project_id = resolve_cli_project_id(project_id, is_global=is_global)
+    be = _backend_for(db_path)
+    if doc_id:
+        doc_id = _backend_resolve(be, doc_id)
+
+    try:
+        result = be.stats(project_id=project_id, doc_id=doc_id)
+    except RagServerError as e:
+        raise _friendly_server_error(e) from e
+
+    scope_bits = []
+    if result.project_id:
+        scope_bits.append(f"project={result.project_id}")
+    if result.doc_id:
+        scope_bits.append(f"doc={result.doc_id[:SHORT_DOC_ID_LEN]}")
+    scope = ", ".join(scope_bits) if scope_bits else "all projects"
+
+    table = Table(title=f"Chunk stats — {scope}")
+    table.add_column("level")
+    table.add_column("count", justify="right")
+    for level_name in ("MACRO", "MESO", "MICRO"):
+        table.add_row(level_name, str(result.by_level.get(level_name, 0)))
+    table.add_row("TOTAL", str(result.total_chunks), style="bold")
+    console.print(table)
+
+
 # ---------------------------------------------------------------------------
 # Open (loopback PDF.js viewer URL — same server the MCP show_pdf tool uses)
 # ---------------------------------------------------------------------------
