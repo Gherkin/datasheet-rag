@@ -163,6 +163,33 @@ def _backend_resolve(be, doc_id: str) -> str:
         raise _friendly_server_error(e) from e
 
 
+def _short_chunk_id(chunk_id: str, doc_id: str) -> str:
+    """Abbreviate a chunk_id's doc_id portion the same way doc_ids are
+    displayed elsewhere (`ab12cd34ef56:L2:143`), keeping the
+    `:L{level}:{index}` suffix intact so it round-trips through
+    `_resolve_chunk_id`.
+    """
+    return doc_id[:SHORT_DOC_ID_LEN] + chunk_id[len(doc_id):]
+
+
+def _resolve_chunk_id(be, chunk_id: str) -> str:
+    """Resolve a chunk_id whose doc_id portion may be abbreviated (as
+    printed by `rag search` / `rag list-figures`) to its full form.
+
+    Chunk IDs are `{doc_id}:L{level}:{index}`; the doc_id may be given in
+    full or as an unambiguous prefix, resolved the same way `doc_id`
+    arguments are elsewhere in this CLI.
+    """
+    if ":" not in chunk_id:
+        raise click.ClickException(
+            f"{chunk_id!r} doesn't look like a chunk ID — expected "
+            "'<doc_id>:L<level>:<index>' (see `rag search` output)."
+        )
+    doc_part, suffix = chunk_id.split(":", 1)
+    full_doc_id = _backend_resolve(be, doc_part)
+    return f"{full_doc_id}:{suffix}"
+
+
 _SLUG_RE = re.compile(r"[^a-zA-Z0-9]+")
 
 
@@ -1204,7 +1231,7 @@ def search(
     table.add_column("#", justify="right", style="dim")
     table.add_column("score", justify="right", style="cyan")
     table.add_column("level", style="magenta")
-    table.add_column("doc", style="dim")
+    table.add_column("chunk_id", style="cyan", no_wrap=True)
     table.add_column("section")
     table.add_column("preview")
 
@@ -1215,12 +1242,96 @@ def search(
             str(i),
             f"{r.score:.4f}",
             r.chunk.level.name,
-            r.chunk.doc_id[:SHORT_DOC_ID_LEN],
+            _short_chunk_id(r.chunk.id, r.chunk.doc_id),
             (r.chunk.metadata.section_title or r.chunk.metadata.chapter_title or "")[:40],
             preview,
         )
 
     console.print(table)
+    console.print("[dim]Fetch a full chunk with: rag get-chunk <chunk_id>[/]")
+
+
+def _print_chunk_detail(chunk, *, show_context: bool = False) -> None:
+    """Render one chunk's metadata + text — the CLI counterpart of the MCP
+    server's ``_shape_chunk``."""
+    from aws_rag.models.chunk import LayoutType
+
+    pages = chunk.metadata.page_numbers
+    page = (str(pages[0]) if len(pages) == 1
+            else f"{pages[0]}-{pages[-1]}" if pages else "—")
+
+    console.print(f"[bold cyan]{chunk.id}[/]")
+    console.print(f"  level:   {chunk.level.name}")
+    console.print(f"  page:    {page}")
+    section = chunk.metadata.section_title or chunk.metadata.chapter_title or "—"
+    console.print(f"  section: {section}")
+    console.print(f"  parent:  {chunk.parent_id or '—'}")
+    console.print(f"  prev:    {chunk.prev_id or '—'}")
+    console.print(f"  next:    {chunk.next_id or '—'}")
+
+    if chunk.metadata.layout_type == LayoutType.FIGURE:
+        if chunk.figure_caption:
+            console.print(f"  caption: {chunk.figure_caption}")
+        if chunk.figure_description:
+            console.print(f"  description: {chunk.figure_description}")
+        if not (chunk.figure_image_path or chunk.figure_s3_key):
+            console.print("  [yellow]no figure image available[/]")
+
+    console.print()
+    console.print(chunk.context_text if show_context and chunk.context_text else chunk.text)
+
+
+@cli.command("get-chunk")
+@click.argument("chunk_id", type=str)
+@click.option("--neighbors/--no-neighbors", default=False,
+              help="Also print the parent/prev/next chunks (mirrors the MCP "
+                   "get_chunk tool's include_neighbors option).")
+@click.option("--show-context/--no-show-context", default=False,
+              help="Print context_text (embedding-ready blob) instead of raw text.")
+@click.option("--db", "db_path", type=click.Path(path_type=Path), default=None)
+def get_chunk_cmd(
+    chunk_id: str,
+    neighbors: bool,
+    show_context: bool,
+    db_path: Path | None,
+) -> None:
+    """Fetch one chunk by ID — the CLI equivalent of the MCP `get_chunk` tool.
+
+    CHUNK_ID accepts the full id or an abbreviated form using a doc_id
+    prefix, e.g. ``ab12cd34ef56:L2:143`` as printed by `rag search` /
+    `rag list-figures`.
+    """
+    from aws_rag.backend import RagServerError
+
+    be = _backend_for(db_path)
+    full_id = _resolve_chunk_id(be, chunk_id)
+
+    try:
+        chunk = be.get_chunk(full_id)
+    except RagServerError as e:
+        raise _friendly_server_error(e) from e
+
+    if chunk is None:
+        raise click.ClickException(f"No chunk found with id {full_id!r}.")
+
+    _print_chunk_detail(chunk, show_context=show_context)
+
+    if neighbors:
+        links = (("parent", chunk.parent_id), ("prev", chunk.prev_id), ("next", chunk.next_id))
+        for label, nid in links:
+            console.print()
+            console.rule(label)
+            if not nid:
+                console.print("[dim]— none —[/]")
+                continue
+            try:
+                nchunk = be.get_chunk(nid)
+            except RagServerError as e:
+                raise _friendly_server_error(e) from e
+            if nchunk is None:
+                console.print(f"[dim]{nid} (not found)[/]")
+                continue
+            _print_chunk_detail(nchunk, show_context=show_context)
 
 
 # ---------------------------------------------------------------------------
@@ -1261,8 +1372,7 @@ def list_figures_cmd(
         return
 
     table = Table(title=f"Figure chunks ({len(figs)})")
-    table.add_column("chunk_id", style="cyan")
-    table.add_column("doc")
+    table.add_column("chunk_id", style="cyan", no_wrap=True)
     table.add_column("page")
     table.add_column("section")
     table.add_column("caption")
@@ -1275,8 +1385,7 @@ def list_figures_cmd(
                 else f"{pages[0]}-{pages[-1]}" if pages else "")
         src = "local" if c.figure_image_path else ("s3" if c.figure_s3_key else "—")
         table.add_row(
-            c.id[-14:],
-            c.doc_id[:SHORT_DOC_ID_LEN],
+            _short_chunk_id(c.id, c.doc_id),
             page,
             (c.metadata.section_title or "")[:30],
             (c.figure_caption or "")[:40],
