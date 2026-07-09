@@ -1702,7 +1702,13 @@ def _print_cost_table(cost: CostEstimate, heading: str = "Estimated AWS cost") -
 @click.option("--subsystem", default=None, help="e.g. power, rf, mcu.")
 @click.option("--doc-type", default=None,
               help="datasheet | reference-manual | errata | app-note | …")
-@click.option("--tag", "tags", multiple=True, help="Repeatable --tag flag.")
+@click.option("--tag", "tags", multiple=True,
+              help="Free-text tag for this document, e.g. --tag mcu --tag "
+                   "reviewed (repeatable). Sets the sidecar's whole tag list "
+                   "for this ingest. Change it later without a re-ingest via "
+                   "`rag metadata set <doc-id> --tag ...`; for arbitrary "
+                   "key=value tagging use `rag metadata set --attr key=value` "
+                   "instead.")
 @click.option("--skip-figures", is_flag=True, help="Skip figure extraction and description steps.")
 @click.option("--upload-figures/--no-upload-figures", default=False,
               help="Also upload extracted figures to S3 (opt-in — figures live "
@@ -2851,7 +2857,21 @@ def metadata() -> None:
 @click.option("--subsystem", default=None, help="e.g. power, rf, mcu.")
 @click.option("--doc-type", default=None,
               help="datasheet | reference-manual | errata | app-note | …")
-@click.option("--tag", "tags", multiple=True, help="Repeatable --tag flag.")
+@click.option("--tag", "tags", multiple=True,
+              help="Repeatable — e.g. --tag mcu --tag reviewed. REPLACES the "
+                   "document's whole tag list wholesale (not additive): the "
+                   "set of --tag flags you pass *becomes* the full list. "
+                   "Omit --tag to leave existing tags untouched; pass "
+                   "--clear-tags to wipe them without setting new ones.")
+@click.option("--clear-tags", is_flag=True,
+              help="Remove all tags. Ignored if --tag is also given.")
+@click.option("--attr", "attrs", multiple=True, metavar="KEY=VALUE",
+              help="Arbitrary key=value tag, repeatable, e.g. --attr "
+                   "revision=B --attr reviewed_by=hector. Unlike --tag, "
+                   "attributes are merged key-by-key: existing keys not "
+                   "mentioned are left alone. Use --unset-attr to remove one.")
+@click.option("--unset-attr", "unset_attrs", multiple=True, metavar="KEY",
+              help="Remove a single attribute key (repeatable).")
 @click.option("--db", "db_path", type=click.Path(path_type=Path), default=None)
 @click.option("--apply-to-chunks/--no-apply-to-chunks", default=True,
               help="Propagate project_id and group_name into the chunks table.")
@@ -2865,6 +2885,9 @@ def metadata_set(
     subsystem: str | None,
     doc_type: str | None,
     tags: tuple[str, ...],
+    clear_tags: bool,
+    attrs: tuple[str, ...],
+    unset_attrs: tuple[str, ...],
     db_path: Path | None,
     apply_to_chunks: bool,
 ) -> None:
@@ -2882,6 +2905,17 @@ def metadata_set(
         if not tags and proj_cfg.tags:
             tags = tuple(proj_cfg.tags)
 
+    attributes: dict[str, Any] = {}
+    for item in attrs:
+        key, sep, value = item.partition("=")
+        if not sep or not key:
+            raise click.BadParameter(
+                f"--attr expects KEY=VALUE, got {item!r}", param_hint="--attr"
+            )
+        attributes[key] = value
+    for key in unset_attrs:
+        attributes[key] = None
+
     be = _backend_for(db_path)
     doc_id = be.resolve_doc_id(doc_id)
 
@@ -2889,13 +2923,21 @@ def metadata_set(
         updated = be.set_doc_title(doc_id, doc_title)
         console.print(f"[green]Title set[/] on {updated} chunk rows: {doc_title!r}")
 
+    if tags:
+        new_tags: list[str] | None = list(tags)
+    elif clear_tags:
+        new_tags = []
+    else:
+        new_tags = None
+
     meta = be.set_metadata(
         doc_id,
         MetadataPatch(
             project_id=project_id, group_name=group_name,
             mpn=mpn, manufacturer=manufacturer, subsystem=subsystem,
             doc_type=doc_type,
-            tags=list(tags) if tags else None,
+            tags=new_tags,
+            attributes=attributes or None,
         ),
     )
     console.print(f"[green]Saved metadata for[/] {doc_id}")
@@ -2927,12 +2969,20 @@ def metadata_get(doc_id: str, db_path: Path | None) -> None:
               help="List documents across every project, ignoring any .rag.toml scoping.")
 @click.option("--group", "group_name", default=None)
 @click.option("--mpn", default=None)
+@click.option("--tag", "tags", multiple=True,
+              help="Only show documents that have this tag (repeatable — "
+                   "with multiple --tag, a document must have all of them).")
+@click.option("--attr", "attrs", multiple=True, metavar="KEY=VALUE",
+              help="Only show documents whose attributes contain this "
+                   "key=value pair (repeatable, all must match).")
 @click.option("--db", "db_path", type=click.Path(path_type=Path), default=None)
 def metadata_list(
     project_id: str | None,
     is_global: bool,
     group_name: str | None,
     mpn: str | None,
+    tags: tuple[str, ...],
+    attrs: tuple[str, ...],
     db_path: Path | None,
 ) -> None:
     """List documents in the sidecar, optionally filtered."""
@@ -2940,8 +2990,26 @@ def metadata_list(
 
     project_id = resolve_cli_project_id(project_id, is_global=is_global)
 
+    attr_filters: dict[str, str] = {}
+    for item in attrs:
+        key, sep, value = item.partition("=")
+        if not sep or not key:
+            raise click.BadParameter(
+                f"--attr expects KEY=VALUE, got {item!r}", param_hint="--attr"
+            )
+        attr_filters[key] = value
+
     be = _backend_for(db_path)
     docs = be.list_docs(project_id=project_id, group_name=group_name, mpn=mpn)
+
+    if tags:
+        wanted = set(tags)
+        docs = [d for d in docs if wanted.issubset(set(d.tags))]
+    if attr_filters:
+        docs = [
+            d for d in docs
+            if all(d.attributes.get(k) == v for k, v in attr_filters.items())
+        ]
 
     if not docs:
         console.print("[yellow]No documents match.[/]")
@@ -2954,12 +3022,14 @@ def metadata_list(
     table.add_column("mpn")
     table.add_column("manufacturer")
     table.add_column("subsystem")
+    table.add_column("tags")
 
     for d in docs:
         table.add_row(
             d.doc_id[:SHORT_DOC_ID_LEN], d.project_id or "—",
             d.group_name or "—", d.mpn or "—",
             d.manufacturer or "—", d.subsystem or "—",
+            ", ".join(d.tags) if d.tags else "—",
         )
     console.print(table)
 
