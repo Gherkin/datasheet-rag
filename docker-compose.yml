@@ -61,8 +61,11 @@ services:
       # Persist the HuggingFace model cache (bge-m3 ~2GB) so it isn't
       # re-downloaded on every fresh container.
       - hf-cache:/root/.cache/huggingface
-      # Bedrock credentials for text/vision (read-only).
-      - ${HOME}/.aws:/root/.aws:ro
+      # Bedrock credentials for embeddings/text/vision. Mounted read-WRITE
+      # (not :ro) because an SSO-based profile makes botocore refresh and
+      # cache its bearer token under ~/.aws/sso|login/cache — a read-only
+      # mount fails that write with "Errno 30 Read-only file system".
+      - ${HOME}/.aws:/root/.aws
     # host.docker.internal resolution for talking to a host-side Ollama.
     extra_hosts:
       - "host.docker.internal:host-gateway"

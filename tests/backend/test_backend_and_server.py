@@ -234,6 +234,54 @@ def test_server_ingest_and_query_roundtrip(client) -> None:
     assert client.delete(f"/documents/{did}").json()["deleted"] == 2
 
 
+def test_server_ingest_pdf_streams_sse(client, monkeypatch) -> None:
+    # Raw-PDF ingest (GH #16): the server runs the parse pipeline and streams
+    # progress + a final result as SSE. Stub the parse (no Docling) and the
+    # store step (no embedder) — this exercises the route plumbing itself.
+    import aws_rag.ingest_pipeline as ip
+    from aws_rag.backend.models import IngestResult
+    from aws_rag.ingest_pipeline import ParseResult, ProgressEvent
+
+    did = "d" * 64
+
+    def fake_parse(pdf_path, *, progress=None, **kw):
+        if progress:
+            progress(ProgressEvent(kind="step", text="Docling layout analysis", step=1))
+            progress(ProgressEvent(kind="detail", text="10 chunks", step=1))
+        return ParseResult(
+            graph=ChunkGraph(doc_id=did), doc_id=did, resolved_backend="docling"
+        )
+
+    monkeypatch.setattr(ip, "parse_pdf_to_graph", fake_parse)
+    monkeypatch.setattr(
+        LocalBackend,
+        "ingest_chunk_graph",
+        lambda self, g, **kw: IngestResult(doc_id=g.doc_id, inserted=10, described=0),
+    )
+
+    r = client.post(
+        "/ingest-pdf",
+        files={"payload": ("x.pdf", b"%PDF-1.4 fake", "application/pdf")},
+        data={"options": json.dumps({"project_id": "proj", "skip_describe": True})},
+    )
+    assert r.status_code == 200, r.text
+    assert r.headers["content-type"].startswith("text/event-stream")
+
+    body = r.text
+    assert "event: progress" in body
+    assert "Docling layout analysis" in body
+    # The injected "Embed & store" step lands after the parse steps.
+    assert "Embed & store" in body
+    assert "event: result" in body
+    # Pull the result event's JSON out of the stream.
+    result = None
+    for block in body.split("\n\n"):
+        if "event: result" in block:
+            data_line = [ln for ln in block.splitlines() if ln.startswith("data:")][0]
+            result = json.loads(data_line[len("data:"):].strip())
+    assert result == {"doc_id": did, "inserted": 10, "described": 0, "title": None}
+
+
 def test_server_token_required_when_set(conn, monkeypatch) -> None:
     from fastapi.testclient import TestClient
 

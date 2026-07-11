@@ -532,6 +532,56 @@ class LocalBackend(RagBackend):
             doc_id=did, inserted=inserted, described=described, title=title
         )
 
+    def ingest_pdf(
+        self,
+        pdf_path,
+        *,
+        doc_id=None,
+        project_id=None,
+        group_name=None,
+        metadata=None,
+        backend="docling",
+        skip_figures=False,
+        upload_figures=False,
+        skip_describe=False,
+        infer_title=False,
+        dpi=300,
+        micro_tokens=128,
+        meso_tokens=512,
+        accurate_tables=None,
+        force=False,
+        progress=None,
+    ) -> IngestResult:
+        # Local: run the parse pipeline in-process, then embed + store. The
+        # figures are already cropped to disk under figures_dir and the graph
+        # carries their paths, so ingest_chunk_graph needs no figure uploads.
+        from aws_rag.ingest_pipeline import parse_pdf_to_graph
+
+        parsed = parse_pdf_to_graph(
+            pdf_path,
+            doc_id=doc_id,
+            backend=backend,
+            skip_figures=skip_figures,
+            upload_figures=upload_figures,
+            dpi=dpi,
+            micro_tokens=micro_tokens,
+            meso_tokens=meso_tokens,
+            accurate_tables=accurate_tables,
+            force=force,
+            progress=progress,
+        )
+        do_describe = not skip_figures and not skip_describe
+        return self.ingest_chunk_graph(
+            parsed.graph,
+            project_id=project_id,
+            group_name=group_name,
+            metadata=metadata,
+            embed=True,
+            describe_figures=do_describe,
+            infer_title=infer_title,
+            title_hints=parsed.title_hints or None,
+        )
+
     def delete_doc(self, doc_id: str) -> int:
         from aws_rag.delete import purge_local_files, purge_s3_objects
 

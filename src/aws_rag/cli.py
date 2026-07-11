@@ -1740,6 +1740,17 @@ def _print_cost_table(cost: CostEstimate, heading: str = "Estimated AWS cost") -
 )
 @click.option("--force", is_flag=True, help="Ignore cached blocks/chunks and redo all steps.")
 @click.option(
+    "--local-parse",
+    is_flag=True,
+    help=(
+        "In remote mode, parse the PDF on this client and ship the finished "
+        "chunk graph, instead of uploading the raw PDF for the server to parse "
+        "(the default). Needs the full Docling/Textract stack locally; useful "
+        "for advanced/offline-parse workflows. Ignored in local mode; implied "
+        "by --dry-run and --show-cost (both are client-side estimation)."
+    ),
+)
+@click.option(
     "--backend",
     type=click.Choice(["auto", "docling", "textract"], case_sensitive=False),
     default="docling",
@@ -1788,6 +1799,7 @@ def ingest(
     dry_run: bool,
     show_cost: bool,
     force: bool,
+    local_parse: bool,
     backend: str,
     accurate_tables: bool | None,
 ) -> None:
@@ -1811,8 +1823,8 @@ def ingest(
         subsystem=subsystem, doc_type=doc_type, tags=tags, skip_figures=skip_figures,
         upload_figures=upload_figures, skip_describe=skip_describe, infer_title=infer_title,
         dpi=dpi, micro_tokens=micro_tokens, meso_tokens=meso_tokens, db_path=db_path,
-        dry_run=dry_run, show_cost=show_cost, force=force, backend=backend,
-        accurate_tables=accurate_tables,
+        dry_run=dry_run, show_cost=show_cost, force=force, local_parse=local_parse,
+        backend=backend, accurate_tables=accurate_tables,
     )
 
     if not pdf_path.is_dir():
@@ -1904,28 +1916,20 @@ def _ingest_one(
     dry_run: bool,
     show_cost: bool,
     force: bool,
+    local_parse: bool,
     backend: str,
     accurate_tables: bool | None,
 ) -> CostEstimate | None:
     """Ingest a single PDF; returns the cost estimate when --show-cost is set."""
     import time
 
-    from aws_rag.chunking.pipeline import (
-        load_chunk_graph,
-        run_chunking_pipeline,
-        run_chunking_pipeline_from_outline,
-        save_chunk_graph,
-    )
-    from aws_rag.chunking.splitter import SplitterConfig
     from aws_rag.costs import (
         CostEstimate,
         estimate_embedding_cost,
         estimate_figure_description_cost,
         estimate_textract_cost,
         estimate_title_inference_cost,
-        pdf_page_count,
     )
-    from aws_rag.figures import extract_figures, extract_figures_from_regions, upload_figures_to_s3
     from aws_rag.project_config import get_project_config_for
     proj_cfg = get_project_config_for(pdf_path.parent)
     if proj_cfg is not None:
@@ -1948,256 +1952,115 @@ def _ingest_one(
     if accurate_tables is None:
         accurate_tables = settings.table_structure_mode == "accurate"
     t0 = time.monotonic()
-    step_n = 0
     cost = CostEstimate()
-    figure_count = 0
-    # Set in the docling path; the textract path leaves them empty.
-    running_header = ""
-    pdf_meta_title = ""
 
-    def _step(label: str) -> None:
-        nonlocal step_n
-        step_n += 1
-        console.rule(f"[bold cyan]Step {step_n} — {label}[/]")
+    from aws_rag.backend import backend_mode
+    from aws_rag.ingest_pipeline import (
+        OcrRequiredError,
+        ScannedPdfError,
+        parse_pdf_to_graph,
+    )
 
-    # ── 1. Detect backend ────────────────────────────────────────────────────
-    _step("Detect PDF type")
-    if backend in ("auto", "docling"):
-        from aws_rag.docling_parser import is_native_pdf
-        native = is_native_pdf(pdf_path)
-        if native:
-            resolved_backend = "docling"
-            console.print("  Native PDF detected → using [cyan]docling[/] backend")
-        elif backend == "auto":
-            resolved_backend = "textract"
-            console.print("  Scanned PDF detected → using [cyan]textract[/] backend")
+    # Render pipeline progress to the console — used both for a local parse and
+    # for the streamed progress of a remote raw-PDF upload.
+    step_state = {"n": 0}
+
+    def _progress(ev) -> None:
+        if ev.kind == "step":
+            step_state["n"] = ev.step
+            console.rule(f"[bold cyan]Step {ev.step} — {ev.text}[/]")
         else:
-            raise click.ClickException(
-                f"{pdf_path.name} looks like a scanned PDF — Docling needs a "
-                "native text layer and cannot OCR it.\n"
-                "  Re-run with --backend textract to use AWS Textract OCR "
-                "instead (this incurs AWS costs), or --backend auto to route "
-                "automatically based on PDF type."
-            )
-    else:
-        resolved_backend = backend
-        console.print(f"  Backend forced to [cyan]{resolved_backend}[/]")
+            console.print(f"  {ev.text}")
 
-    # ── 2a. Docling path (native PDFs) ───────────────────────────────────────
-    if resolved_backend == "docling":
-        import dataclasses
+    # ── Remote raw-PDF upload (thin client — GH #16) ─────────────────────────
+    # In remote mode the server runs the whole pipeline; the client just ships
+    # the PDF. --local-parse (and --dry-run/--show-cost, which are inherently
+    # client-side estimation) fall through to the local parse path below.
+    if (
+        backend_mode() == "remote"
+        and db_path is None
+        and not local_parse
+        and not dry_run
+        and not show_cost
+    ):
+        from aws_rag.backend import MetadataPatch, RagServerError, get_backend
 
-        from aws_rag.chunking.layout_parser import DocumentOutline
-        from aws_rag.docling_parser import content_hash, convert_pdf
-        from aws_rag.figures import FigureRegion
-
-        did = doc_id or content_hash(pdf_path)
-        console.print(f"  doc_id = [cyan]{did}[/]")
-
-        from aws_rag.storage import save_pdf_locally
-        save_pdf_locally(pdf_path, did)
-
-        chunks_path = settings.output_dir / f"{did}_chunks.json"
-        running_header = ""
-        pdf_meta_title = ""
-        if chunks_path.exists() and not force:
-            _step("Multi-scale chunking")
-            console.print(f"  [yellow]Resuming — loading cached chunk graph[/] → [cyan]{chunks_path}[/]")
-            graph = load_chunk_graph(chunks_path)
-            stats = graph.stats()
-            console.print(
-                f"  {stats['total_chunks']} chunks "
-                f"(MACRO {stats['by_level']['MACRO']}, "
-                f"MESO {stats['by_level']['MESO']}, "
-                f"MICRO {stats['by_level']['MICRO']}) (cached)"
-            )
-        else:
-            _step("Docling layout analysis")
-            outline_path = settings.output_dir / f"{did}_outline.json"
-            if outline_path.exists() and not force:
-                console.print(
-                    f"  [yellow]Resuming — loading cached layout analysis[/] → [cyan]{outline_path}[/]"
-                )
-                with open(outline_path) as f:
-                    cached = json.load(f)
-                outline = DocumentOutline.from_dict(cached["outline"])
-                figure_regions = [FigureRegion(**r) for r in cached["figure_regions"]]
-            else:
-                outline, figure_regions = convert_pdf(
-                    pdf_path, doc_id=did, accurate_tables=accurate_tables
-                )
-                outline_path.parent.mkdir(parents=True, exist_ok=True)
-                with open(outline_path, "w") as f:
-                    json.dump(
-                        {
-                            "outline": outline.to_dict(),
-                            "figure_regions": [dataclasses.asdict(r) for r in figure_regions],
-                        },
-                        f,
-                    )
-                console.print(f"  Layout analysis cached → [cyan]{outline_path}[/]")
-
-            running_header = outline.running_header
-            pdf_meta_title = outline.pdf_meta_title
-            summary = outline.summary()
-            console.print(
-                f"  {summary['top_level_sections']} chapters, "
-                f"{summary['total_sections']} sections, "
-                f"{summary['total_elements']} elements "
-                f"({summary['elements_by_type'].get('formula', 0)} formulas, "
-                f"{summary['elements_by_type'].get('table', 0)} tables, "
-                f"{summary['elements_by_type'].get('figure', 0)} figures)"
-            )
-
-            figure_manifest_dict = None
-            if not skip_figures:
-                _step("Extract figures & formulas")
-                figures_out = settings.figures_dir / did
-                manifest = extract_figures_from_regions(
-                    pdf_path=pdf_path,
-                    regions=figure_regions,
-                    doc_id=did,
-                    output_dir=figures_out,
-                    dpi=dpi,
-                    image_format="png",
-                    padding_pct=0.02,
-                )
-                if upload_figures and manifest.figures:
-                    manifest = upload_figures_to_s3(manifest)
-                manifest_path = figures_out / "manifest.json"
-                manifest.save(manifest_path)
-                figure_manifest_dict = manifest.to_dict()
-                figure_count = len(manifest.figures)
-                console.print(f"  {len(manifest.figures)} regions → [cyan]{manifest_path}[/]")
-
-            _step("Multi-scale chunking")
-            config = SplitterConfig(micro_max_tokens=micro_tokens, meso_max_tokens=meso_tokens)
-            graph = run_chunking_pipeline_from_outline(
-                outline,
-                figure_manifest=figure_manifest_dict,
-                config=config,
-                summarizer_mode="extractive",
-            )
-            save_chunk_graph(graph, chunks_path)
-            stats = graph.stats()
-            console.print(
-                f"  {stats['total_chunks']} chunks "
-                f"(MACRO {stats['by_level']['MACRO']}, "
-                f"MESO {stats['by_level']['MESO']}, "
-                f"MICRO {stats['by_level']['MICRO']}) → [cyan]{chunks_path}[/]"
-            )
-
-    # ── 2b. Textract path (scanned PDFs) ─────────────────────────────────────
-    else:
-        from aws_rag.storage import save_pdf_locally
-        from aws_rag.textract import (
-            get_job_results,
-            load_blocks,
-            save_blocks,
-            start_analysis,
-            wait_for_job,
+        meta_patch = MetadataPatch(
+            mpn=mpn or None,
+            manufacturer=manufacturer or None,
+            subsystem=subsystem or None,
+            doc_type=doc_type or None,
+            tags=list(tags) if tags else None,
         )
-
-        if show_cost:
-            from aws_rag.docling_parser import content_hash
-            did = doc_id or content_hash(pdf_path)
-            blocks_path = settings.output_dir / f"{did}_blocks.json"
-            cached = blocks_path.exists() and not force
-            console.print(f"  doc_id = [cyan]{did}[/]")
-            if not cached:
-                pages = pdf_page_count(pdf_path)
-                cost.items.append(estimate_textract_cost(pages))
-                cost.notes.append(
-                    "No cached Textract OCR results for this PDF — only the "
-                    "OCR line item could be estimated. Embedding/description "
-                    "costs depend on its output; run a real ingest once (or "
-                    "ingest with cached blocks present) to estimate the full "
-                    "pipeline without re-paying for OCR on every estimate."
-                )
-                _print_cost_table(cost)
-                return cost
-            console.print("  [yellow]Cached Textract blocks found — estimating full pipeline.[/]")
-            blocks = load_blocks(blocks_path)
-            console.print(f"  {len(blocks)} blocks (cached)")
-        else:
-            from aws_rag.storage import upload_pdf
-
-            _step("Upload PDF to S3")
-            did, s3_key = upload_pdf(pdf_path, doc_id=doc_id)
-            console.print(f"  doc_id = [cyan]{did}[/]")
-            console.print(f"  s3_key = {s3_key}")
-
-            blocks_path = settings.output_dir / f"{did}_blocks.json"
-            _step("Textract layout analysis (OCR)")
-            if blocks_path.exists() and not force:
-                console.print(f"  [yellow]Resuming — loading cached blocks[/] → [cyan]{blocks_path}[/]")
-                blocks = load_blocks(blocks_path)
-                console.print(f"  {len(blocks)} blocks (cached)")
-            else:
-                job_id = start_analysis(did, s3_key)
-                console.print(f"  job_id = {job_id}  (waiting…)")
-                status = wait_for_job(job_id)
-                if status != "SUCCEEDED":
-                    raise click.ClickException(f"Textract job failed with status: {status}")
-                blocks = get_job_results(job_id)
-                save_blocks(blocks, blocks_path)
-                console.print(f"  {len(blocks)} blocks → [cyan]{blocks_path}[/]")
-
-        save_pdf_locally(pdf_path, did)
-
-        figure_manifest_dict = None
-        if not skip_figures:
-            _step("Extract figures")
-            figures_out = settings.figures_dir / did
-            manifest = extract_figures(
-                pdf_path=pdf_path,
-                blocks=blocks,
-                doc_id=did,
-                output_dir=figures_out,
+        try:
+            result = get_backend().ingest_pdf(
+                pdf_path,
+                doc_id=doc_id,
+                project_id=project_id,
+                group_name=group_name,
+                metadata=meta_patch,
+                backend=backend,
+                skip_figures=skip_figures,
+                upload_figures=upload_figures,
+                skip_describe=skip_describe,
+                infer_title=infer_title,
                 dpi=dpi,
-                image_format="png",
-                padding_pct=0.02,
+                micro_tokens=micro_tokens,
+                meso_tokens=meso_tokens,
+                accurate_tables=accurate_tables,
+                force=force,
+                progress=_progress,
             )
-            if upload_figures and manifest.figures:
-                manifest = upload_figures_to_s3(manifest)
-            manifest_path = figures_out / "manifest.json"
-            manifest.save(manifest_path)
-            figure_manifest_dict = manifest.to_dict()
-            figure_count = len(manifest.figures)
-            console.print(f"  {len(manifest.figures)} figures → [cyan]{manifest_path}[/]")
+        except RagServerError as e:
+            raise _friendly_server_error(e) from e
+        console.print(f"  [green]Upserted[/] {result.inserted} chunks")
+        if result.described:
+            console.print(f"  [green]{result.described}[/] figure descriptions generated")
+        if result.title:
+            console.print(f"  [green]Inferred title:[/] {result.title}")
+        elapsed = time.monotonic() - t0
+        console.rule(f"[bold green]Done[/] — {elapsed:.0f}s")
+        console.print(f"  doc_id = [cyan]{result.doc_id}[/]")
+        return None
 
-        chunks_path = settings.output_dir / f"{did}_chunks.json"
-        if chunks_path.exists() and not force:
-            _step("Multi-scale chunking")
-            console.print(f"  [yellow]Resuming — loading cached chunk graph[/] → [cyan]{chunks_path}[/]")
-            graph = load_chunk_graph(chunks_path)
-            stats = graph.stats()
-            console.print(
-                f"  {stats['total_chunks']} chunks "
-                f"(MACRO {stats['by_level']['MACRO']}, "
-                f"MESO {stats['by_level']['MESO']}, "
-                f"MICRO {stats['by_level']['MICRO']}) (cached)"
-            )
-        else:
-            _step("Multi-scale chunking")
-            config = SplitterConfig(micro_max_tokens=micro_tokens, meso_max_tokens=meso_tokens)
-            graph = run_chunking_pipeline(
-                blocks,
-                doc_id=did,
-                figure_manifest=figure_manifest_dict,
-                config=config,
-                summarizer_mode="extractive",
-            )
-            save_chunk_graph(graph, chunks_path)
-            stats = graph.stats()
-            console.print(
-                f"  {stats['total_chunks']} chunks "
-                f"(MACRO {stats['by_level']['MACRO']}, "
-                f"MESO {stats['by_level']['MESO']}, "
-                f"MICRO {stats['by_level']['MICRO']}) → [cyan]{chunks_path}[/]"
-            )
+    # ── Local parse (local mode, --local-parse, --dry-run, --show-cost) ──────
+    try:
+        parsed = parse_pdf_to_graph(
+            pdf_path,
+            doc_id=doc_id,
+            backend=backend,
+            skip_figures=skip_figures,
+            upload_figures=upload_figures,
+            dpi=dpi,
+            micro_tokens=micro_tokens,
+            meso_tokens=meso_tokens,
+            accurate_tables=accurate_tables,
+            force=force,
+            allow_ocr=not show_cost,
+            progress=_progress,
+        )
+    except ScannedPdfError as e:
+        raise click.ClickException(str(e)) from e
+    except OcrRequiredError as e:
+        # Cost estimation on a scanned PDF with no cached OCR: only the OCR
+        # line item can be priced (the rest depends on its output).
+        console.print(f"  doc_id = [cyan]{e.doc_id}[/]")
+        cost.items.append(estimate_textract_cost(e.pages))
+        cost.notes.append(
+            "No cached Textract OCR results for this PDF — only the "
+            "OCR line item could be estimated. Embedding/description "
+            "costs depend on its output; run a real ingest once (or "
+            "ingest with cached blocks present) to estimate the full "
+            "pipeline without re-paying for OCR on every estimate."
+        )
+        _print_cost_table(cost)
+        return cost
 
-    # ── 5/6. Describe, embed & store (via the backend) ───────────────────────
+    did = parsed.doc_id
+    graph = parsed.graph
+    figure_count = parsed.figure_count
+
+    # ── Describe, embed & store (via the backend) ───────────────────────────
     # Parsing/chunking/figure-cropping above ran client-side. Embedding,
     # figure description (vision LLM) and the DB write all happen through the
     # backend — locally against sqlite, or server-side over HTTP in remote
@@ -2224,8 +2087,9 @@ def _ingest_one(
         console.print(f"  doc_id = [cyan]{did}[/]")
         return None
 
-    _step("Embed & store")
-    from aws_rag.backend import MetadataPatch, backend_mode, get_backend
+    step_state["n"] += 1
+    console.rule(f"[bold cyan]Step {step_state['n']} — Embed & store[/]")
+    from aws_rag.backend import MetadataPatch, get_backend
 
     # `rag ingest --db` targets a specific local file; honor it by building a
     # LocalBackend on that path rather than the configured backend.
@@ -2255,11 +2119,7 @@ def _ingest_one(
         doc_type=doc_type or None,
         tags=list(tags) if tags else None,
     )
-    title_hints: dict[str, str] = {}
-    if running_header:
-        title_hints["running_header"] = running_header
-    if pdf_meta_title:
-        title_hints["pdf_meta_title"] = pdf_meta_title
+    title_hints = dict(parsed.title_hints)
 
     from aws_rag.backend import RagServerError
 

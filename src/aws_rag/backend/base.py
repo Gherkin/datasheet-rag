@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Literal
 
 from aws_rag.backend.models import (
@@ -27,6 +28,7 @@ from aws_rag.backend.models import (
     MetadataPatch,
     StatsResult,
 )
+from aws_rag.ingest_pipeline import ProgressCallback
 from aws_rag.models.chunk import Chunk, ChunkGraph
 from aws_rag.store import DocMetadata, SearchFilters, SearchResult
 
@@ -173,6 +175,35 @@ class RagBackend(ABC):
         infer_title: bool = False,
         title_hints: dict[str, str] | None = None,
     ) -> IngestResult: ...
+
+    @abstractmethod
+    def ingest_pdf(
+        self,
+        pdf_path: Path,
+        *,
+        doc_id: str | None = None,
+        project_id: str | None = None,
+        group_name: str | None = None,
+        metadata: MetadataPatch | None = None,
+        backend: str = "docling",
+        skip_figures: bool = False,
+        upload_figures: bool = False,
+        skip_describe: bool = False,
+        infer_title: bool = False,
+        dpi: int = 300,
+        micro_tokens: int = 128,
+        meso_tokens: int = 512,
+        accurate_tables: bool | None = None,
+        force: bool = False,
+        progress: ProgressCallback | None = None,
+    ) -> IngestResult:
+        """Ingest a raw PDF end-to-end: parse → figures → chunk → embed → store.
+
+        ``LocalBackend`` runs the whole pipeline in-process; ``RemoteBackend``
+        streams the PDF to the server, which runs it there — so a thin client
+        needs no Docling/torch/Textract stack. ``progress`` receives
+        :class:`~aws_rag.ingest_pipeline.ProgressEvent` s as the parse advances.
+        """
 
     @abstractmethod
     def delete_doc(self, doc_id: str) -> int: ...

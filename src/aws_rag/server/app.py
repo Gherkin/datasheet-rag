@@ -8,11 +8,21 @@ existing pydantic models (``Chunk``, ``SearchResult``, ``DocMetadata``,
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi import (
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Request,
+    Response,
+    UploadFile,
+)
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from aws_rag.backend.base import RagServerError
@@ -53,6 +63,11 @@ def _result_json(result: SearchResult) -> dict[str, Any]:
         "match_source": result.match_source,
         "chunk": _chunk_json(result.chunk),
     }
+
+
+def _sse(event: str, data: dict[str, Any]) -> str:
+    """Encode one Server-Sent Event (single JSON data line)."""
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
 # ---- request bodies ------------------------------------------------------
@@ -395,6 +410,125 @@ def build_app() -> FastAPI:
             },
         )
         return result.model_dump(mode="json")
+
+    @app.post("/ingest-pdf", dependencies=ingest_dep)
+    async def ingest_pdf(
+        request: Request,
+        payload: UploadFile = File(...),
+        options: str = Form("{}"),
+        be: LocalBackend = Depends(get_backend),
+    ) -> StreamingResponse:
+        """Raw-PDF ingest: the server runs the full parse pipeline (GH #16).
+
+        The client uploads just the PDF plus an ``options`` JSON blob; the
+        server detects the PDF type, runs Docling/Textract, crops figures,
+        chunks, embeds, describes and stores — streaming progress back as
+        Server-Sent Events, then a final ``result`` (or ``error``) event.
+        """
+        import asyncio
+        import tempfile
+
+        from aws_rag.ingest_pipeline import parse_pdf_to_graph
+
+        opts = json.loads(options) if options else {}
+        pdf_bytes = await payload.read()
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+        tmp.write(pdf_bytes)
+        tmp.close()
+        tmp_path = Path(tmp.name)
+
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue = asyncio.Queue()
+        max_step = {"n": 0}
+
+        def on_progress(ev) -> None:
+            max_step["n"] = max(max_step["n"], ev.step)
+            loop.call_soon_threadsafe(queue.put_nowait, ("progress", ev.to_dict()))
+
+        def worker() -> None:
+            try:
+                skip_figures = bool(opts.get("skip_figures", False))
+                skip_describe = bool(opts.get("skip_describe", False))
+                parsed = parse_pdf_to_graph(
+                    tmp_path,
+                    doc_id=opts.get("doc_id"),
+                    backend=opts.get("backend", "docling"),
+                    skip_figures=skip_figures,
+                    upload_figures=bool(opts.get("upload_figures", False)),
+                    dpi=int(opts.get("dpi", 300)),
+                    micro_tokens=int(opts.get("micro_tokens", 128)),
+                    meso_tokens=int(opts.get("meso_tokens", 512)),
+                    accurate_tables=opts.get("accurate_tables"),
+                    force=bool(opts.get("force", False)),
+                    progress=on_progress,
+                )
+                embed_step = {"kind": "step", "text": "Embed & store", "step": max_step["n"] + 1}
+                loop.call_soon_threadsafe(queue.put_nowait, ("progress", embed_step))
+                metadata = (
+                    MetadataPatch.model_validate(opts["metadata"])
+                    if opts.get("metadata")
+                    else None
+                )
+                result = be.ingest_chunk_graph(
+                    parsed.graph,
+                    project_id=opts.get("project_id"),
+                    group_name=opts.get("group_name"),
+                    metadata=metadata,
+                    embed=True,
+                    describe_figures=not skip_figures and not skip_describe,
+                    infer_title=bool(opts.get("infer_title", False)),
+                    title_hints=parsed.title_hints or None,
+                )
+                loop.call_soon_threadsafe(
+                    queue.put_nowait, ("result", result.model_dump(mode="json"))
+                )
+            except Exception as exc:  # surfaced to the client as an error event
+                loop.call_soon_threadsafe(
+                    queue.put_nowait, ("error", {"detail": str(exc)})
+                )
+            finally:
+                loop.call_soon_threadsafe(queue.put_nowait, ("__done__", None))
+
+        async def event_gen():
+            fut = loop.run_in_executor(None, worker)
+            status = "ok"
+            result_doc: dict | None = None
+            error_detail: str | None = None
+            try:
+                while True:
+                    kind, data = await queue.get()
+                    if kind == "__done__":
+                        break
+                    if kind == "result":
+                        result_doc = data
+                        yield _sse("result", data)
+                    elif kind == "error":
+                        status = "error"
+                        error_detail = data.get("detail")
+                        yield _sse("error", data)
+                    else:
+                        yield _sse("progress", data)
+            finally:
+                await fut
+                tmp_path.unlink(missing_ok=True)
+                if status == "ok" and result_doc is not None:
+                    audit(
+                        request, be, action="ingest", status="ok",
+                        doc_id=result_doc.get("doc_id"),
+                        project_id=opts.get("project_id"),
+                        detail={
+                            "inserted": result_doc.get("inserted"),
+                            "described": result_doc.get("described"),
+                            "raw_pdf": True,
+                        },
+                    )
+                else:
+                    audit(
+                        request, be, action="ingest", status="error",
+                        project_id=opts.get("project_id"), error=error_detail,
+                    )
+
+        return StreamingResponse(event_gen(), media_type="text/event-stream")
 
     # -- admin: API key management ---------------------------------------
     @app.post("/admin/keys", dependencies=admin_dep)

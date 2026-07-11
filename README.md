@@ -422,6 +422,22 @@ A team can share one corpus by running the FastAPI server (`rag-server`, or the
 Docker image) and pointing clients at it with `RAG_SERVER_URL`. The server owns
 the sqlite DB + embedder; clients talk to it over HTTP.
 
+### Thin-client ingest
+
+In remote mode `rag ingest <pdf>` **uploads the raw PDF** and the server runs
+the whole pipeline — detect PDF type → Docling/Textract parse → figure cropping
+→ chunk → embed → describe → store — streaming step-by-step progress back to the
+client as it goes. The client needs only `httpx` from the base install; the
+heavy Docling/torch and Textract stack lives on the server. Scanned-PDF OCR uses
+the server's AWS role, so clients never need Textract credentials.
+
+Pass `--local-parse` to instead parse on the client and ship the finished chunk
+graph to the server (the older behaviour) — useful for advanced/offline-parse
+workflows, but it needs the full parse stack locally. `--dry-run` and
+`--show-cost` are client-side estimation and always parse locally. The raw-PDF
+route is `POST /ingest-pdf`; the pre-parsed `POST /ingest` (chunk graph) path is
+unchanged.
+
 ### Auth tiers
 
 Reads are cheap; ingest induces real cost (Bedrock/LLM embed + figure

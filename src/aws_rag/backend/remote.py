@@ -281,8 +281,117 @@ class RemoteBackend(RagBackend):
         data = self._json("POST", "/ingest", files=files)
         return IngestResult.model_validate(data)
 
+    def ingest_pdf(
+        self,
+        pdf_path,
+        *,
+        doc_id=None,
+        project_id=None,
+        group_name=None,
+        metadata=None,
+        backend="docling",
+        skip_figures=False,
+        upload_figures=False,
+        skip_describe=False,
+        infer_title=False,
+        dpi=300,
+        micro_tokens=128,
+        meso_tokens=512,
+        accurate_tables=None,
+        force=False,
+        progress=None,
+    ) -> IngestResult:
+        # Stream the raw PDF up; the server runs parse → figures → chunk →
+        # embed → store and pushes progress back as Server-Sent Events. We
+        # forward each progress event to `progress` and return the final
+        # result. No read timeout: the parse can run for minutes, and the SSE
+        # progress stream keeps the connection alive meanwhile.
+        from pathlib import Path
+
+        import httpx
+
+        from aws_rag.ingest_pipeline import ProgressEvent
+
+        pdf_path = Path(pdf_path)
+        options = {
+            "doc_id": doc_id,
+            "project_id": project_id,
+            "group_name": group_name,
+            "metadata": metadata.model_dump(mode="json") if metadata else None,
+            "backend": backend,
+            "skip_figures": skip_figures,
+            "upload_figures": upload_figures,
+            "skip_describe": skip_describe,
+            "infer_title": infer_title,
+            "dpi": dpi,
+            "micro_tokens": micro_tokens,
+            "meso_tokens": meso_tokens,
+            "accurate_tables": accurate_tables,
+            "force": force,
+        }
+        files = {
+            "payload": (pdf_path.name, pdf_path.read_bytes(), "application/pdf"),
+        }
+        data = {"options": json.dumps(options)}
+
+        result: IngestResult | None = None
+        try:
+            with self._client.stream(
+                "POST", "/ingest-pdf", files=files, data=data, timeout=None
+            ) as resp:
+                if resp.status_code >= 400:
+                    resp.read()
+                    detail = resp.text
+                    try:
+                        detail = resp.json().get("detail", detail)
+                    except Exception:
+                        pass
+                    raise RagServerError(resp.status_code, detail)
+                for event, payload in _iter_sse(resp.iter_lines()):
+                    if event == "progress":
+                        if progress:
+                            progress(ProgressEvent.from_dict(payload))
+                    elif event == "result":
+                        result = IngestResult.model_validate(payload)
+                    elif event == "error":
+                        raise RagServerError(500, payload.get("detail", "ingest failed"))
+        except httpx.HTTPError as exc:
+            raise RagServerError(0, str(exc)) from exc
+
+        if result is None:
+            raise RagServerError(0, "server closed the ingest stream without a result")
+        return result
+
     def delete_doc(self, doc_id: str) -> int:
         return int(self._json("DELETE", f"/documents/{doc_id}")["deleted"])
+
+
+def _iter_sse(lines: Any):
+    """Yield ``(event, data)`` pairs from an SSE line stream.
+
+    Minimal parser for the subset the server emits: one ``event:`` and one
+    JSON ``data:`` line per event, separated by blank lines.
+    """
+    event = "message"
+    data_lines: list[str] = []
+    for line in lines:
+        if line == "":
+            if data_lines:
+                yield event, json.loads("\n".join(data_lines))
+            event = "message"
+            data_lines = []
+            continue
+        if line.startswith(":"):  # comment / keepalive
+            continue
+        field, _, value = line.partition(":")
+        if value.startswith(" "):
+            value = value[1:]
+        if field == "event":
+            event = value
+        elif field == "data":
+            data_lines.append(value)
+    if data_lines:  # stream ended without a trailing blank line
+        yield event, json.loads("\n".join(data_lines))
 
 
 def _drop_none(**kw: Any) -> dict[str, Any]:

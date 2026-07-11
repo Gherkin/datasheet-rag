@@ -20,6 +20,8 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         poppler-utils \
         libsqlite3-0 \
+        libgl1 \
+        libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -35,7 +37,13 @@ COPY src ./src
 # (docker-compose.yml passes this through.) local-hf pulls torch — much larger.
 # Drop `aws` only for a fully-local image (all backends local, local storage).
 ARG RAG_EXTRAS=server,docling,aws
-RUN pip install --no-cache-dir ".[${RAG_EXTRAS}]"
+# A BuildKit cache mount keeps pip's download cache (torch is ~800MB) across
+# builds. `COPY src` above invalidates this layer on any source change, but
+# with the cache the reinstall reuses already-downloaded wheels instead of
+# re-fetching them — turning a one-line code change from a multi-minute
+# re-download into a quick reinstall. (Dropped --no-cache-dir so the mount is
+# actually populated; the cache lives in the builder, not the final image.)
+RUN --mount=type=cache,target=/root/.cache/pip pip install ".[${RAG_EXTRAS}]"
 
 ENV RAG_HOME=/data \
     RAG_SERVER_HOST=0.0.0.0 \

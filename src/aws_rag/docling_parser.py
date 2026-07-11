@@ -141,8 +141,11 @@ def convert_pdf(
     pipeline_options.do_ocr = False
     pipeline_options.do_table_structure = True
     pipeline_options.table_structure_options = TableStructureOptions(mode=tmode)
+    # AUTO lets docling pick the best available device (CUDA when the GPU
+    # overlay is active, else CPU/MPS). Hardcoding CUDA crashes the default
+    # CPU-only server container that now runs the parse pipeline (GH #16).
     pipeline_options.accelerator_options = AcceleratorOptions(
-        device=AcceleratorDevice.CUDA,
+        device=AcceleratorDevice.AUTO,
     )
 
     converter = DocumentConverter(
