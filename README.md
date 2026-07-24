@@ -1,4 +1,4 @@
-# Datasheet-RAG - A PDF RAG stack built for electronics documents
+# Datasheet-RAG - A PDF RAG stack for electronics documents
 
 ## Overview
 
