@@ -1,4 +1,4 @@
-# AWS RAG Pipeline — Electronics Datasheet Intelligence
+# Datasheet-RAG - A PDF RAG stack built for electronics documents
 
 ## Overview
 
