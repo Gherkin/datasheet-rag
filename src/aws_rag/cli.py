@@ -2724,7 +2724,8 @@ def metadata() -> None:
               help="Override doc_title on every chunk row (manual title fix).")
 @click.option("--project-id", default=None)
 @click.option("--group", "group_name", default=None)
-@click.option("--mpn", default=None, help="Manufacturer part number, e.g. STM32H743VIT6. Replaces the current value.")
+@click.option("--mpn", default=None,
+              help="Manufacturer part number, e.g. STM32H743VIT6. Replaces the current value.")
 @click.option("--mpn-alias", "mpn_aliases", multiple=True,
               help="Add an MPN alias without replacing existing ones (repeatable).")
 @click.option("--manufacturer", default=None)
