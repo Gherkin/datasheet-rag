@@ -1,8 +1,8 @@
 """Cross-document validation for header-band re-transcription repair.
 
 Addresses the "are we overfitting to one PDF" concern: every detector
-heuristic and validation invariant in :mod:`aws_rag.table_repair` /
-:mod:`aws_rag.docling_parser` was derived from a single document
+heuristic and validation invariant in :mod:`datasheet_rag.table_repair` /
+:mod:`datasheet_rag.docling_parser` was derived from a single document
 (PIC32CK1025GC01100, doc_id ``d44efe...``). This test exercises a small,
 tracked fixture corpus (``tests/fixtures/table_repair_corpus/``) spanning
 that document's flagged tables *and* a structurally varied, healthy
@@ -33,8 +33,8 @@ from pathlib import Path
 
 import pytest
 
-from aws_rag.docling_parser import table_structure_untrustworthy
-from aws_rag.table_repair import TableRepairer, splice_header_band
+from datasheet_rag.docling_parser import table_structure_untrustworthy
+from datasheet_rag.table_repair import TableRepairer, splice_header_band
 
 CORPUS_DIR = Path(__file__).parent / "fixtures" / "table_repair_corpus"
 

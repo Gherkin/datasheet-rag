@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from aws_rag.config import get_settings
+from datasheet_rag.config import get_settings
 
 
 @pytest.fixture(autouse=True)
@@ -55,7 +55,7 @@ def _patch_httpx(monkeypatch, payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def test_text_only_request_uses_chat_model(monkeypatch):
-    from aws_rag.local_models import OllamaInvokeClient
+    from datasheet_rag.local_models import OllamaInvokeClient
 
     captured = _patch_httpx(monkeypatch, {"message": {"content": "hello"}})
     client = OllamaInvokeClient(chat_model="text-model", vision_model="vision-model")
@@ -83,7 +83,7 @@ def test_text_only_request_uses_chat_model(monkeypatch):
 
 
 def test_image_request_routes_to_vision_model_and_extracts_images(monkeypatch):
-    from aws_rag.local_models import OllamaInvokeClient
+    from datasheet_rag.local_models import OllamaInvokeClient
 
     captured = _patch_httpx(
         monkeypatch,
@@ -133,7 +133,7 @@ def test_get_chat_client_local_ollama(monkeypatch):
     monkeypatch.setenv("RAG_VISION_BACKEND", "local")
     monkeypatch.setenv("RAG_LOCAL_VISION_RUNTIME", "ollama")
     get_settings.cache_clear()
-    from aws_rag.local_models import OllamaInvokeClient, get_chat_client
+    from datasheet_rag.local_models import OllamaInvokeClient, get_chat_client
 
     client = get_chat_client(kind="vision")
     assert isinstance(client, OllamaInvokeClient)
@@ -144,7 +144,7 @@ def test_get_chat_client_local_huggingface(monkeypatch):
     monkeypatch.setenv("RAG_TEXT_BACKEND", "local")
     monkeypatch.setenv("RAG_LOCAL_TEXT_RUNTIME", "huggingface")
     get_settings.cache_clear()
-    from aws_rag.local_models import TransformersChatClient, get_chat_client
+    from datasheet_rag.local_models import TransformersChatClient, get_chat_client
 
     # Construction is lazy (no model load / no torch import) -> cheap to assert.
     client = get_chat_client(kind="text")
@@ -155,7 +155,7 @@ def test_get_chat_client_local_huggingface(monkeypatch):
 def test_get_chat_client_bedrock(monkeypatch):
     monkeypatch.setenv("RAG_VISION_BACKEND", "bedrock")
     get_settings.cache_clear()
-    from aws_rag.local_models import (
+    from datasheet_rag.local_models import (
         OllamaInvokeClient,
         TransformersChatClient,
         get_chat_client,

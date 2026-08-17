@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Registers the aws-rag MCP server with Claude Code (user scope, available in
-# every project), mirroring the configuration options of the aws-rag.mcpb
+# Registers the datasheet-rag MCP server with Claude Code (user scope, available in
+# every project), mirroring the configuration options of the datasheet-rag.mcpb
 # Claude Desktop extension. Run once: ./scripts/install-mcp.sh
 set -euo pipefail
 
@@ -33,10 +33,10 @@ prompt_secret() {
     printf -v "$var_name" '%s' "$input"
 }
 
-echo "aws-rag MCP setup"
+echo "datasheet-rag MCP setup"
 echo "================="
 echo "Choose a mode:"
-echo "  1) Remote — talk to a shared aws-rag server over HTTP"
+echo "  1) Remote — talk to a shared datasheet-rag server over HTTP"
 echo "  2) Local  — open a SQLite database on this machine directly"
 read -r -p "Mode [1]: " mode
 mode="${mode:-1}"
@@ -82,11 +82,11 @@ if [ -n "$DEFAULT_PROJECT_ID" ]; then
     env_args+=(-e "RAG_DEFAULT_PROJECT_ID=$DEFAULT_PROJECT_ID")
 fi
 
-claude mcp remove aws-rag -s user >/dev/null 2>&1 || true
+claude mcp remove datasheet-rag -s user >/dev/null 2>&1 || true
 
-claude mcp add aws-rag -s user "${env_args[@]}" -- \
+claude mcp add datasheet-rag -s user "${env_args[@]}" -- \
     uv run --project "$SERVER_DIR" python "$SERVER_DIR/main.py"
 
 echo
-echo "Registered 'aws-rag' as a user-scope MCP server."
+echo "Registered 'datasheet-rag' as a user-scope MCP server."
 echo "Restart Claude Code (or run /mcp) to connect."

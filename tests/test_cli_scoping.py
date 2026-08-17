@@ -13,12 +13,12 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from aws_rag.cli import cli
-from aws_rag.config import get_settings
-from aws_rag.models.chunk import Chunk, ChunkLevel, ChunkMetadata, LayoutType
-from aws_rag.project_config import get_project_config
-from aws_rag.store.schema import connect
-from aws_rag.store.sqlite import insert_chunks
+from datasheet_rag.cli import cli
+from datasheet_rag.config import get_settings
+from datasheet_rag.models.chunk import Chunk, ChunkLevel, ChunkMetadata, LayoutType
+from datasheet_rag.project_config import get_project_config
+from datasheet_rag.store.schema import connect
+from datasheet_rag.store.sqlite import insert_chunks
 
 
 def _chunk(chunk_id: str, doc_id: str) -> Chunk:

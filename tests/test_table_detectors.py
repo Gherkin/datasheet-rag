@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from aws_rag.docling_parser import (
+from datasheet_rag.docling_parser import (
     _detect_fused_header_row,
     _detect_garbled_header,
     _table_cells_to_compact_text,

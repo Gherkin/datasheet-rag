@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# Build aws-rag.mcpb — a self-contained MCPB bundle.
+# Build datasheet-rag.mcpb — a self-contained MCPB bundle.
 #
 # Usage:
 #   cd mcp-bundle && ./pack.sh
 #   # or from the project root:
 #   ./mcp-bundle/pack.sh
 #
-# Output: aws-rag.mcpb in the project root.
+# Output: datasheet-rag.mcpb in the project root.
 #
 # Steps:
-#   1. Copy the aws_rag source tree into server/src/ so the bundle is
+#   1. Copy the datasheet_rag source tree into server/src/ so the bundle is
 #      self-contained and does not require a local editable install.
 #   2. Zip manifest.json + server/ into a .mcpb archive.
 #   3. Clean up the temporary server/src/ copy.
@@ -20,9 +20,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-SRC="${PROJECT_ROOT}/src/aws_rag"
-BUNDLE_SRC="${SCRIPT_DIR}/server/src/aws_rag"
-OUTPUT="${PROJECT_ROOT}/aws-rag.mcpb"
+SRC="${PROJECT_ROOT}/src/datasheet_rag"
+BUNDLE_SRC="${SCRIPT_DIR}/server/src/datasheet_rag"
+OUTPUT="${PROJECT_ROOT}/datasheet-rag.mcpb"
 
 # --------------------------------------------------------------------------
 # Validate
@@ -45,7 +45,7 @@ fi
 # --------------------------------------------------------------------------
 # Copy source into bundle
 # --------------------------------------------------------------------------
-echo "Copying source → server/src/aws_rag ..."
+echo "Copying source → server/src/datasheet_rag ..."
 rm -rf "${SCRIPT_DIR}/server/src"
 mkdir -p "${SCRIPT_DIR}/server/src"
 cp -r "${SRC}" "${BUNDLE_SRC}"

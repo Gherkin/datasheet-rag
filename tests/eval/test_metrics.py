@@ -5,8 +5,8 @@ Deterministic, no AWS. Builds SearchResult lists by hand.
 
 from __future__ import annotations
 
-from aws_rag.eval.dataset import GoldenItem
-from aws_rag.eval.metrics import (
+from datasheet_rag.eval.dataset import GoldenItem
+from datasheet_rag.eval.metrics import (
     CategoryMetrics,
     QueryOutcome,
     aggregate_by_category,
@@ -19,8 +19,8 @@ from aws_rag.eval.metrics import (
     reciprocal_rank,
     relevance_vector,
 )
-from aws_rag.models.chunk import Chunk, ChunkLevel, ChunkMetadata, LayoutType
-from aws_rag.store.search import SearchResult
+from datasheet_rag.models.chunk import Chunk, ChunkLevel, ChunkMetadata, LayoutType
+from datasheet_rag.store.search import SearchResult
 
 
 def _chunk(

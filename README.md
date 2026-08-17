@@ -43,11 +43,11 @@ you have a lot of memory for running models.
 To install just the base for running with an external backend:
 
 ```bash
-pip install "git+https://github.com/Gherkin/aws-rag.git"
+pip install "git+https://github.com/Gherkin/datasheet-rag.git"
 ```
 To run the recommended setup locally (no server)
 ```bash
-pip install "aws-rag[[aws,docling,local-hf] @ git+https://github.com/Gherkin/aws-rag.git"
+pip install "datasheet-rag[[aws,docling,local-hf] @ git+https://github.com/Gherkin/datasheet-rag.git"
 ```
 
 You can also run the backend as a dedicated server. This is recommended even if you run fully local, since there is quite a bit of latency overhead in restarting the stack every time you run a query.  

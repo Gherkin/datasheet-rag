@@ -16,13 +16,13 @@ from collections.abc import Iterator
 import httpx
 import pytest
 
-from aws_rag.backend.base import RagServerError
-from aws_rag.backend.local import LocalBackend
-from aws_rag.backend.models import IngestResult
-from aws_rag.backend.remote import RemoteBackend, _iter_sse
-from aws_rag.ingest_pipeline import ParseResult, ProgressEvent
-from aws_rag.models.chunk import ChunkGraph
-from aws_rag.store.schema import connect
+from datasheet_rag.backend.base import RagServerError
+from datasheet_rag.backend.local import LocalBackend
+from datasheet_rag.backend.models import IngestResult
+from datasheet_rag.backend.remote import RemoteBackend, _iter_sse
+from datasheet_rag.ingest_pipeline import ParseResult, ProgressEvent
+from datasheet_rag.models.chunk import ChunkGraph
+from datasheet_rag.store.schema import connect
 
 EMBED_DIM = 4
 
@@ -147,7 +147,7 @@ def conn() -> Iterator[sqlite3.Connection]:
 
 
 def test_local_ingest_pdf_runs_pipeline_then_stores(conn, tmp_path, monkeypatch) -> None:
-    import aws_rag.ingest_pipeline as ip
+    import datasheet_rag.ingest_pipeline as ip
 
     did = "b" * 64
     graph = ChunkGraph(doc_id=did)
@@ -192,7 +192,7 @@ def test_local_ingest_pdf_runs_pipeline_then_stores(conn, tmp_path, monkeypatch)
 
 
 def test_local_ingest_pdf_describes_figures_by_default(conn, tmp_path, monkeypatch) -> None:
-    import aws_rag.ingest_pipeline as ip
+    import datasheet_rag.ingest_pipeline as ip
 
     did = "c" * 64
     monkeypatch.setattr(

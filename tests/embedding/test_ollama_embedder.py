@@ -1,4 +1,4 @@
-"""Unit tests for :class:`aws_rag.embedding.OllamaEmbedder` and the
+"""Unit tests for :class:`datasheet_rag.embedding.OllamaEmbedder` and the
 ``get_embedder`` backend factory. No network: ``httpx.post`` is monkeypatched.
 """
 
@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from aws_rag.config import get_settings
+from datasheet_rag.config import get_settings
 
 
 @pytest.fixture(autouse=True)
@@ -47,7 +47,7 @@ def _patch_embeddings(monkeypatch, vector_fn) -> dict[str, Any]:
 
 
 def test_embed_one_happy_path(monkeypatch):
-    from aws_rag.embedding import OllamaEmbedder
+    from datasheet_rag.embedding import OllamaEmbedder
 
     _patch_embeddings(monkeypatch, lambda _t: [0.1] * 8)
     emb = OllamaEmbedder(model="bge-m3", dimensions=8, host="http://x:1")
@@ -57,7 +57,7 @@ def test_embed_one_happy_path(monkeypatch):
 
 
 def test_embed_texts_preserves_order(monkeypatch):
-    from aws_rag.embedding import OllamaEmbedder
+    from datasheet_rag.embedding import OllamaEmbedder
 
     _patch_embeddings(monkeypatch, lambda t: [float(len(t))] * 4)
     emb = OllamaEmbedder(dimensions=4)
@@ -66,7 +66,7 @@ def test_embed_texts_preserves_order(monkeypatch):
 
 
 def test_dimension_mismatch_raises(monkeypatch):
-    from aws_rag.embedding import OllamaEmbedder
+    from datasheet_rag.embedding import OllamaEmbedder
 
     _patch_embeddings(monkeypatch, lambda _t: [0.0] * 768)
     emb = OllamaEmbedder(dimensions=1024)
@@ -79,7 +79,7 @@ def test_get_embedder_local_ollama(monkeypatch):
     monkeypatch.setenv("RAG_EMBEDDING_BACKEND", "local")
     monkeypatch.setenv("RAG_LOCAL_EMBEDDING_RUNTIME", "ollama")
     get_settings.cache_clear()
-    from aws_rag.embedding import OllamaEmbedder, get_embedder
+    from datasheet_rag.embedding import OllamaEmbedder, get_embedder
 
     assert isinstance(get_embedder(), OllamaEmbedder)
 
@@ -89,7 +89,7 @@ def test_get_embedder_local_sentence_transformers_default(monkeypatch):
     monkeypatch.setenv("RAG_EMBEDDING_BACKEND", "local")
     monkeypatch.delenv("RAG_LOCAL_EMBEDDING_RUNTIME", raising=False)
     get_settings.cache_clear()
-    from aws_rag.embedding import SentenceTransformerEmbedder, get_embedder
+    from datasheet_rag.embedding import SentenceTransformerEmbedder, get_embedder
 
     # Construction is lazy (no model load / no torch import), so this is cheap.
     assert isinstance(get_embedder(), SentenceTransformerEmbedder)
@@ -98,7 +98,7 @@ def test_get_embedder_local_sentence_transformers_default(monkeypatch):
 def test_get_embedder_bedrock(monkeypatch):
     monkeypatch.setenv("RAG_EMBEDDING_BACKEND", "bedrock")
     get_settings.cache_clear()
-    from aws_rag.embedding import BedrockEmbedder, get_embedder
+    from datasheet_rag.embedding import BedrockEmbedder, get_embedder
 
     # verbose is accepted by both backends; ensure kwarg filtering keeps it.
     assert isinstance(get_embedder(verbose=True), BedrockEmbedder)

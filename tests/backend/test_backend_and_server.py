@@ -14,16 +14,16 @@ from pathlib import Path
 
 import pytest
 
-from aws_rag.backend.local import LocalBackend
-from aws_rag.backend.models import MetadataPatch
-from aws_rag.models.chunk import (
+from datasheet_rag.backend.local import LocalBackend
+from datasheet_rag.backend.models import MetadataPatch
+from datasheet_rag.models.chunk import (
     Chunk,
     ChunkGraph,
     ChunkLevel,
     ChunkMetadata,
     LayoutType,
 )
-from aws_rag.store.schema import connect
+from datasheet_rag.store.schema import connect
 
 EMBED_DIM = 4
 
@@ -102,7 +102,7 @@ def test_local_ingest_rewrites_uploaded_figure_path(
     backend: LocalBackend, tmp_path, monkeypatch
 ) -> None:
     # Point figures_dir at a temp dir via settings override.
-    from aws_rag.config import get_settings
+    from datasheet_rag.config import get_settings
 
     settings = get_settings()
     monkeypatch.setattr(settings, "figures_dir", tmp_path / "figs")
@@ -128,7 +128,7 @@ def test_local_ingest_rewrites_uploaded_figure_path(
 def test_local_delete_doc_purges_local_files(
     backend: LocalBackend, tmp_path, monkeypatch
 ) -> None:
-    from aws_rag.config import get_settings
+    from datasheet_rag.config import get_settings
 
     settings = get_settings()
     monkeypatch.setattr(settings, "pdf_dir", tmp_path / "pdfs")
@@ -180,8 +180,8 @@ def test_local_delete_doc_purges_local_files(
 def client(conn: sqlite3.Connection):
     from fastapi.testclient import TestClient
 
-    from aws_rag.server import deps
-    from aws_rag.server.app import build_app
+    from datasheet_rag.server import deps
+    from datasheet_rag.server.app import build_app
 
     # Override the server backend to share the in-memory connection.
     deps.get_backend.cache_clear()
@@ -238,9 +238,9 @@ def test_server_ingest_pdf_streams_sse(client, monkeypatch) -> None:
     # Raw-PDF ingest (GH #16): the server runs the parse pipeline and streams
     # progress + a final result as SSE. Stub the parse (no Docling) and the
     # store step (no embedder) — this exercises the route plumbing itself.
-    import aws_rag.ingest_pipeline as ip
-    from aws_rag.backend.models import IngestResult
-    from aws_rag.ingest_pipeline import ParseResult, ProgressEvent
+    import datasheet_rag.ingest_pipeline as ip
+    from datasheet_rag.backend.models import IngestResult
+    from datasheet_rag.ingest_pipeline import ParseResult, ProgressEvent
 
     did = "d" * 64
 
@@ -285,9 +285,9 @@ def test_server_ingest_pdf_streams_sse(client, monkeypatch) -> None:
 def test_server_token_required_when_set(conn, monkeypatch) -> None:
     from fastapi.testclient import TestClient
 
-    from aws_rag.config import get_settings
-    from aws_rag.server import deps
-    from aws_rag.server.app import build_app
+    from datasheet_rag.config import get_settings
+    from datasheet_rag.server import deps
+    from datasheet_rag.server.app import build_app
 
     monkeypatch.setattr(get_settings(), "server_token", "secret")
     deps.get_backend.cache_clear()
@@ -310,9 +310,9 @@ def _auth(token: str) -> dict[str, str]:
 def _make_client(conn, monkeypatch, *, read_token: str | None = None):
     from fastapi.testclient import TestClient
 
-    from aws_rag.config import get_settings
-    from aws_rag.server import deps
-    from aws_rag.server.app import build_app
+    from datasheet_rag.config import get_settings
+    from datasheet_rag.server import deps
+    from datasheet_rag.server.app import build_app
 
     s = get_settings()
     monkeypatch.setattr(s, "server_token", None)
@@ -358,7 +358,7 @@ def test_read_token_gates_read_but_not_ingest(conn, monkeypatch) -> None:
 
 
 def test_admin_key_lifecycle_and_ingest(conn, monkeypatch) -> None:
-    from aws_rag.store import create_api_key, hash_token
+    from datasheet_rag.store import create_api_key, hash_token
 
     # Bootstrap an admin key directly in the DB (like `rag-server create-key`).
     _, admin_token = create_api_key(conn, label="boot", scopes=["admin"])
@@ -401,9 +401,9 @@ def test_admin_key_lifecycle_and_ingest(conn, monkeypatch) -> None:
 def test_cors_preflight(conn, monkeypatch) -> None:
     from fastapi.testclient import TestClient
 
-    from aws_rag.config import get_settings
-    from aws_rag.server import deps
-    from aws_rag.server.app import build_app
+    from datasheet_rag.config import get_settings
+    from datasheet_rag.server import deps
+    from datasheet_rag.server.app import build_app
 
     s = get_settings()
     monkeypatch.setattr(s, "server_token", None)

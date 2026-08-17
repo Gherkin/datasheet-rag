@@ -18,12 +18,12 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from aws_rag.cli import SHORT_DOC_ID_LEN, cli
-from aws_rag.config import get_settings
-from aws_rag.models.chunk import Chunk, ChunkLevel, ChunkMetadata, LayoutType
-from aws_rag.project_config import get_project_config
-from aws_rag.store.schema import connect
-from aws_rag.store.sqlite import insert_chunks
+from datasheet_rag.cli import SHORT_DOC_ID_LEN, cli
+from datasheet_rag.config import get_settings
+from datasheet_rag.models.chunk import Chunk, ChunkLevel, ChunkMetadata, LayoutType
+from datasheet_rag.project_config import get_project_config
+from datasheet_rag.store.schema import connect
+from datasheet_rag.store.sqlite import insert_chunks
 
 DOC_ID = "a" * 64          # has chunks + a real PDF on disk
 DOC_NO_PDF = "b" * 64      # has chunks but no PDF file on disk
@@ -75,7 +75,7 @@ def _clear_pdf_viewer_cache() -> None:
     # collide with other test modules' doc_id fixtures across the shared
     # test process, make sure our --host tests don't leak fake PDF bytes
     # into (or pick up stale bytes from) any other test.
-    from aws_rag import pdf_viewer
+    from datasheet_rag import pdf_viewer
 
     pdf_viewer._pdf_cache.clear()
     yield

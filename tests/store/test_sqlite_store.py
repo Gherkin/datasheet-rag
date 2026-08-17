@@ -19,27 +19,27 @@ from collections.abc import Iterator
 
 import pytest
 
-from aws_rag.models.chunk import (
+from datasheet_rag.models.chunk import (
     Chunk,
     ChunkLevel,
     ChunkMetadata,
     LayoutType,
 )
-from aws_rag.store.metadata import (
+from datasheet_rag.store.metadata import (
     apply_metadata_to_chunks,
     delete_metadata,
     get_metadata,
     list_docs,
     set_metadata,
 )
-from aws_rag.store.schema import _check_embedding_dim, connect, init_schema
-from aws_rag.store.search import (
+from datasheet_rag.store.schema import _check_embedding_dim, connect, init_schema
+from datasheet_rag.store.search import (
     SearchFilters,
     hybrid_search,
     keyword_search,
     vector_search,
 )
-from aws_rag.store.sqlite import (
+from datasheet_rag.store.sqlite import (
     count_chunks,
     delete_doc,
     get_chunk,
@@ -646,7 +646,7 @@ def test_figure_columns_round_trip(conn: sqlite3.Connection) -> None:
 def test_list_figure_chunks_filters_and_image_required(
     conn: sqlite3.Connection,
 ) -> None:
-    from aws_rag.store import list_figure_chunks
+    from datasheet_rag.store import list_figure_chunks
 
     fig_with_image = _make_figure_chunk("fig:has-image")
     fig_no_image = _make_figure_chunk("fig:orphan", image_path=None)
@@ -679,7 +679,7 @@ def test_list_figure_chunks_filters_and_image_required(
 def test_update_figure_description_persists_and_folds_into_context(
     conn: sqlite3.Connection,
 ) -> None:
-    from aws_rag.store import update_figure_description
+    from datasheet_rag.store import update_figure_description
 
     chunk = _make_figure_chunk("fig:to-describe", description=None)
     insert_chunks(conn, [chunk])
@@ -706,7 +706,7 @@ def test_update_figure_description_persists_and_folds_into_context(
 def test_schema_v1_database_is_migrated_to_v2() -> None:
     """A database created at schema v1 must gain the new figure columns
     without losing existing rows."""
-    from aws_rag.store import schema as schema_mod
+    from datasheet_rag.store import schema as schema_mod
 
     # Open a real file-backed DB so we can re-open it. (:memory: dies on close.)
     import tempfile

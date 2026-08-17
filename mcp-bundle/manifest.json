@@ -1,17 +1,17 @@
 {
   "manifest_version": "0.3",
-  "name": "aws-rag-mcp",
-  "display_name": "AWS RAG – Electronics Datasheet Search",
+  "name": "datasheet-rag-mcp",
+  "display_name": "Datasheet RAG – Electronics Datasheet Search",
   "version": "1.1.0",
   "description": "Search and navigate a multi-scale RAG database of electronics datasheets and reference manuals.",
-  "long_description": "Exposes a multi-scale RAG store of electronics datasheets as MCP tools: hybrid (BM25 + dense vector) search, hierarchical chunk navigation, figure retrieval, inline PDF page rendering, and document metadata lookup.\n\nTwo modes, chosen by configuration:\n• Local — opens a SQLite database on this machine directly (set the SQLite Database Path). Embeddings/figures are read from the local store.\n• Remote — talks to a shared aws-rag server over HTTP (set the Server URL and, if the server requires it, an Access Token). The server owns the database, embedder, figures, and PDFs; nothing local is needed. This mirrors how the CLI selects its backend.\n\nIf a Server URL is set it takes precedence (remote mode); otherwise the extension runs in local mode against the SQLite path.",
+  "long_description": "Exposes a multi-scale RAG store of electronics datasheets as MCP tools: hybrid (BM25 + dense vector) search, hierarchical chunk navigation, figure retrieval, inline PDF page rendering, and document metadata lookup.\n\nTwo modes, chosen by configuration:\n• Local — opens a SQLite database on this machine directly (set the SQLite Database Path). Embeddings/figures are read from the local store.\n• Remote — talks to a shared datasheet-rag server over HTTP (set the Server URL and, if the server requires it, an Access Token). The server owns the database, embedder, figures, and PDFs; nothing local is needed. This mirrors how the CLI selects its backend.\n\nIf a Server URL is set it takes precedence (remote mode); otherwise the extension runs in local mode against the SQLite path.",
   "author": {
     "name": "niyohn",
     "email": "hector@stekligan.se"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/niyohn/aws-rag"
+    "url": "https://github.com/niyohn/datasheet-rag"
   },
   "license": "MIT",
   "icon": "icon.png",
@@ -101,7 +101,7 @@
     "server_url": {
       "type": "string",
       "title": "Server URL (remote mode)",
-      "description": "Base URL of a shared aws-rag server, e.g. https://rag.internal:8080. Set this to use REMOTE mode — the server owns the database, embedder, figures, and PDFs, and the fields below (SQLite path, S3 bucket, AWS region) are not needed. Leave blank to use LOCAL mode.",
+      "description": "Base URL of a shared datasheet-rag server, e.g. https://rag.internal:8080. Set this to use REMOTE mode — the server owns the database, embedder, figures, and PDFs, and the fields below (SQLite path, S3 bucket, AWS region) are not needed. Leave blank to use LOCAL mode.",
       "required": false,
       "default": ""
     },

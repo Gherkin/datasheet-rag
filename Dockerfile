@@ -6,7 +6,7 @@
 # recreation (see docker-compose.yml).
 #
 # Build a Bedrock-backed server (no GPU, embeddings via AWS):
-#   docker build -t aws-rag-server .
+#   docker build -t datasheet-rag-server .
 # For fully local embeddings/vision instead, add the local-hf extra below
 # and provide a GPU (heavy — pulls torch). Bedrock is the simplest default.
 
@@ -33,7 +33,7 @@ COPY src ./src
 # (Bedrock + docling); `aws` provides the boto3 clients the Bedrock/Textract/S3
 # backends need. For in-process local embeddings (e.g. BAAI/bge-m3 via
 # sentence-transformers) build with:
-#   docker build --build-arg RAG_EXTRAS=server,local-hf,aws -t aws-rag-server .
+#   docker build --build-arg RAG_EXTRAS=server,local-hf,aws -t datasheet-rag-server .
 # (docker-compose.yml passes this through.) local-hf pulls torch — much larger.
 # Drop `aws` only for a fully-local image (all backends local, local storage).
 ARG RAG_EXTRAS=server,docling,aws

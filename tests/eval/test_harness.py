@@ -13,11 +13,11 @@ from pathlib import Path
 
 import pytest
 
-from aws_rag.eval.dataset import EvalSet, GoldenItem
-from aws_rag.eval.harness import RunConfig, run_eval
-from aws_rag.models.chunk import Chunk, ChunkLevel, ChunkMetadata, LayoutType
-from aws_rag.store.schema import connect
-from aws_rag.store.sqlite import insert_chunks
+from datasheet_rag.eval.dataset import EvalSet, GoldenItem
+from datasheet_rag.eval.harness import RunConfig, run_eval
+from datasheet_rag.models.chunk import Chunk, ChunkLevel, ChunkMetadata, LayoutType
+from datasheet_rag.store.schema import connect
+from datasheet_rag.store.sqlite import insert_chunks
 
 EMBED_DIM = 8
 

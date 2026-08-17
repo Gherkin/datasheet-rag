@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from aws_rag.project_config import (
+from datasheet_rag.project_config import (
     ProjectConfig,
     find_project_configs,
     get_project_config_for,
@@ -174,7 +174,7 @@ def test_get_project_config_for_returns_none_when_chain_empty(tmp_path: Path) ->
 @pytest.fixture()
 def discovered(monkeypatch: pytest.MonkeyPatch) -> ProjectConfig:
     """Pretend a ``.rag.toml`` with project_id=discovered-proj was found."""
-    from aws_rag import project_config as pc
+    from datasheet_rag import project_config as pc
 
     cfg = ProjectConfig(path=Path("/fake/.rag.toml"), project_id="discovered-proj")
     monkeypatch.setattr(pc, "get_project_config", lambda: cfg)
@@ -195,26 +195,26 @@ def test_discovered_config_used_as_implicit_scope(discovered: ProjectConfig) -> 
 
 
 def test_falls_back_to_settings_default_project_id(monkeypatch: pytest.MonkeyPatch) -> None:
-    from aws_rag import project_config as pc
+    from datasheet_rag import project_config as pc
 
     monkeypatch.setattr(pc, "get_project_config", lambda: None)
 
     class _FakeSettings:
         default_project_id = "env-default-proj"
 
-    monkeypatch.setattr("aws_rag.config.get_settings", lambda: _FakeSettings())
+    monkeypatch.setattr("datasheet_rag.config.get_settings", lambda: _FakeSettings())
 
     assert resolve_cli_project_id(None, is_global=False) == "env-default-proj"
 
 
 def test_resolves_to_none_when_nothing_set(monkeypatch: pytest.MonkeyPatch) -> None:
-    from aws_rag import project_config as pc
+    from datasheet_rag import project_config as pc
 
     monkeypatch.setattr(pc, "get_project_config", lambda: None)
 
     class _FakeSettings:
         default_project_id = None
 
-    monkeypatch.setattr("aws_rag.config.get_settings", lambda: _FakeSettings())
+    monkeypatch.setattr("datasheet_rag.config.get_settings", lambda: _FakeSettings())
 
     assert resolve_cli_project_id(None, is_global=False) is None

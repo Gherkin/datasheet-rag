@@ -1,4 +1,4 @@
-"""Unit tests for :mod:`aws_rag.embedding.embedder`.
+"""Unit tests for :mod:`datasheet_rag.embedding.embedder`.
 
 These tests never touch the network: every test injects a ``MagicMock``
 in place of the real ``bedrock-runtime`` client. The mock's
@@ -17,9 +17,9 @@ from unittest.mock import MagicMock
 import pytest
 from botocore.exceptions import ClientError
 
-from aws_rag.config import get_settings
-from aws_rag.embedding import BedrockEmbedder, embed_chunk_graph, embed_texts
-from aws_rag.models.chunk import (
+from datasheet_rag.config import get_settings
+from datasheet_rag.embedding import BedrockEmbedder, embed_chunk_graph, embed_texts
+from datasheet_rag.models.chunk import (
     Chunk,
     ChunkGraph,
     ChunkLevel,

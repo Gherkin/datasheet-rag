@@ -19,9 +19,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from aws_rag.description import FigureDescriber, describe_figures_in_store
-from aws_rag.models.chunk import Chunk, ChunkLevel, ChunkMetadata, LayoutType
-from aws_rag.store import connect, insert_chunks
+from datasheet_rag.description import FigureDescriber, describe_figures_in_store
+from datasheet_rag.models.chunk import Chunk, ChunkLevel, ChunkMetadata, LayoutType
+from datasheet_rag.store import connect, insert_chunks
 
 
 # ---------------------------------------------------------------------------
@@ -244,7 +244,7 @@ def test_describe_chunks_tolerates_per_chunk_failures(
 def test_describe_chunks_retries_transient_failure(
     conn: Any, tmp_path: Any, monkeypatch: Any
 ) -> None:
-    monkeypatch.setattr("aws_rag.description.describer._DESCRIBE_RETRY_WAIT", 0)
+    monkeypatch.setattr("datasheet_rag.description.describer._DESCRIBE_RETRY_WAIT", 0)
     img = tmp_path / "flaky.png"
     img.write_bytes(b"\x89PNGFLAKY")
     fig = _figure_chunk("c-flaky", image_path=str(img))
@@ -267,8 +267,8 @@ def test_describe_chunks_retries_transient_failure(
 def test_describe_chunks_gives_up_after_max_attempts(
     conn: Any, tmp_path: Any, monkeypatch: Any
 ) -> None:
-    monkeypatch.setattr("aws_rag.description.describer._DESCRIBE_RETRY_WAIT", 0)
-    from aws_rag.description import describer as _d
+    monkeypatch.setattr("datasheet_rag.description.describer._DESCRIBE_RETRY_WAIT", 0)
+    from datasheet_rag.description import describer as _d
 
     img = tmp_path / "dead.png"
     img.write_bytes(b"\x89PNGDEAD")
@@ -352,7 +352,7 @@ def test_describe_figures_in_store_writes_and_skips_missing_only(
     assert set(out.keys()) == {"c-todo"}
 
     # The already-described chunk must be untouched.
-    from aws_rag.store import get_chunk
+    from datasheet_rag.store import get_chunk
     intact = get_chunk(conn, "c-done")
     assert intact is not None
     assert intact.figure_description == "existing description — do not overwrite"
@@ -380,7 +380,7 @@ def test_describe_figures_in_store_dry_run_does_not_persist(
     )
     assert out == {"c-dry": "hypothetical desc"}
 
-    from aws_rag.store import get_chunk
+    from datasheet_rag.store import get_chunk
     after = get_chunk(conn, "c-dry")
     assert after is not None
     assert after.figure_description is None  # not persisted

@@ -13,7 +13,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from aws_rag.mcp.server import (
+from datasheet_rag.mcp.server import (
     _get_chunk_impl,
     _get_document_metadata_impl,
     _list_documents_impl,
@@ -21,8 +21,8 @@ from aws_rag.mcp.server import (
     _search_impl,
     _stats_impl,
 )
-from aws_rag.models.chunk import Chunk, ChunkLevel, ChunkMetadata, LayoutType
-from aws_rag.store import (
+from datasheet_rag.models.chunk import Chunk, ChunkLevel, ChunkMetadata, LayoutType
+from datasheet_rag.store import (
     connect,
     insert_chunks,
     set_metadata,
@@ -401,8 +401,8 @@ def _seed_figure_chunk(
     description: str | None = None,
 ) -> None:
     """Insert one figure-flavoured chunk into the in-memory store."""
-    from aws_rag.models.chunk import Chunk, ChunkMetadata
-    from aws_rag.store import insert_chunks
+    from datasheet_rag.models.chunk import Chunk, ChunkMetadata
+    from datasheet_rag.store import insert_chunks
 
     md = ChunkMetadata(
         doc_id="docA",
@@ -453,7 +453,7 @@ def test_search_results_flag_figure_chunks_with_uri(
 def test_get_figure_returns_image_bytes_and_citation(
     conn: Any, tmp_path: Any
 ) -> None:
-    from aws_rag.mcp.server import _get_figure_impl
+    from datasheet_rag.mcp.server import _get_figure_impl
 
     payload = b"\x89PNG\r\n\x1a\nimg-bytes-here"
     img = tmp_path / "spi.png"
@@ -474,7 +474,7 @@ def test_get_figure_returns_image_bytes_and_citation(
 
 
 def test_get_figure_unknown_chunk_raises(conn: Any) -> None:
-    from aws_rag.mcp.server import _get_figure_impl
+    from datasheet_rag.mcp.server import _get_figure_impl
 
     with pytest.raises(ValueError, match="unknown chunk_id"):
         _get_figure_impl("does-not-exist", conn=conn)
@@ -483,7 +483,7 @@ def test_get_figure_unknown_chunk_raises(conn: Any) -> None:
 def test_get_figure_on_non_figure_chunk_raises(conn: Any) -> None:
     """The seed fixture inserts text chunks under 'c1' etc — those must
     be rejected by get_figure."""
-    from aws_rag.mcp.server import _get_figure_impl
+    from datasheet_rag.mcp.server import _get_figure_impl
 
     with pytest.raises(ValueError, match="not a figure"):
         _get_figure_impl("c1", conn=conn)
@@ -493,7 +493,7 @@ def test_get_figure_missing_local_file_falls_through_to_s3_error(conn: Any, tmp_
     """A stale local path (ingestion ran elsewhere) isn't fatal by itself —
     it just means there's no local shortcut, so we fall through to S3. With
     no S3 key either, the chunk genuinely has nothing to serve."""
-    from aws_rag.mcp.server import _get_figure_impl
+    from datasheet_rag.mcp.server import _get_figure_impl
 
     _seed_figure_chunk(
         conn, "fig:gone",
@@ -505,7 +505,7 @@ def test_get_figure_missing_local_file_falls_through_to_s3_error(conn: Any, tmp_
 
 def test_get_figure_no_source_raises(conn: Any) -> None:
     """A figure chunk with neither local path nor S3 key has nothing to fetch."""
-    from aws_rag.mcp.server import _get_figure_impl
+    from datasheet_rag.mcp.server import _get_figure_impl
 
     _seed_figure_chunk(conn, "fig:bare", image_path=None, s3_key=None)
     with pytest.raises(ValueError, match="no usable figure source"):

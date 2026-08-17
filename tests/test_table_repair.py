@@ -21,7 +21,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from aws_rag.table_repair import (
+from datasheet_rag.table_repair import (
     TableRepairer,
     _parse_repair_response,
     splice_header_band,
@@ -297,7 +297,10 @@ def test_splice_expands_spans_with_grid_fill_convention():
 def test_splice_round_trips_through_existing_renderers():
     """A repaired grid should render exactly like a trusted Docling grid —
     no special-casing needed downstream."""
-    from aws_rag.docling_parser import _table_cells_to_compact_text, table_structure_untrustworthy
+    from datasheet_rag.docling_parser import (
+        _table_cells_to_compact_text,
+        table_structure_untrustworthy,
+    )
 
     cells = _fused_header_cells()
     proposed = [
@@ -395,7 +398,7 @@ def test_repairer_falls_back_to_description_model_id_when_unset(fake_client: Any
     """table_repair_model_id defaults to None (config.py) — falling back to
     description_model_id keeps the repairer usable out of the box, though the
     config docs note that default is tuned for cheap figure descriptions."""
-    from aws_rag.config import get_settings
+    from datasheet_rag.config import get_settings
     settings = get_settings()
     assert settings.table_repair_model_id is None  # the documented default
 
