@@ -344,9 +344,9 @@ class Settings(BaseSettings):
         default="eu.anthropic.claude-haiku-4-5-20251001-v1:0",
         description=(
             "Bedrock model ID for figure description generation. "
-            "Claude 3.5 Haiku is the cheapest vision-capable Claude on Bedrock. "
-            "Use anthropic.claud-3-5-sonnet for higher-quality "
-            "diagram interpretation at ~10× cost."
+            "Claude Haiku 4.5 is the cheapest vision-capable Claude on Bedrock. "
+            "Point this at a Sonnet inference profile for higher-quality "
+            "diagram interpretation at higher cost."
         ),
     )
     description_max_tokens: int = Field(
