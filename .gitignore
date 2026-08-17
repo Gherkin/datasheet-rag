@@ -18,6 +18,10 @@ output/
 example-pdfs/
 test-project/
 
+# Per-machine Claude Code settings (local permission allowlists, local paths).
+# .claude/settings.json could reasonably be shared; settings.local.json never.
+.claude/
+
 # MCP bundle build output
 *.mcpb
 
