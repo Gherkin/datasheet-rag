@@ -20,7 +20,7 @@
     "col": 3,
     "row_span": 1,
     "col_span": 1,
-    "text": "VALUE",
+    "text": "val 1",
     "is_header": false
   },
   {
@@ -28,7 +28,7 @@
     "col": 4,
     "row_span": 1,
     "col_span": 1,
-    "text": "UNIT",
+    "text": "Col 1",
     "is_header": true
   },
   {
@@ -36,7 +36,7 @@
     "col": 1,
     "row_span": 2,
     "col_span": 1,
-    "text": "V (ESD)",
+    "text": "Col 2",
     "is_header": true
   },
   {
@@ -52,7 +52,7 @@
     "col": 3,
     "row_span": 1,
     "col_span": 1,
-    "text": "(HBM), per JS-001, all pins (1)",
+    "text": "val 2",
     "is_header": false
   },
   {
@@ -60,7 +60,7 @@
     "col": 4,
     "row_span": 2,
     "col_span": 1,
-    "text": "\u00b12000",
+    "text": "val 3",
     "is_header": false
   },
   {
@@ -68,7 +68,7 @@
     "col": 1,
     "row_span": 2,
     "col_span": 1,
-    "text": "V (ESD)",
+    "text": "Col 2",
     "is_header": true
   },
   {
@@ -76,7 +76,7 @@
     "col": 2,
     "row_span": 1,
     "col_span": 1,
-    "text": "Electrostatic discharge",
+    "text": "Col 3",
     "is_header": true
   },
   {
@@ -84,7 +84,7 @@
     "col": 3,
     "row_span": 1,
     "col_span": 1,
-    "text": "model (CDM), per JEDEC JESD22-C101, all pins (2) \u00b1500",
+    "text": "val 4",
     "is_header": false
   },
   {
@@ -92,7 +92,7 @@
     "col": 4,
     "row_span": 1,
     "col_span": 1,
-    "text": "V",
+    "text": "val 5",
     "is_header": false
   }
 ]

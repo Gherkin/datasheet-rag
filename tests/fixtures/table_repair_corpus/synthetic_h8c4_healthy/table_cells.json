@@ -12,7 +12,7 @@
     "col": 2,
     "row_span": 1,
     "col_span": 1,
-    "text": "MIN",
+    "text": "Col 1",
     "is_header": true
   },
   {
@@ -20,7 +20,7 @@
     "col": 3,
     "row_span": 1,
     "col_span": 1,
-    "text": "MAX",
+    "text": "Col 2",
     "is_header": true
   },
   {
@@ -28,7 +28,7 @@
     "col": 4,
     "row_span": 1,
     "col_span": 1,
-    "text": "UNIT",
+    "text": "Col 3",
     "is_header": true
   },
   {
@@ -36,7 +36,7 @@
     "col": 1,
     "row_span": 1,
     "col_span": 1,
-    "text": "DVDD to GND",
+    "text": "Col 4",
     "is_header": true
   },
   {
@@ -44,7 +44,7 @@
     "col": 2,
     "row_span": 1,
     "col_span": 1,
-    "text": "-0.3",
+    "text": "val 1",
     "is_header": false
   },
   {
@@ -52,7 +52,7 @@
     "col": 3,
     "row_span": 1,
     "col_span": 1,
-    "text": "5.5",
+    "text": "val 2",
     "is_header": false
   },
   {
@@ -60,7 +60,7 @@
     "col": 4,
     "row_span": 1,
     "col_span": 1,
-    "text": "V",
+    "text": "val 3",
     "is_header": false
   },
   {
@@ -68,7 +68,7 @@
     "col": 1,
     "row_span": 1,
     "col_span": 1,
-    "text": "AVDD to GND",
+    "text": "Col 5",
     "is_header": true
   },
   {
@@ -76,7 +76,7 @@
     "col": 2,
     "row_span": 1,
     "col_span": 1,
-    "text": "-0.3",
+    "text": "val 1",
     "is_header": false
   },
   {
@@ -84,7 +84,7 @@
     "col": 3,
     "row_span": 1,
     "col_span": 1,
-    "text": "5.5",
+    "text": "val 2",
     "is_header": false
   },
   {
@@ -92,7 +92,7 @@
     "col": 4,
     "row_span": 1,
     "col_span": 1,
-    "text": "V",
+    "text": "val 3",
     "is_header": false
   },
   {
@@ -100,7 +100,7 @@
     "col": 1,
     "row_span": 1,
     "col_span": 1,
-    "text": "AINx / GPOx (2) to GND",
+    "text": "Col 6",
     "is_header": true
   },
   {
@@ -108,7 +108,7 @@
     "col": 2,
     "row_span": 1,
     "col_span": 1,
-    "text": "GND - 0.3",
+    "text": "val 4",
     "is_header": false
   },
   {
@@ -116,7 +116,7 @@
     "col": 3,
     "row_span": 1,
     "col_span": 1,
-    "text": "AVDD + 0.3",
+    "text": "val 5",
     "is_header": false
   },
   {
@@ -124,7 +124,7 @@
     "col": 4,
     "row_span": 1,
     "col_span": 1,
-    "text": "V",
+    "text": "val 3",
     "is_header": false
   },
   {
@@ -132,7 +132,7 @@
     "col": 1,
     "row_span": 1,
     "col_span": 1,
-    "text": "Digital input to GND",
+    "text": "Col 7",
     "is_header": true
   },
   {
@@ -140,7 +140,7 @@
     "col": 2,
     "row_span": 1,
     "col_span": 1,
-    "text": "GND - 0.3",
+    "text": "val 4",
     "is_header": false
   },
   {
@@ -148,7 +148,7 @@
     "col": 3,
     "row_span": 1,
     "col_span": 1,
-    "text": "5.5",
+    "text": "val 2",
     "is_header": false
   },
   {
@@ -156,7 +156,7 @@
     "col": 4,
     "row_span": 1,
     "col_span": 1,
-    "text": "V",
+    "text": "val 3",
     "is_header": false
   },
   {
@@ -164,7 +164,7 @@
     "col": 1,
     "row_span": 1,
     "col_span": 1,
-    "text": "Current through any pin except supply pins (3)",
+    "text": "Col 8",
     "is_header": true
   },
   {
@@ -172,7 +172,7 @@
     "col": 2,
     "row_span": 1,
     "col_span": 1,
-    "text": "-10",
+    "text": "val 6",
     "is_header": false
   },
   {
@@ -180,7 +180,7 @@
     "col": 3,
     "row_span": 1,
     "col_span": 1,
-    "text": "10",
+    "text": "val 7",
     "is_header": false
   },
   {
@@ -188,7 +188,7 @@
     "col": 4,
     "row_span": 1,
     "col_span": 1,
-    "text": "mA",
+    "text": "val 8",
     "is_header": false
   },
   {
@@ -196,7 +196,7 @@
     "col": 1,
     "row_span": 1,
     "col_span": 1,
-    "text": "Junction temperature, T J",
+    "text": "Col 9",
     "is_header": true
   },
   {
@@ -204,7 +204,7 @@
     "col": 2,
     "row_span": 1,
     "col_span": 1,
-    "text": "-40",
+    "text": "val 9",
     "is_header": false
   },
   {
@@ -212,7 +212,7 @@
     "col": 3,
     "row_span": 1,
     "col_span": 1,
-    "text": "125",
+    "text": "val 10",
     "is_header": false
   },
   {
@@ -220,7 +220,7 @@
     "col": 4,
     "row_span": 1,
     "col_span": 1,
-    "text": "\u00b0C",
+    "text": "val 11",
     "is_header": false
   },
   {
@@ -228,7 +228,7 @@
     "col": 1,
     "row_span": 1,
     "col_span": 1,
-    "text": "Storage temperature, T stg",
+    "text": "Col 10",
     "is_header": true
   },
   {
@@ -236,7 +236,7 @@
     "col": 2,
     "row_span": 1,
     "col_span": 1,
-    "text": "-60",
+    "text": "val 12",
     "is_header": false
   },
   {
@@ -244,7 +244,7 @@
     "col": 3,
     "row_span": 1,
     "col_span": 1,
-    "text": "150",
+    "text": "val 13",
     "is_header": false
   },
   {
@@ -252,7 +252,7 @@
     "col": 4,
     "row_span": 1,
     "col_span": 1,
-    "text": "\u00b0C",
+    "text": "val 11",
     "is_header": false
   }
 ]

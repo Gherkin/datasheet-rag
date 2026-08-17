@@ -84,13 +84,13 @@ def test_clean_table_renders_with_compact_pipe_structure():
 # ---------------------------------------------------------------------------
 
 def _garbled_header_table() -> list[dict[str, Any]]:
-    garbled = "Oscillator I/O PMUX Values 0x0 0x1 0x2 0x3 0x5 0x6"
+    garbled = "Grouped Signal Values 0x0 0x1 0x2 0x3 0x5 0x6"
     return [
         _cell(1, col, garbled, is_header=True, col_span=15) for col in range(1, 4)
     ] + [
         _cell(2, 1, "30"),
         _cell(2, 2, "RTC"),
-        _cell(2, 3, "PB08"),
+        _cell(2, 3, "PZ01"),
     ]
 
 
@@ -98,7 +98,7 @@ def test_garbled_header_detected_by_repetition():
     cells = _garbled_header_table()
     garbled = _detect_garbled_header(cells)
     assert garbled is not None
-    assert garbled.startswith("Oscillator I/O PMUX Values")
+    assert garbled.startswith("Grouped Signal Values")
     # Fused-row check should not even need to run for this — garbled wins first.
     assert table_structure_untrustworthy(cells) is not None
     assert "garbled" in table_structure_untrustworthy(cells)
@@ -122,28 +122,28 @@ def test_short_repeated_header_tokens_do_not_trigger_garbled_detection():
 # ---------------------------------------------------------------------------
 
 def _fused_header_table() -> list[dict[str, Any]]:
-    """Mirrors problem.md's Table 5-6 reference case: TableFormer fused pin
-    30's data ("30", "RTC", "PB08", "SERCOM3_PAD3") into the header band
-    alongside genuine column labels ("Port", "SERCOM"), while those same
+    """Mirrors the reference fusion case: TableFormer fused pin
+    30's data ("30", "RTC", "PZ01", "IFACE1_SIG3") into the header band
+    alongside genuine column labels ("Port", "Iface"), while those same
     values also exist as proper data elsewhere in the table.
     """
     return [
         # row 1: genuine header labels
         _cell(1, 1, "Pin", is_header=True),
         _cell(1, 2, "Port", is_header=True),
-        _cell(1, 3, "SERCOM", is_header=True),
+        _cell(1, 3, "Iface", is_header=True),
         # row 2: TableFormer fused pin 30's data into the header band
         _cell(2, 1, "30", is_header=True),
-        _cell(2, 2, "PB08", is_header=True),
-        _cell(2, 3, "SERCOM3_PAD3", is_header=True),
+        _cell(2, 2, "PZ01", is_header=True),
+        _cell(2, 3, "IFACE1_SIG3", is_header=True),
         # rows 3+: real data rows — including pin 30's actual values,
         # which is what makes the header-band copies fused, not novel
         _cell(3, 1, "30"),
-        _cell(3, 2, "PB08"),
-        _cell(3, 3, "SERCOM3_PAD3"),
+        _cell(3, 2, "PZ01"),
+        _cell(3, 3, "IFACE1_SIG3"),
         _cell(4, 1, "31"),
-        _cell(4, 2, "PB09"),
-        _cell(4, 3, "SERCOM3_PAD2"),
+        _cell(4, 2, "PZ02"),
+        _cell(4, 3, "IFACE1_SIG2"),
     ]
 
 
@@ -155,10 +155,10 @@ def test_fused_header_row_detected_by_text_overlap():
     fused = _detect_fused_header_row(cells)
     assert fused is not None
     # The overlapping text is exactly the leaked data values, not the labels.
-    for leaked in ("30", "pb08", "sercom3_pad3"):
+    for leaked in ("30", "pz01", "iface1_sig3"):
         assert leaked in fused.lower()
     assert "port" not in fused.lower()
-    assert "sercom" not in fused.lower() or "sercom3_pad3" in fused.lower()
+    assert "iface" not in fused.lower() or "iface1_sig3" in fused.lower()
 
     reason = table_structure_untrustworthy(cells)
     assert reason is not None
@@ -176,7 +176,7 @@ def test_legitimate_value_shaped_header_not_flagged_as_fusion():
     ] + [
         _cell(2, 1, "EIC"),
         _cell(2, 2, "ADCN"),
-        _cell(2, 3, "SERCOM"),
+        _cell(2, 3, "Iface"),
         _cell(2, 4, "TCC"),
     ]
     assert _detect_fused_header_row(cells) is None
@@ -185,14 +185,14 @@ def test_legitimate_value_shaped_header_not_flagged_as_fusion():
 
 def _multi_block_register_table() -> list[dict[str, Any]]:
     """Mirrors a real false-positive pattern found via `rag table-structure-sweep
-    --sample` (PIC32CK1025GC01100, p.1577 — flagged "fused (bit)"): a 32-bit
+    --sample` (a real flagged table — flagged "fused (bit)"): a 32-bit
     register rendered as repeated "Bit / Access / Reset" sub-blocks (one per
     8-bit range). Docling tagged "Bit" is_header=True in the first sub-block's
     row label but is_header=False on its repeats in later sub-blocks — while
     "Access"/"Reset"/"R/W" stayed consistently tagged throughout. So "bit" is
     the *only* overlap candidate, alone in its row each time — nothing
     resembling a leaked data row (several distinct values clustered together,
-    cf. pin 30's "30"/"PB08"/"SERCOM3_PAD3") ever appears.
+    cf. pin 30's "30"/"PZ01"/"IFACE1_SIG3") ever appears.
     """
     return [
         # Sub-block 1 (bits 31-24): "Bit" tagged as a header row label
@@ -225,7 +225,7 @@ def test_recurring_row_label_in_register_subblocks_not_flagged_as_fusion():
     inconsistently across repeated sub-blocks must not trip the fusion
     detector — it's the only overlap candidate in its row, never part of a
     multi-value cluster, which is what distinguishes it from a genuinely
-    leaked data row (pin 30's "30"/"PB08"/"SERCOM3_PAD3" together)."""
+    leaked data row (pin 30's "30"/"PZ01"/"IFACE1_SIG3" together)."""
     cells = _multi_block_register_table()
     assert _detect_fused_header_row(cells) is None
     assert table_structure_untrustworthy(cells) is None
@@ -254,15 +254,15 @@ def test_spanning_cell_origin_dedup_in_fusion_check():
     be considered, or every span would look like N independent repetitions.
     """
     cells = [
-        _cell(1, 1, "MUXEN=1 PMUX Values", is_header=True, col_span=3, is_origin=True),
-        _cell(1, 2, "MUXEN=1 PMUX Values", is_header=True, col_span=3, is_origin=False),
-        _cell(1, 3, "MUXEN=1 PMUX Values", is_header=True, col_span=3, is_origin=False),
+        _cell(1, 1, "MODE=1 Group Values", is_header=True, col_span=3, is_origin=True),
+        _cell(1, 2, "MODE=1 Group Values", is_header=True, col_span=3, is_origin=False),
+        _cell(1, 3, "MODE=1 Group Values", is_header=True, col_span=3, is_origin=False),
         _cell(2, 1, "0x0", is_header=True),
         _cell(2, 2, "0x1", is_header=True),
         _cell(2, 3, "0x2", is_header=True),
         _cell(3, 1, "30"),
-        _cell(3, 2, "PB08"),
-        _cell(3, 3, "SERCOM3_PAD3"),
+        _cell(3, 2, "PZ01"),
+        _cell(3, 3, "IFACE1_SIG3"),
     ]
     assert _detect_garbled_header(cells) is None
     assert _detect_fused_header_row(cells) is None
@@ -290,12 +290,12 @@ def test_reading_order_text_collapses_consecutive_garbled_repeats():
     not carry that repetition straight through (collapsing it is a general
     text-quality property, not special-cased to this table).
     """
-    garbled = "Oscillator I/O PMUX Values 0x0 0x1 0x2 0x3 0x5 0x6"
+    garbled = "Grouped Signal Values 0x0 0x1 0x2 0x3 0x5 0x6"
     cells = [_cell(1, col, garbled, is_header=True, col_span=15) for col in range(1, 16)]
-    cells += [_cell(2, 1, "30"), _cell(2, 2, "PB08")]
+    cells += [_cell(2, 1, "30"), _cell(2, 2, "PZ01")]
     text = _table_cells_to_reading_order_text(cells)
     assert text.count(garbled) == 1
-    assert text == f"{garbled}\n30\nPB08"
+    assert text == f"{garbled}\n30\nPZ01"
 
 
 def test_reading_order_text_dedups_spanning_cells():
