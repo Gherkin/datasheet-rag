@@ -1,17 +1,17 @@
 {
   "manifest_version": "0.3",
   "name": "datasheet-rag-mcp",
-  "display_name": "Datasheet RAG – Electronics Datasheet Search",
+  "display_name": "Datasheet RAG – Electronics Document Search",
   "version": "1.1.0",
   "description": "Search and navigate a multi-scale RAG database of electronics datasheets and reference manuals.",
   "long_description": "Exposes a multi-scale RAG store of electronics datasheets as MCP tools: hybrid (BM25 + dense vector) search, hierarchical chunk navigation, figure retrieval, inline PDF page rendering, and document metadata lookup.\n\nTwo modes, chosen by configuration:\n• Local — opens a SQLite database on this machine directly (set the SQLite Database Path). Embeddings/figures are read from the local store.\n• Remote — talks to a shared datasheet-rag server over HTTP (set the Server URL and, if the server requires it, an Access Token). The server owns the database, embedder, figures, and PDFs; nothing local is needed. This mirrors how the CLI selects its backend.\n\nIf a Server URL is set it takes precedence (remote mode); otherwise the extension runs in local mode against the SQLite path.",
   "author": {
-    "name": "niyohn",
-    "email": "hector@stekligan.se"
+    "name": "Gherkin",
+    "email": "niyohn@stekligan.se"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/niyohn/datasheet-rag"
+    "url": "https://github.com/Gherkin/datasheet-rag"
   },
   "license": "MIT",
   "icon": "icon.png",
