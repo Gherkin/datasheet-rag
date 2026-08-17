@@ -1,37 +1,49 @@
-# Shared RAG server for a team of developers.
+# OPTIONAL convenience wrapper for the published image.
 #
-#   docker compose up --build -d
+# You do NOT need this file to run the server. The image is self-contained:
 #
-# PERSISTENCE: /data holds the sqlite db, PDFs and figures. It's bind-mounted
-# from a host folder (RAG_DATA_DIR, default ./rag-data) so the data lives on
-# YOUR filesystem — easy to back up, inspect, and migrate, and untouched by
-# image rebuilds. Point it anywhere, e.g.:  export RAG_DATA_DIR=$HOME/rag-data
-# (To migrate an existing local store: copy ~/.rag/{rag.sqlite,figures,pdfs}
-#  into that folder while the server is stopped.)
+#   docker run -d --name rag-server -p 8080:8080 -v rag-data:/data \
+#     ghcr.io/gherkin/datasheet-rag:cpu
+#
+# Compose is worth it once you want a pinned env file, a restart policy and
+# `docker compose logs` in one place — or the TLS overlay below. See the
+# README's Docker section for the equivalent plain `docker run` recipes.
+#
+#   docker compose up -d
+#
+# PERSISTENCE: /data holds the sqlite db, PDFs, figures AND the HuggingFace
+# model cache. One volume covers all of it. By default it's a bind mount from
+# RAG_DATA_DIR so the data lives on YOUR filesystem — easy to back up, inspect
+# and migrate, and untouched by image rebuilds:
+#   export RAG_DATA_DIR=$HOME/.rag/rag-data
 #
 # Clients point at it with:  export RAG_SERVER_URL=http://<host>:8080
-#
-# Future web UI: it will be served by this same container on this same port
-# (mounted under /ui by the FastAPI app) — no extra service needed.
 
 services:
   rag-server:
-    build:
-      context: .
-      args:
-        # Include local-hf so the server can embed in-process with bge-m3
-        # (matches a local store's vectors). Pulls torch — larger image.
-        # `aws` gives the boto3 clients for the Bedrock text/vision backends
-        # this compose file selects below.
-        RAG_EXTRAS: ${RAG_EXTRAS:-server,local-hf,aws}
-    image: datasheet-rag-server
+    # Published image — no local build needed. Swap :cpu for :cuda on a GPU
+    # host (RAG_IMAGE_TAG=cuda) and uncomment the `deploy` block at the bottom.
+    # This replaces the old docker-compose.gpu.yml overlay, which existed only
+    # to add that block.
+    image: ghcr.io/gherkin/datasheet-rag:${RAG_IMAGE_TAG:-cpu}
+    # To build locally instead, uncomment. TORCH_VARIANT=cuda swaps the CPU
+    # torch wheels for the CUDA ones.
+    # build:
+    #   context: .
+    #   args:
+    #     TORCH_VARIANT: ${TORCH_VARIANT:-cpu}
     ports:
       - "8080:8080"
+    # The server runs as uid 1000 in the image. For a BIND mount the host
+    # directory's ownership wins, so match it to your own user. (Named volumes
+    # inherit the image's ownership and need none of this.)
+    user: "${RAG_UID:-1000}:${RAG_GID:-1000}"
     environment:
-      RAG_HOME: /data
       # --- Embedding/text/vision backends --------------------------------
-      # Embeddings run in-process with bge-m3 (local, 1024-dim) to match a
-      # store embedded locally. Text + vision go to Bedrock (needs ~/.aws).
+      # All three are independent runtime choices; the image ships every
+      # backend. The default below is the README's recommended hybrid:
+      # embeddings in-process with bge-m3 (local, 1024-dim), text + vision on
+      # Bedrock (needs credentials — see the volumes/env below).
       RAG_EMBEDDING_BACKEND: ${RAG_EMBEDDING_BACKEND:-local}
       RAG_LOCAL_EMBEDDING_RUNTIME: ${RAG_LOCAL_EMBEDDING_RUNTIME:-huggingface}
       RAG_LOCAL_EMBEDDING_MODEL: ${RAG_LOCAL_EMBEDDING_MODEL:-BAAI/bge-m3}
@@ -49,30 +61,35 @@ services:
       #   RAG_SERVER_READ_TOKEN: <shared read token>   # or mount a secret:
       #   RAG_SERVER_TOKEN_FILE: /run/secrets/read_token
       #
-      # Bootstrap the first admin key (writes to the DB):
-      #   docker compose exec rag-server rag-server create-key \
+      # Bootstrap the first admin key (writes to the DB) — with the image's
+      # entrypoint this is a one-shot container, no running server required:
+      #   docker compose run --rm rag-server create-key \
       #       --label bootstrap --scope admin
       # Then mint per-client ingest keys via POST /admin/keys (or `rag admin`).
       RAG_SERVER_READ_TOKEN: ${RAG_SERVER_READ_TOKEN:-}
       # Lock CORS to known browser origins (empty = no cross-origin access).
       RAG_SERVER_CORS_ORIGINS: ${RAG_SERVER_CORS_ORIGINS:-}
     volumes:
+      # Database, PDFs, figures and the HF model cache (HF_HOME=/data/hf-cache).
       - ${RAG_DATA_DIR:-~/.rag/rag-data}:/data
-      # Persist the HuggingFace model cache (bge-m3 ~2GB) so it isn't
-      # re-downloaded on every fresh container.
-      - hf-cache:/root/.cache/huggingface
       # Bedrock credentials for embeddings/text/vision. Mounted read-WRITE
       # (not :ro) because an SSO-based profile makes botocore refresh and
       # cache its bearer token under ~/.aws/sso|login/cache — a read-only
       # mount fails that write with "Errno 30 Read-only file system".
-      - ${HOME}/.aws:/root/.aws
+      # Target is the non-root user's home. Static keys need no mount at all:
+      # pass AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY as environment instead.
+      - ${HOME}/.aws:/home/rag/.aws
     # host.docker.internal resolution for talking to a host-side Ollama.
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
-    # For GPU-accelerated bge-m3, add the overlay:
-    #   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
-    # (needs the NVIDIA container toolkit on the host). CPU works without it.
-
-volumes:
-  hf-cache:
+    # For GPU-accelerated bge-m3, use the :cuda tag and uncomment this block
+    # (needs the NVIDIA Container Toolkit on the host). The equivalent for a
+    # plain `docker run` is `--gpus all`.
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]

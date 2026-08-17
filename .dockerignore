@@ -1,5 +1,8 @@
-# Keep the build context small — only pyproject.toml + src/ are needed
-# (see Dockerfile). Everything below is irrelevant to the image.
+# Keep the build context small — only pyproject.toml, README.md, LICENSE
+# and src/ are needed (see Dockerfile). Everything below is irrelevant.
+# NOTE: pyproject.toml declares `readme` and `license-files`, so those two
+# files must stay in the context or the metadata build warns (and, from
+# setuptools' 2027-02-18 deadline, fails) on the unmatched pattern.
 .venv
 venv
 .git
@@ -20,5 +23,6 @@ certs
 tests
 docs
 *.md
+!README.md
 .vscode
 .idea

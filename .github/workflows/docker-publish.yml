@@ -1,0 +1,124 @@
+# Build and publish the datasheet-rag server images to GHCR.
+#
+# Two variants, same extras, differing only in which torch wheels are baked in
+# (see Dockerfile's TORCH_VARIANT). Every backend choice in the README is a
+# runtime environment variable, so these two images cover all of them:
+#
+#   ghcr.io/<owner>/datasheet-rag:cpu    (also :latest)
+#   ghcr.io/<owner>/datasheet-rag:cuda
+#
+# Push to main moves :cpu/:cuda/:latest. Pushing a git tag v1.2.3 additionally
+# publishes :1.2.3-cpu, :1.2.3-cuda and :1.2.3 (= cpu). Pull requests build
+# both variants without pushing, so a broken Dockerfile fails before merge.
+#
+# BEFORE THE FIRST RUN: make the package PUBLIC, or this will fail. GHCR
+# creates new packages as PRIVATE regardless of repo visibility, and GitHub
+# Free allows only 500MB of private package storage — these two images are
+# ~9.3GB, so the push is blocked (no payment method) or billed as overage
+# (payment method on file). Flipping to public afterwards does not help: the
+# storage is consumed the moment it lands.
+#
+# Create the package with something tiny first, then flip it, then run this:
+#   docker tag hello-world:latest ghcr.io/<owner>/datasheet-rag:bootstrap
+#   docker push ghcr.io/<owner>/datasheet-rag:bootstrap      # ~10kB
+# then GitHub -> your packages -> datasheet-rag -> Package settings ->
+# Change visibility -> Public. Tags all live inside ONE package, so this is a
+# one-time step that covers :cpu, :cuda, :latest and every future tag.
+#
+# amd64 only. arm64 would need QEMU emulation, and emulated torch builds take
+# hours — add a native arm64 runner to the matrix if that changes.
+
+name: Publish Docker images
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*.*.*"]
+  pull_request:
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - pyproject.toml
+      - src/**
+      - .github/workflows/docker-publish.yml
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      # Don't let a cuda failure cancel an otherwise-good cpu build.
+      fail-fast: false
+      matrix:
+        variant: [cpu, cuda]
+
+    steps:
+      - name: Free up runner disk space
+        # The cuda image is ~6.5GB and the build needs room for the layer cache
+        # on top of that. A default runner doesn't have the headroom, so drop
+        # the preinstalled toolchains we don't use.
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          df -h /
+
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        # Skipped for pull requests: forks get a read-only token, and we don't
+        # push PR builds anyway.
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Lowercase the image name
+        id: img
+        # github.repository keeps the owner's original case ("Gherkin/..."),
+        # but Docker rejects uppercase in a repository name. metadata-action
+        # lowercases its own `images` input for us; the cache refs below use
+        # this value directly and would otherwise fail with
+        # "invalid reference format: repository name must be lowercase".
+        run: echo "name=${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Derive tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: latest=false
+          tags: |
+            type=raw,value=${{ matrix.variant }}
+            type=raw,value=latest,enable=${{ matrix.variant == 'cpu' && github.ref == 'refs/heads/main' }}
+            type=semver,pattern={{version}},suffix=-${{ matrix.variant }}
+            type=semver,pattern={{major}}.{{minor}},suffix=-${{ matrix.variant }}
+            type=semver,pattern={{version}},enable=${{ matrix.variant == 'cpu' }}
+            type=sha,suffix=-${{ matrix.variant }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          build-args: |
+            TORCH_VARIANT=${{ matrix.variant }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Registry-backed cache rather than type=gha: these layers are far
+          # larger than the 10GB Actions cache quota, which would thrash and
+          # evict on every run. A dedicated buildcache tag per variant keeps
+          # the torch layers warm between builds.
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ steps.img.outputs.name }}:buildcache-${{ matrix.variant }}
+          cache-to: ${{ github.event_name != 'pull_request' && format('type=registry,ref={0}/{1}:buildcache-{2},mode=max', env.REGISTRY, steps.img.outputs.name, matrix.variant) || '' }}

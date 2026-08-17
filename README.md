@@ -52,7 +52,125 @@ pip install "datasheet-rag[aws,docling,local-hf] @ git+https://github.com/Gherki
 
 You can also run the backend as a dedicated server. This is recommended even if you run fully local, since there is quite a bit of latency overhead in restarting the stack every time you run a query.  
 
-TODO: document how to install the docker container (with/without the HTTPS proxy)
+### Running the server in Docker
+
+Prebuilt images are published to GHCR:
+
+| Tag | Use it when |
+| --- | --- |
+| `ghcr.io/gherkin/datasheet-rag:cpu` (= `:latest`) | Any host without an NVIDIA GPU. Built against PyTorch's CPU wheels, so it skips ~2.5GB of CUDA libraries. |
+| `ghcr.io/gherkin/datasheet-rag:cuda` | An NVIDIA host, to GPU-accelerate local bge-m3 embeddings and local VLMs. Needs the NVIDIA Container Toolkit and `--gpus all`. |
+
+There is no separate image per backend. Both tags carry every extra
+(`server,aws,docling,local-hf`), and the choice between Bedrock and local
+models is made with environment variables at run time — the same ones
+documented in `~/.rag/config.env`.
+
+Everything stateful (sqlite db, PDFs, cropped figures, and the downloaded
+HuggingFace models) lives under `/data`, so a single volume is all you need.
+
+**Bedrock for everything** — smallest setup, nothing runs locally:
+
+```bash
+docker run -d --name rag-server -p 8080:8080 \
+  -v rag-data:/data \
+  -e RAG_EMBEDDING_BACKEND=bedrock \
+  -e RAG_TEXT_BACKEND=bedrock \
+  -e RAG_VISION_BACKEND=bedrock \
+  -e AWS_REGION=eu-west-1 \
+  -e AWS_ACCESS_KEY_ID=... -e AWS_SECRET_ACCESS_KEY=... \
+  ghcr.io/gherkin/datasheet-rag:cpu
+```
+
+**The recommended hybrid** — bge-m3 embeddings in-process, Bedrock for text and
+vision. Here credentials come from a mounted profile instead of static keys:
+
+```bash
+docker run -d --name rag-server -p 8080:8080 \
+  -v rag-data:/data \
+  -v ~/.aws:/home/rag/.aws \
+  -e AWS_PROFILE=rag -e AWS_REGION=eu-west-1 \
+  -e RAG_EMBEDDING_BACKEND=local \
+  -e RAG_LOCAL_EMBEDDING_RUNTIME=huggingface \
+  -e RAG_LOCAL_EMBEDDING_MODEL=BAAI/bge-m3 \
+  -e RAG_EMBEDDING_DIMENSIONS=1024 \
+  -e RAG_TEXT_BACKEND=bedrock \
+  -e RAG_VISION_BACKEND=bedrock \
+  ghcr.io/gherkin/datasheet-rag:cpu
+```
+
+Mount `~/.aws` read-write, not `:ro` — an SSO profile makes botocore refresh and
+cache its bearer token underneath it, and a read-only mount fails that write.
+
+**On a GPU**, swap the tag and add `--gpus all`:
+
+```bash
+docker run -d --name rag-server -p 8080:8080 --gpus all \
+  -v rag-data:/data \
+  ghcr.io/gherkin/datasheet-rag:cuda
+```
+
+**Fully local**, with a text model on the host's Ollama and no AWS at all:
+
+```bash
+docker run -d --name rag-server -p 8080:8080 --gpus all \
+  -v rag-data:/data \
+  --add-host=host.docker.internal:host-gateway \
+  -e RAG_EMBEDDING_BACKEND=local \
+  -e RAG_TEXT_BACKEND=local \
+  -e RAG_VISION_BACKEND=local \
+  -e RAG_LOCAL_TEXT_RUNTIME=ollama \
+  -e RAG_OLLAMA_HOST=http://host.docker.internal:11434 \
+  ghcr.io/gherkin/datasheet-rag:cuda
+```
+
+The first start downloads bge-m3 (~2GB) into the volume. It is cached there, so
+only the first run pays for it.
+
+#### Auth
+
+Reads are open until you set a read token or create an API key. To lock the
+server down, set `RAG_SERVER_READ_TOKEN` and mint per-client ingest keys. The
+image's entrypoint is `rag-server`, so its subcommands are a one-shot container
+away — no running server, no `exec`:
+
+```bash
+docker run --rm -v rag-data:/data ghcr.io/gherkin/datasheet-rag:cpu \
+  create-key --label bootstrap --scope admin
+```
+
+Clients then point at it with `export RAG_SERVER_URL=http://<host>:8080`.
+
+#### Bind mounts
+
+The server runs as uid 1000. A named volume (`-v rag-data:/data`) inherits that
+ownership and needs no thought. If you'd rather bind-mount a host directory,
+its ownership wins instead, so run as yourself and make sure the directory is
+yours:
+
+```bash
+docker run -d --name rag-server -p 8080:8080 \
+  --user "$(id -u):$(id -g)" -v "$HOME/.rag/rag-data:/data" \
+  ghcr.io/gherkin/datasheet-rag:cpu
+```
+
+#### Compose, and HTTPS
+
+`docker-compose.yml` is an optional convenience wrapper around the same image —
+worth it for a pinned env file and a restart policy, but never required.
+
+HTTPS is the one case that still wants Compose, because TLS terminates in a
+separate Caddy container. Get a certificate via the DNS-01 challenge (works for
+a LAN-only host with no inbound internet), then bring up both services:
+
+```bash
+./deploy/get-cert.sh rag.example.com you@example.com
+RAG_DOMAIN=rag.example.com RAG_DATA_DIR=$HOME/.rag/rag-data \
+  docker compose -f docker-compose.yml -f docker-compose.proxy.yml up -d
+```
+
+The overlay stops publishing port 8080 to the host, so only Caddy's :443 is
+reachable, and clients use `https://rag.example.com`.
 
 TODO: explain integration into harnesses, MCP or the straight runnable
 
