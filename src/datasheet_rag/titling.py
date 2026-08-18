@@ -6,7 +6,7 @@ manual") as the title instead of the document's actual name. This module
 asks a small Claude model to read the first page and infer a real title,
 then backfills it onto every chunk for that document plus the
 `doc_metadata` sidecar (marked `title_inferred: true` so it can be
-reviewed or overridden later via `rag metadata set`).
+reviewed or overridden later via `rag metadata`).
 """
 
 from __future__ import annotations

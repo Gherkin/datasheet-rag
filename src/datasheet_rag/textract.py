@@ -208,35 +208,6 @@ def extract_layout_elements(blocks: list[dict[str, Any]]) -> dict[str, list[dict
     return by_type
 
 
-def build_text_from_layout(blocks: list[dict[str, Any]]) -> str:
-    """Reconstruct document text preserving layout ordering.
-
-    Uses LAYOUT_* blocks for ordering when available, falls back to
-    LINE blocks sorted by geometry.
-    """
-    id_map = {b["Id"]: b for b in blocks if "Id" in b}
-
-    # Prefer layout blocks for ordering, using Textract's column-aware order.
-    layout_blocks = layout_reading_order(blocks)
-
-    if layout_blocks:
-        parts: list[str] = []
-        for lb in layout_blocks:
-            text = _collect_text(lb, id_map)
-            if text.strip():
-                parts.append(text.strip())
-        return "\n\n".join(parts)
-
-    # Fallback: LINE blocks sorted by geometry
-    lines = [b for b in blocks if b.get("BlockType") == "LINE"]
-    lines.sort(key=lambda b: (
-        b.get("Page", 0),
-        b.get("Geometry", {}).get("BoundingBox", {}).get("Top", 0),
-        b.get("Geometry", {}).get("BoundingBox", {}).get("Left", 0),
-    ))
-    return "\n".join(b.get("Text", "") for b in lines)
-
-
 def _collect_text(block: dict[str, Any], id_map: dict[str, dict[str, Any]]) -> str:
     """Recursively collect text from a block and its children."""
     if "Text" in block:
