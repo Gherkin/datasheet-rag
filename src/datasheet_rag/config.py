@@ -394,7 +394,7 @@ class Settings(BaseSettings):
         description="Concurrent table-repair API calls. Lower than figure "
                     "description — larger payloads (image + full cell list), "
                     "slower responses, and this is an opt-in maintenance "
-                    "path (rag repair-tables), not an ingest hot-path knob.",
+                    "path (rag repair tables), not an ingest hot-path knob.",
     )
 
     @field_validator(

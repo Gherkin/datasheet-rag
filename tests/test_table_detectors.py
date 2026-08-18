@@ -184,7 +184,7 @@ def test_legitimate_value_shaped_header_not_flagged_as_fusion():
 
 
 def _multi_block_register_table() -> list[dict[str, Any]]:
-    """Mirrors a real false-positive pattern found via `rag table-structure-sweep
+    """Mirrors a real false-positive pattern found via `rag inspect tables
     --sample` (a real flagged table — flagged "fused (bit)"): a 32-bit
     register rendered as repeated "Bit / Access / Reset" sub-blocks (one per
     8-bit range). Docling tagged "Bit" is_header=True in the first sub-block's

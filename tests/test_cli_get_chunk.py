@@ -158,7 +158,7 @@ def test_get_chunk_with_neighbors(db_path: Path) -> None:
     assert "Power supply thermal overview." in result.output
 
 
-def test_list_figures_chunk_id_round_trips_through_get_chunk(db_path: Path) -> None:
+def test_inspect_figures_chunk_id_round_trips_through_get_chunk(db_path: Path) -> None:
     fig = _chunk(
         DOC_A, 4, "See figure for thermal curve.",
         layout_type=LayoutType.FIGURE, figure_caption="Fig 1: Thermal derating curve",
@@ -169,7 +169,7 @@ def test_list_figures_chunk_id_round_trips_through_get_chunk(db_path: Path) -> N
     conn.commit()
     conn.close()
 
-    listed = _run(db_path, "list-figures", "-g")
+    listed = _run(db_path, "inspect", "figures", "-g")
     assert listed.exit_code == 0, listed.output
     short_id = f"{DOC_A[:SHORT_DOC_ID_LEN]}:L2:4"
     assert short_id in listed.output

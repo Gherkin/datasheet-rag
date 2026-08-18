@@ -1,4 +1,4 @@
-"""CLI-level tests for `rag stats` (the CLI equivalent of the MCP ``stats``
+"""CLI-level tests for `rag inspect stats` (the CLI equivalent of the MCP ``stats``
 tool — a chunk-count rollup by zoom level, scoped by project/doc).
 
 Exercises the command end-to-end against a real on-disk SQLite store with
@@ -74,7 +74,7 @@ def _clear_project_config_cache() -> None:
 
 def _run(db_path: Path, *args: str):
     runner = CliRunner()
-    return runner.invoke(cli, ["stats", "--db", str(db_path), *args])
+    return runner.invoke(cli, ["inspect", "stats", "--db", str(db_path), *args])
 
 
 def test_stats_global_totals_across_projects(db_path: Path) -> None:

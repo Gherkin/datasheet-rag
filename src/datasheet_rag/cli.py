@@ -18,6 +18,7 @@ from rich.table import Table
 from datasheet_rag.config import get_settings
 
 if TYPE_CHECKING:
+    from datasheet_rag.chunking.layout_parser import DocumentOutline
     from datasheet_rag.costs import CostEstimate
 
 console = Console()
@@ -54,6 +55,24 @@ def _cache_path(doc_id: str, suffix: str) -> Path:
     return get_settings().output_dir / f"{doc_id}{suffix}"
 
 
+def _resolve_store_first(arg: str) -> str | None:
+    """Expand a doc_id prefix via the store, or return None if it isn't there.
+
+    The store is the authoritative namespace: a doc_id printed by `rag list`
+    or `rag search` should resolve the same way everywhere. Cache-reading
+    commands consult this first and only fall back to prefix-matching the
+    local cache, which is what lets them still work on a PDF that was parsed
+    but never ingested.
+
+    Never raises — an unreachable server or an unknown prefix both mean "not
+    in the store", and the caller falls back to the cache.
+    """
+    try:
+        return _backend_for().resolve_doc_id(arg)
+    except Exception:
+        return None
+
+
 def _resolve_cached_doc_id(doc_id: str, suffix: str = "_outline.json") -> str:
     """Resolve a possibly-abbreviated doc_id against the local cache dir.
 
@@ -61,11 +80,19 @@ def _resolve_cached_doc_id(doc_id: str, suffix: str = "_outline.json") -> str:
     ``{output_dir}/{doc_id}*{suffix}`` and returns the single full doc_id that
     matches. Unlike the store-backed `_resolve_doc_id`, this sees documents
     that have a cached artifact but have not been embedded yet — which is the
-    normal state for `chunk`/`embed`/`extract-*` inputs.
+    normal state for `repair chunks` / `repair embeddings` inputs.
 
     Raises ClickException on zero or ambiguous matches (consistent message).
     """
     settings = get_settings()
+
+    # Store first, so an abbreviation resolves the same way it does in
+    # `rag list` / `rag search`; fall back to the cache for docs not (yet)
+    # ingested.
+    full = _resolve_store_first(doc_id)
+    if full is not None and (settings.output_dir / f"{full}{suffix}").is_file():
+        return full
+
     matches = sorted(settings.output_dir.glob(f"{doc_id}*{suffix}"))
     if not matches:
         raise click.ClickException(
@@ -78,6 +105,28 @@ def _resolve_cached_doc_id(doc_id: str, suffix: str = "_outline.json") -> str:
         names = ", ".join(sorted(resolved))
         raise click.ClickException(f"doc_id {doc_id!r} is ambiguous — matches: {names}")
     return next(iter(resolved))
+
+
+def _require_docling_outline(doc_id: str) -> str:
+    """Resolve *doc_id* to a cached Docling outline, or explain why there isn't one.
+
+    The table commands read Docling's own structure confidence signals, which
+    Textract's output has no equivalent of — so they are Docling-only by
+    nature, not by oversight. Detect the Textract case explicitly rather than
+    letting `_resolve_cached_doc_id` report a generic missing-artifact error
+    that reads like the document was never ingested.
+    """
+    settings = get_settings()
+    if not sorted(settings.output_dir.glob(f"{doc_id}*_outline.json")):
+        if sorted(settings.output_dir.glob(f"{doc_id}*_blocks.json")):
+            raise click.ClickException(
+                f"Document {doc_id!r} was ingested with the Textract backend, and "
+                "the table commands are Docling-only — they read Docling's "
+                "table-structure confidence signals, which Textract's output "
+                "does not provide. Re-ingest with `rag ingest --backend docling` "
+                "to use them (see GitHub issue #31)."
+            )
+    return _resolve_cached_doc_id(doc_id, "_outline.json")
 
 
 def _doc_input(arg: str, suffix: str) -> tuple[str, Path]:
@@ -175,7 +224,7 @@ def _short_chunk_id(chunk_id: str, doc_id: str) -> str:
 
 def _resolve_chunk_id(be, chunk_id: str) -> str:
     """Resolve a chunk_id whose doc_id portion may be abbreviated (as
-    printed by `rag search` / `rag list-figures`) to its full form.
+    printed by `rag search` / `rag inspect figures`) to its full form.
 
     Chunk IDs are `{doc_id}:L{level}:{index}`; the doc_id may be given in
     full or as an unambiguous prefix, resolved the same way `doc_id`
@@ -224,26 +273,53 @@ def _db_option(fn: _F) -> _F:
 # makes Click append `[default: ...]` to the help of every option that has a
 # concrete default. Options defaulting to None (and bare flags) still print
 # nothing, so those document their fallback in `help=` by hand.
-@click.group(context_settings={"show_default": True})
-@click.option("--bucket", envvar="RAG_S3_BUCKET", default=None, help="Override S3 bucket name.")
+class OrderedGroup(click.Group):
+    """A click.Group that lists its commands in a fixed, hand-picked order.
+
+    Click sorts alphabetically, which buries `ingest` and `search` among
+    commands most people touch once a year. Ordering by how often a command
+    is actually reached makes `rag --help` readable top-to-bottom.
+    """
+
+    def __init__(self, *args, order: list[str] | None = None, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._order = order or []
+
+    def list_commands(self, ctx: click.Context) -> list[str]:
+        known = [name for name in self._order if name in self.commands]
+        # Anything not named in the order falls to the end, alphabetically, so
+        # a newly added command shows up rather than silently disappearing.
+        return known + sorted(set(self.commands) - set(known))
+
+
+@click.group(
+    cls=OrderedGroup,
+    context_settings={"show_default": True},
+    order=[
+        "ingest", "metadata", "search", "list", "get",
+        "inspect", "config", "repair", "delete", "admin",
+    ],
+)
 @click.pass_context
-def cli(ctx: click.Context, bucket: str | None) -> None:
+def cli(ctx: click.Context) -> None:
     """Datasheet RAG Pipeline — electronics datasheet ingestion."""
-    if bucket:
-        import os
-        os.environ["RAG_S3_BUCKET"] = bucket
     # Remind the user when they're using the local sqlite file rather than a
-    # shared server (printed to stderr, non-failing). Skipped for `init`,
-    # which is the command that sets the server up.
-    if ctx.invoked_subcommand != "init":
+    # shared server (printed to stderr, non-failing). Skipped for `config`,
+    # which is the group that sets the server up.
+    if ctx.invoked_subcommand != "config":
         from datasheet_rag.backend import emit_local_notice
 
         emit_local_notice()
 
 
 # ---------------------------------------------------------------------------
-# Init
+# Config
 # ---------------------------------------------------------------------------
+
+
+@cli.group("config", short_help="Manage configuration.")
+def config_group() -> None:
+    """Create and manage this install's configuration."""
 
 
 def _config_env_lines() -> list[str]:
@@ -277,9 +353,9 @@ def _config_env_lines() -> list[str]:
     return lines
 
 
-@cli.command(short_help="Create ~/.rag and write a config.env.")
+@config_group.command("init", short_help="Create ~/.rag and write a config.env.")
 @click.option("--force", is_flag=True, help="Overwrite an existing config.env without prompting.")
-def init(force: bool) -> None:
+def config_init(force: bool) -> None:
     """Create ~/.rag and a documented config.env, prompting for the essentials.
 
     Sets up the local store directory and writes a config file with the few
@@ -334,7 +410,7 @@ def init(force: bool) -> None:
 
     # Render the full template, uncommenting the chosen keys.
     rendered: list[str] = [
-        "# datasheet-rag configuration — generated by `rag init`.",
+        "# datasheet-rag configuration — generated by `rag config init`.",
         "# Uncomment and edit any line below to override a default.",
         "",
     ]
@@ -363,121 +439,36 @@ def init(force: bool) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Upload
+# Inspect / Repair groups
 # ---------------------------------------------------------------------------
 
 
-@cli.command(short_help="Upload one or more PDFs to S3.")
-@click.argument("pdf_paths", nargs=-1, required=True, type=click.Path(exists=True, path_type=Path))
-@click.option("--doc-id", default=None, help="Explicit document ID (default: content hash).")
-def upload(pdf_paths: tuple[Path, ...], doc_id: str | None) -> None:
-    """Upload one or more PDFs to S3."""
-    from datasheet_rag.storage import upload_pdf
+@cli.group("inspect", short_help="Examine a document without changing it.")
+def inspect_group() -> None:
+    """Read-only reports about a document.
 
-    for pdf_path in pdf_paths:
-        if not pdf_path.suffix.lower() == ".pdf":
-            console.print(f"[red]Skipping non-PDF:[/] {pdf_path}")
-            continue
-        did, key = upload_pdf(pdf_path, doc_id=doc_id)
-        console.print(f"  doc_id = {did}")
-        console.print(f"  s3_key = {key}")
-        console.print()
+    Everything here prints and nothing writes, costs money, or calls an LLM.
+    Use `repair` for the commands that act on what these turn up.
 
-
-# ---------------------------------------------------------------------------
-# Analyze (Textract)
-# ---------------------------------------------------------------------------
-
-
-@cli.command(short_help="Run Textract analysis on a PDF.")
-@click.argument("target", type=str)
-@click.option(
-    "--mode",
-    type=click.Choice(["sync", "async"]),
-    default="async",
-    help="sync = local single-page PDF, async = S3 multi-page.",
-)
-@click.option("--wait/--no-wait", default=True, help="Wait for async job to complete.")
-@click.option("--output", "-o", type=click.Path(path_type=Path), default=None,
-              help="Where to write the blocks JSON (default: the cached {doc_id}_blocks.json).")
-def analyze(target: str, mode: str, wait: bool, output: Path | None) -> None:
-    """Run Textract analysis on a PDF.
-
-    TARGET's meaning follows --mode:
-      • sync  — TARGET is a local PDF path; its doc_id is its content hash.
-      • async — TARGET is a doc_id (full hash or unambiguous prefix) of a PDF
-                already uploaded to S3 with `rag upload`.
-
-    Either way the blocks are saved to the cached ``{doc_id}_blocks.json`` (or
-    --output).
+    `stats` and `figures` read the store, so they only see ingested
+    documents; `layout` and `tables` read the local layout cache, so they
+    also work on a PDF that was parsed but whose ingest never finished.
     """
-    from datasheet_rag.textract import (
-        analyze_document_sync,
-        get_job_results,
-        save_blocks,
-        start_analysis,
-        wait_for_job,
-    )
 
-    settings = get_settings()
 
-    if mode == "sync":
-        from datasheet_rag.docling_parser import content_hash
+@cli.group("repair", short_help="Fix or reprocess an ingested document.")
+def repair_group() -> None:
+    """Redo part of the pipeline for a document already in the store.
 
-        pdf_path = Path(target)
-        if not pdf_path.is_file():
-            raise click.BadParameter(f"File not found: {pdf_path}")
-        doc_id = content_hash(pdf_path)
-        response = analyze_document_sync(pdf_path)
-        blocks = response.get("Blocks", [])
-    else:
-        # async — target is a doc_id (prefix-resolved against S3 uploads).
-        from datasheet_rag.storage import list_documents
+    These re-run individual stages against the cached layout artifact rather
+    than re-ingesting — `rag ingest --force` would discard the layout analysis
+    too, which is by far the most expensive step on a large datasheet.
 
-        docs = list_documents()
-        matches = [d for d in docs if d["doc_id"].startswith(target)]
-        if not matches:
-            raise click.BadParameter(
-                f"doc_id '{target}' not found. Upload the PDF first with `rag upload`."
-            )
-        if len({d["doc_id"] for d in matches}) > 1:
-            names = ", ".join(sorted({d["doc_id"][:SHORT_DOC_ID_LEN] for d in matches}))
-            raise click.BadParameter(f"doc_id '{target}' is ambiguous — matches: {names}")
-        doc_id = matches[0]["doc_id"]
-
-        # Find the actual PDF key under the prefix
-        from datasheet_rag.aws import s3_client
-
-        client = s3_client()
-        prefix = matches[0]["prefix"]
-        resp = client.list_objects_v2(Bucket=settings.s3_bucket, Prefix=prefix)
-        pdf_keys = [
-            obj["Key"]
-            for obj in resp.get("Contents", [])
-            if obj["Key"].lower().endswith(".pdf")
-        ]
-        if not pdf_keys:
-            raise click.ClickException(f"No PDF found under s3://{settings.s3_bucket}/{prefix}")
-
-        s3_key = pdf_keys[0]
-        job_id = start_analysis(doc_id, s3_key)
-
-        if not wait:
-            console.print(f"Job ID: {job_id}")
-            console.print("Use `rag job-status` to check progress.")
-            return
-
-        status = wait_for_job(job_id)
-        if status != "SUCCEEDED":
-            raise click.ClickException(f"Textract job failed with status: {status}")
-
-        blocks = get_job_results(job_id)
-
-    # Save output
-    if output is None:
-        output = _cache_path(doc_id, "_blocks.json")
-
-    save_blocks(blocks, output)
+    Anything here that changes a document's embedded text (`tables`,
+    `figures`, `chunks`) needs `rag repair embeddings <doc-id>` afterwards
+    before the change shows up in `rag search`. `titles` is the exception —
+    it writes doc_title directly and is visible immediately.
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -491,10 +482,38 @@ def analyze(target: str, mode: str, wait: bool, output: Path | None) -> None:
               help="Restrict to a project (default: scoped by .rag.toml if present).")
 @click.option("--global", "-g", "is_global", is_flag=True,
               help="Show every project, ignoring any .rag.toml scoping.")
+@click.option("--group", "group_name", default=None, help="Only show documents in this group.")
+@click.option("--mpn", default=None, help="Only show documents with this part number.")
+@click.option("--tag", "tags", multiple=True,
+              help="Only show documents that have this tag (repeatable — "
+                   "with multiple --tag, a document must have all of them).")
+@click.option("--attr", "attrs", multiple=True, metavar="KEY=VALUE",
+              help="Only show documents whose attributes contain this "
+                   "key=value pair (repeatable, all must match).")
+@click.option("--wide", "-w", is_flag=True,
+              help="Show the sidecar columns (project, group, mpn, manufacturer, "
+                   "subsystem, tags) in place of the chunk/page/ingest columns. "
+                   "Implied whenever a filter is given.")
 @click.option("--s3", "show_s3", is_flag=True,
               help="List raw S3 uploads instead (debug — includes documents not yet ingested).")
-def list_docs(db_path: Path | None, project_id: str | None, is_global: bool, show_s3: bool) -> None:
-    """List ingested documents (searchable in the store)."""
+def list_docs(
+    db_path: Path | None,
+    project_id: str | None,
+    is_global: bool,
+    group_name: str | None,
+    mpn: str | None,
+    tags: tuple[str, ...],
+    attrs: tuple[str, ...],
+    wide: bool,
+    show_s3: bool,
+) -> None:
+    """List ingested documents (searchable in the store).
+
+    Shows the store's own view — title, chunk and page counts, ingest time.
+    Pass --wide, or any sidecar filter, to swap those for the metadata columns
+    (project, group, mpn, manufacturer, subsystem, tags) instead; filters
+    narrow the listing to documents whose sidecar row matches.
+    """
     from datasheet_rag.project_config import resolve_cli_project_id
     project_id = resolve_cli_project_id(project_id, is_global=is_global)
 
@@ -514,33 +533,105 @@ def list_docs(db_path: Path | None, project_id: str | None, is_global: bool, sho
         console.print(table)
         return
 
-    docs = _backend_for(db_path).get_ingested_docs(project_id=project_id)
+    attr_filters: dict[str, str] = {}
+    for item in attrs:
+        key, sep, value = item.partition("=")
+        if not sep or not key:
+            raise click.BadParameter(
+                f"--attr expects KEY=VALUE, got {item!r}", param_hint="--attr"
+            )
+        attr_filters[key] = value
+
+    filtering = bool(group_name or mpn or tags or attr_filters)
+    be = _backend_for(db_path)
+    docs = be.get_ingested_docs(project_id=project_id)
+
+    # The sidecar is a separate table from the chunk store, so join by doc_id
+    # rather than assuming every ingested document has a row in it.
+    # Always fetched, not just when filtering: the stale marker lives in the
+    # sidecar and belongs in the default view.
+    try:
+        meta_by_id = {
+            m.doc_id: m
+            for m in be.list_docs(project_id=project_id, group_name=group_name, mpn=mpn)
+        }
+    except Exception:
+        meta_by_id = {}
+
+    if filtering:
+        wanted_tags = set(tags)
+        docs = [
+            d for d in docs
+            if (m := meta_by_id.get(d.doc_id)) is not None
+            and wanted_tags.issubset(set(m.tags))
+            and all(m.attributes.get(k) == v for k, v in attr_filters.items())
+        ]
 
     if not docs:
-        console.print("[yellow]No ingested documents found.[/] Run [cyan]rag ingest[/] first "
-                      "(or pass --s3 to see raw uploads).")
+        if filtering:
+            console.print("[yellow]No ingested documents match those filters.[/]")
+        else:
+            console.print("[yellow]No ingested documents found.[/] Run [cyan]rag ingest[/] first "
+                          "(or pass --s3 to see raw uploads).")
         return
+
+    # The two views answer different questions — ingest health vs. cataloguing
+    # — so --wide swaps the store-stat columns for the sidecar ones rather than
+    # appending them. Showing all eleven at once is unreadable on an 80-column
+    # terminal, where Rich squeezes every cell down to nothing.
+    show_meta = wide or filtering
+    stale_ids = {
+        d.doc_id for d in docs
+        if (m := meta_by_id.get(d.doc_id)) is not None
+        and m.attributes.get(_STALE_ATTR)
+    }
 
     table = Table(title="Ingested Documents")
     table.add_column("doc_id", style="cyan")
     table.add_column("title")
-    table.add_column("chunks", justify="right")
-    table.add_column("pages", justify="right")
-    table.add_column("ingested")
+    if stale_ids:
+        table.add_column("stale")
+    if show_meta:
+        for col in ("project", "group", "mpn", "manufacturer", "subsystem", "tags"):
+            table.add_column(col)
+    else:
+        table.add_column("chunks", justify="right")
+        table.add_column("pages", justify="right")
+        table.add_column("ingested")
 
     for doc in docs:
-        table.add_row(
-            doc.doc_id[:SHORT_DOC_ID_LEN],
-            doc.doc_title or "—",
-            str(doc.chunk_count),
-            str(doc.page_count) if doc.page_count is not None else "—",
-            doc.ingested_at or "—",
-        )
+        row = [doc.doc_id[:SHORT_DOC_ID_LEN], doc.doc_title or "—"]
+        if stale_ids:
+            row.append("[yellow]re-embed[/]" if doc.doc_id in stale_ids else "")
+        if show_meta:
+            m = meta_by_id.get(doc.doc_id)
+            row += [
+                (m.project_id if m else None) or "—",
+                (m.group_name if m else None) or "—",
+                (m.mpn if m else None) or "—",
+                (m.manufacturer if m else None) or "—",
+                (m.subsystem if m else None) or "—",
+                (", ".join(m.tags) if m and m.tags else "—"),
+            ]
+        else:
+            row += [
+                str(doc.chunk_count),
+                str(doc.page_count) if doc.page_count is not None else "—",
+                doc.ingested_at or "—",
+            ]
+        table.add_row(*row)
 
     console.print(table)
+    if stale_ids:
+        console.print(
+            f"  [yellow]{len(stale_ids)} document(s) were repaired since they were "
+            "last embedded[/] — their stored text has moved on from their vectors, "
+            "so `rag search` still returns the old wording. Run "
+            "[cyan]rag repair embeddings <doc-id>[/] on each to catch them up."
+        )
 
 
-@cli.command("stats", short_help="Show chunk counts by zoom level.")
+@inspect_group.command("stats", short_help="Show chunk counts by zoom level.")
 @click.option("--project-id", default=None,
               help="Restrict to a project (default: scoped by .rag.toml if present).")
 @click.option("--global", "-g", "is_global", is_flag=True,
@@ -604,11 +695,15 @@ class AliasedGroup(click.Group):
         return super().get_command(ctx, self._ALIASES.get(cmd_name, cmd_name))
 
 
-@cli.group("get", cls=AliasedGroup, short_help="Fetch a doc, page, chunk, or figure.")
+@cli.group("get", cls=AliasedGroup, short_help="Fetch a doc, page, chunk, figure, or text.")
 def get_group() -> None:
-    """Fetch a document, page, chunk, or figure and save/show it.
+    """Fetch a document, page, chunk, figure, or its text and save/show it.
 
-    Subcommands: doc (or document), page, chunk, fig (or figure).
+    Subcommands: doc (or document), page, chunk, fig (or figure), text.
+
+    All of these need an ingested document except `text`, which reads the
+    local layout cache and so also works for a PDF that was parsed but whose
+    ingest never finished.
     """
 
 
@@ -871,29 +966,31 @@ def delete_doc_cmd(doc_id: str, db_path: Path | None, dry_run: bool, assume_yes:
     console.print(f"[green]Deleted[/] {deleted} chunk(s) for {label}.")
 
 
-# ---------------------------------------------------------------------------
-# Extract text (from saved Textract JSON)
-# ---------------------------------------------------------------------------
-
-
-@cli.command("extract-text", short_help="Dump a document's extracted text.")
+@get_group.command("text", short_help="Dump a document's extracted text.")
 @click.argument("doc_id", type=str)
 @click.option("--output", "-o", type=click.Path(path_type=Path), default=None,
               help="Write the text to this file (default: print it to stdout).")
-def extract_text(doc_id: str, output: Path | None) -> None:
-    """Extract readable text from a document's Textract blocks, preserving layout order.
+def get_text_cmd(doc_id: str, output: Path | None) -> None:
+    """Dump a document's extracted text in reading order.
 
-    DOC_ID is a doc_id (full hash or unambiguous prefix); the blocks are read
-    from the cached ``{doc_id}_blocks.json``. An explicit blocks-JSON path is
-    also accepted in place of a doc_id.
+    DOC_ID is a doc_id (full hash or unambiguous prefix), resolved against
+    whichever layout artifact the ingest backend cached — Docling's
+    ``{doc_id}_outline.json`` or Textract's ``{doc_id}_blocks.json``. An
+    explicit path to either is also accepted in place of a doc_id.
+
+    Section titles are emitted as headings so the dump keeps the document's
+    structure rather than running together as one wall of prose.
     """
-    from datasheet_rag.textract import build_text_from_layout
+    _, outline = _load_outline(doc_id)
 
-    _, blocks_json = _doc_input(doc_id, "_blocks.json")
-    with open(blocks_json) as f:
-        blocks = json.load(f)
-
-    text = build_text_from_layout(blocks)
+    parts: list[str] = []
+    for section in outline.all_sections_flat:
+        if section.title:
+            parts.append(f"{'#' * (section.level + 1)} {section.title}")
+        body = section.all_text
+        if body:
+            parts.append(body)
+    text = "\n\n".join(parts)
 
     if output:
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -933,7 +1030,17 @@ def _resolve_layout_input(arg: str) -> tuple[str, str, Path]:
         )
 
     settings = get_settings()
-    for suffix, backend in (("_outline.json", "docling"), ("_blocks.json", "textract")):
+    artifacts = (("_outline.json", "docling"), ("_blocks.json", "textract"))
+
+    # Store first (see _resolve_store_first), cache second.
+    full = _resolve_store_first(arg)
+    if full is not None:
+        for suffix, backend in artifacts:
+            path = settings.output_dir / f"{full}{suffix}"
+            if path.is_file():
+                return full, backend, path
+
+    for suffix, backend in artifacts:
         if sorted(settings.output_dir.glob(f"{arg}*{suffix}")):
             doc_id = _resolve_cached_doc_id(arg, suffix)
             return doc_id, backend, _cache_path(doc_id, suffix)
@@ -943,6 +1050,28 @@ def _resolve_layout_input(arg: str) -> tuple[str, str, Path]:
         f"{settings.output_dir}. Run `rag ingest` for this document first "
         "(Docling writes '_outline.json', Textract writes '_blocks.json')."
     )
+
+
+def _load_outline(arg: str) -> tuple[str, DocumentOutline]:
+    """Load a cached layout artifact as a `DocumentOutline`, whichever backend
+    produced it.
+
+    `DocumentOutline` is the backend-neutral representation the whole chunking
+    pipeline already runs on — Docling builds one directly, and Textract blocks
+    are converted by `parse_textract_blocks`. Resolving to it here is what lets
+    the post-ingest commands behave identically on both backends instead of
+    only working on whichever one happened to write their input file.
+    """
+    from datasheet_rag.chunking.layout_parser import DocumentOutline, parse_textract_blocks
+
+    doc_id, backend, path = _resolve_layout_input(arg)
+    with open(path) as f:
+        data = json.load(f)
+
+    if backend == "docling":
+        # The cache wraps the outline alongside its figure regions.
+        return doc_id, DocumentOutline.from_dict(data["outline"])
+    return doc_id, parse_textract_blocks(data, doc_id=doc_id)
 
 
 # Rows of the section/layout listing to show before truncating (unless --full).
@@ -1022,7 +1151,7 @@ def _inspect_docling_layout(outline, full: bool = False) -> None:
             console.print(f"  … and {len(flat) - len(shown)} more (pass --full to show all)")
 
 
-@cli.command("inspect-layout", short_help="Summarise a document's parsed layout.")
+@inspect_group.command("layout", short_help="Summarise a document's parsed layout.")
 @click.argument("doc_id", type=str)
 @click.option("--full", is_flag=True, default=False,
               help="Show the entire section/layout listing instead of the first "
@@ -1054,107 +1183,18 @@ def inspect_layout(doc_id: str, full: bool) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Extract figures
-# ---------------------------------------------------------------------------
-
-
-@cli.command("extract-figures", short_help="Extract figure images from a PDF.")
-@click.argument("doc_id", type=str)
-@click.option("--pdf", "pdf_path", type=click.Path(exists=True, path_type=Path), default=None,
-              help="Source PDF path (defaults to the cached {pdf_dir}/{doc_id}.pdf).")
-@click.option("--dpi", default=300, type=int, help="Render DPI for PDF pages.")
-@click.option("--format", "image_format", default="png",
-              type=click.Choice(["png", "jpg", "webp"]), help="Image format for the crops.")
-@click.option("--padding", default=0.02, type=float, help="Padding around figures (fraction of page).")
-@click.option("--upload/--no-upload", default=False,
-              help="Also upload figures to S3. The local store under "
-                   "~/.rag/figures/ is what MCP reads from directly.")
-@click.option("--output-dir", "-o", type=click.Path(path_type=Path), default=None,
-              help="Output directory for figure images (defaults to the doc's figures cache).")
-def extract_figures_cmd(
-    doc_id: str,
-    pdf_path: Path | None,
-    dpi: int,
-    image_format: str,
-    padding: float,
-    upload: bool,
-    output_dir: Path | None,
-) -> None:
-    """Extract figure images from a PDF using Textract layout detection.
-
-    DOC_ID is a doc_id (full hash or unambiguous prefix); the blocks are read
-    from the cached ``{doc_id}_blocks.json`` and the source PDF from
-    ``{pdf_dir}/{doc_id}.pdf`` (override with --pdf). An explicit blocks-JSON
-    path is also accepted in place of a doc_id.
-
-    Crops each LAYOUT_FIGURE region and saves as individual images.
-    Generates a manifest JSON with metadata, captions, and context.
-    """
-    from datasheet_rag.figures import extract_figures, upload_figures_to_s3
-
-    doc_id, blocks_json = _doc_input(doc_id, "_blocks.json")
-    with open(blocks_json) as f:
-        blocks = json.load(f)
-
-    settings = get_settings()
-    if pdf_path is None:
-        pdf_path = settings.pdf_dir / f"{doc_id}.pdf"
-        if not pdf_path.is_file():
-            raise click.ClickException(
-                f"No cached PDF for doc_id={doc_id} at {pdf_path}. Pass --pdf "
-                "with the source PDF, or run `rag ingest`/`rag upload` first."
-            )
-
-    manifest = extract_figures(
-        pdf_path=pdf_path,
-        blocks=blocks,
-        doc_id=doc_id,
-        output_dir=output_dir,
-        dpi=dpi,
-        image_format=image_format,
-        padding_pct=padding,
-    )
-
-    if upload and manifest.figures:
-        manifest = upload_figures_to_s3(manifest)
-
-    # Save manifest
-    manifest_dir = output_dir or settings.output_dir / "figures" / doc_id
-    manifest.save(manifest_dir / "manifest.json")
-
-    # Summary table
-    if manifest.figures:
-        table = Table(title=f"Extracted Figures ({len(manifest.figures)})")
-        table.add_column("#", justify="right", style="cyan")
-        table.add_column("Page")
-        table.add_column("Size")
-        table.add_column("Caption")
-        table.add_column("Section")
-
-        for i, fig in enumerate(manifest.figures):
-            table.add_row(
-                str(i),
-                str(fig.region.page),
-                f"{fig.width_px}×{fig.height_px}",
-                (fig.region.caption[:60] + "…") if len(fig.region.caption) > 60 else fig.region.caption or "—",
-                fig.region.section_header[:40] or "—",
-            )
-
-        console.print(table)
-
-
-# ---------------------------------------------------------------------------
 # Chunk (multi-scale chunking pipeline)
 # ---------------------------------------------------------------------------
 
 
-@cli.command("chunk", short_help="Chunk a document's parsed blocks.")
+@repair_group.command("chunks", short_help="Re-chunk a parsed document.")
 @click.argument("doc_id", type=str)
 @click.option(
     "--figures-manifest",
     type=click.Path(exists=True, path_type=Path),
     default=None,
-    help="Path to figure manifest JSON from extract-figures.",
+    help="Figure manifest JSON to fold in (default: the manifest ingest "
+         "cached for this document, so re-chunking keeps its figures).",
 )
 @click.option("--micro-tokens", default=128, type=int, help="Max tokens per MICRO chunk.")
 @click.option("--meso-tokens", default=512, type=int, help="Max tokens per MESO chunk.")
@@ -1174,24 +1214,36 @@ def chunk_cmd(
     summarizer: str,
     output: Path | None,
 ) -> None:
-    """Run the multi-scale chunking pipeline on a document's Textract blocks.
+    """Re-run multi-scale chunking against a document's cached layout.
 
-    DOC_ID is a doc_id (full hash or unambiguous prefix); the blocks are read
-    from the cached ``{doc_id}_blocks.json`` and chunks are written to
-    ``{doc_id}_chunks.json`` unless --output is given. An explicit blocks-JSON
-    path is also accepted in place of a doc_id.
+    DOC_ID is a doc_id (full hash or unambiguous prefix), resolved against
+    whichever layout artifact the ingest backend cached — Docling's
+    ``{doc_id}_outline.json`` or Textract's ``{doc_id}_blocks.json``. An
+    explicit path to either is also accepted in place of a doc_id. Chunks are
+    written to ``{doc_id}_chunks.json`` unless --output is given.
+
+    This is the cheap way to retune --micro-tokens / --meso-tokens: it reuses
+    the cached layout analysis, where `rag ingest --force` would redo it.
+    Follow with `rag repair embeddings <doc-id>` to re-index the result.
 
     Produces a hierarchical chunk graph at three levels (MACRO/MESO/MICRO)
     with navigation links, context enrichment, and chapter summaries.
     """
-    from datasheet_rag.chunking.pipeline import run_chunking_pipeline, save_chunk_graph
+    from datasheet_rag.chunking.pipeline import (
+        run_chunking_pipeline_from_outline,
+        save_chunk_graph,
+    )
     from datasheet_rag.chunking.splitter import SplitterConfig
 
-    doc_id, blocks_json = _doc_input(doc_id, "_blocks.json")
-    with open(blocks_json) as f:
-        blocks = json.load(f)
+    doc_id, outline = _load_outline(doc_id)
 
-    # Load figure manifest if provided
+    # Default to the manifest ingest wrote for this document — without it a
+    # re-chunk would silently drop every figure from the graph.
+    if figures_manifest is None:
+        cached_manifest = get_settings().figures_dir / doc_id / "manifest.json"
+        if cached_manifest.is_file():
+            figures_manifest = cached_manifest
+
     figure_manifest = None
     if figures_manifest:
         with open(figures_manifest) as f:
@@ -1202,9 +1254,8 @@ def chunk_cmd(
         meso_max_tokens=meso_tokens,
     )
 
-    graph = run_chunking_pipeline(
-        blocks,
-        doc_id=doc_id,
+    graph = run_chunking_pipeline_from_outline(
+        outline,
         figure_manifest=figure_manifest,
         config=config,
         summarizer_mode=summarizer,
@@ -1243,28 +1294,31 @@ def chunk_cmd(
             else:
                 console.print("  [yellow](no summary generated)[/]")
 
+    # Only nag when the graph landed where `repair embeddings` will look for
+    # it — with an explicit --output this is a scratch dump, not a re-index.
+    if output == settings.output_dir / f"{doc_id}_chunks.json":
+        _next_steps(doc_id, rechunk=False)
+
 
 # ---------------------------------------------------------------------------
 # Embed (Bedrock Titan + SQLite store)
 # ---------------------------------------------------------------------------
 
 
-@cli.command(short_help="Embed a chunk graph into the store.")
+@repair_group.command("embeddings", short_help="Re-embed a document into the store.")
 @click.argument("doc_id", type=str)
 @_db_option
 @click.option("--project-id", default=None, help="Project ID to attach to every chunk.")
 @click.option("--group", "group_name", default=None, help="Group name to attach to every chunk.")
 @click.option("--verbose/--quiet", default=True, help="Print per-batch progress.")
-@click.option("--dry-run", is_flag=True, help="Embed but do not write to the store.")
 def embed(
     doc_id: str,
     db_path: Path | None,
     project_id: str | None,
     group_name: str | None,
     verbose: bool,
-    dry_run: bool,
 ) -> None:
-    """Embed a document's chunk graph (produced by `rag chunk`) and store it.
+    """Embed a document's chunk graph and store it.
 
     DOC_ID is a doc_id (full hash or unambiguous prefix); the chunk graph is
     read from the cached ``{doc_id}_chunks.json``. An explicit chunks-JSON path
@@ -1272,7 +1326,8 @@ def embed(
 
     Embedding + insert run through the backend, so this writes to the remote
     server (which embeds) when RAG_SERVER_URL is set, or the local sqlite
-    store otherwise.
+    store otherwise. There is no dry run — embedding happens backend-side;
+    use `rag ingest --show-cost` to price a run without writing.
     """
     from datasheet_rag.backend import MetadataPatch, backend_mode
     from datasheet_rag.chunking.pipeline import load_chunk_graph
@@ -1292,13 +1347,6 @@ def embed(
                   f"(MACRO {stats['by_level']['MACRO']}, "
                   f"MESO {stats['by_level']['MESO']}, "
                   f"MICRO {stats['by_level']['MICRO']})")
-
-    if dry_run:
-        raise click.ClickException(
-            "embed --dry-run is no longer supported (embedding now happens via "
-            "the backend, server-side in remote mode). Use `rag ingest --dry-run "
-            "--show-cost` for an estimate without writing."
-        )
 
     be = _backend_for(db_path)
 
@@ -1329,6 +1377,8 @@ def embed(
     except RagServerError as e:
         raise _friendly_server_error(e) from e
     console.print(f"[green]Inserted[/] {result.inserted} chunks.")
+    # Vectors now match the stored text again.
+    _set_stale(result.doc_id or doc_id, False)
 
 
 # ---------------------------------------------------------------------------
@@ -1421,6 +1471,59 @@ def search(
     console.print("[dim]Fetch a full chunk with: rag get chunk <chunk_id>[/]")
 
 
+# Sidecar attribute marking a document whose stored text has moved on from
+# its vectors. Set by the repairs that change embedded text, cleared by
+# `rag repair embeddings`, and surfaced as a column in `rag list`.
+_STALE_ATTR = "needs_reembed"
+
+
+def _set_stale(doc_id: str | None, stale: bool) -> None:
+    """Best-effort flip of the stale marker on *doc_id*'s sidecar row.
+
+    Deliberately swallows every failure: a repair that already succeeded must
+    not be reported as failed because a bookkeeping write didn't land, and
+    these commands legitimately run against documents that were parsed but
+    never ingested, which have no sidecar row to write to.
+    """
+    if not doc_id:
+        return
+    from datasheet_rag.backend import MetadataPatch
+
+    try:
+        be = _backend_for()
+        be.set_metadata(
+            be.resolve_doc_id(doc_id),
+            MetadataPatch(attributes={_STALE_ATTR: True if stale else None}),
+        )
+    except Exception:
+        pass
+
+
+def _next_steps(doc_id: str | None, *, rechunk: bool) -> None:
+    """Print what still has to happen before a repair shows up in `rag search`.
+
+    Every `repair` subcommand edits something upstream of the vectors, so none
+    of them take effect on their own. Repairs that patch the cached layout
+    outline need the chunk graph rebuilt first; repairs that edit chunk text
+    in place only need re-embedding.
+    """
+    _set_stale(doc_id, True)
+    target = doc_id[:SHORT_DOC_ID_LEN] if doc_id else "<doc-id>"
+    console.print()
+    console.rule("[bold yellow]Not searchable yet[/]")
+    if rechunk:
+        console.print(
+            "  This patched the cached layout outline. Rebuild and re-index it:\n"
+            f"    [cyan]rag repair chunks {target}[/]\n"
+            f"    [cyan]rag repair embeddings {target}[/]"
+        )
+    else:
+        console.print(
+            "  Re-embed to refresh the vectors before this shows up in search:\n"
+            f"    [cyan]rag repair embeddings {target}[/]"
+        )
+
+
 def _print_chunk_detail(chunk, *, show_context: bool = False) -> None:
     """Render one chunk's metadata + text — the CLI counterpart of the MCP
     server's ``_shape_chunk``."""
@@ -1469,7 +1572,7 @@ def get_chunk_cmd(
 
     CHUNK_ID accepts the full id or an abbreviated form using a doc_id
     prefix, e.g. ``ab12cd34ef56:L2:143`` as printed by `rag search` /
-    `rag list-figures`.
+    `rag inspect figures`.
     """
     from datasheet_rag.backend import RagServerError
 
@@ -1509,7 +1612,7 @@ def get_chunk_cmd(
 # ---------------------------------------------------------------------------
 
 
-@cli.command("list-figures", short_help="List figure chunks in the store.")
+@inspect_group.command("figures", short_help="List figure chunks in the store.")
 @click.option("--doc-id", default=None, help="Restrict to a single document.")
 @click.option("--project-id", default=None,
               help="Restrict to a project (default: scoped by .rag.toml if present).")
@@ -1576,7 +1679,7 @@ def get_figure_cmd(chunk_id: str, output_path: Path | None, db_path: Path | None
     """Fetch a figure chunk's image and save it to disk.
 
     CHUNK_ID accepts the full id or an abbreviated form using a doc_id
-    prefix, e.g. ``ab12cd34ef56:L2:143`` as printed by `rag list-figures` /
+    prefix, e.g. ``ab12cd34ef56:L2:143`` as printed by `rag inspect figures` /
     `rag search`. This is the CLI equivalent of the MCP `get_figure` tool.
     """
     from datasheet_rag.backend import RagServerError
@@ -1622,7 +1725,7 @@ def get_figure_cmd(chunk_id: str, output_path: Path | None, db_path: Path | None
 # ---------------------------------------------------------------------------
 
 
-@cli.command("describe-figures", short_help="Describe figures with a vision LLM.")
+@repair_group.command("figures", short_help="Describe figures with a vision LLM.")
 @click.option("--doc-id", default=None, help="Restrict to a single document.")
 @click.option("--project-id", default=None, help="Restrict to a single project.")
 @click.option("--missing-only/--all", default=True,
@@ -1652,12 +1755,13 @@ def describe_figures_cmd(
     each image + caption + neighbour text to Bedrock Claude vision, and
     folds the response into the chunk row + context_text.
 
-    After running, re-embed the affected document so the new
-    descriptions show up in vector search:
+    Descriptions are folded into the existing chunk rows, so no re-chunk is
+    needed — just re-embed the affected document so they show up in vector
+    search:
 
-        rag describe-figures --doc-id <doc>
-        rag chunk <doc> --figures-manifest ...   # if needed
-        rag embed <doc> --project-id <p>
+    \b
+        rag repair figures --doc-id <doc>
+        rag repair embeddings <doc> --project-id <p>
     """
     be = _backend_for(db_path)
     if doc_id:
@@ -1687,14 +1791,11 @@ def describe_figures_cmd(
             console.print(f"  {desc}\n")
     elif descriptions:
         console.print("[green]Descriptions written to chunks + context_text.[/]")
-        console.print(
-            "  Re-run `rag embed <doc-id>` (or implement an "
-            "updated-only re-embed) to refresh the vectors."
-        )
+        _next_steps(doc_id, rechunk=False)
 
 
 # ---------------------------------------------------------------------------
-# Ingest (full pipeline: upload → analyze → extract-figures → chunk → embed)
+# Ingest (full pipeline: parse → figures → chunk → embed)
 # ---------------------------------------------------------------------------
 
 
@@ -1732,8 +1833,8 @@ def _print_cost_table(cost: CostEstimate, heading: str = "Estimated AWS cost") -
               help="Free-text tag for this document, e.g. --tag mcu --tag "
                    "reviewed (repeatable). Sets the sidecar's whole tag list "
                    "for this ingest. Change it later without a re-ingest via "
-                   "`rag metadata set <doc-id> --tag ...`; for arbitrary "
-                   "key=value tagging use `rag metadata set --attr key=value` "
+                   "`rag metadata <doc-id> --tag ...`; for arbitrary "
+                   "key=value tagging use `rag metadata <doc-id> --attr key=value` "
                    "instead.")
 @click.option("--skip-figures", is_flag=True, help="Skip figure extraction and description steps.")
 @click.option("--upload-figures/--no-upload-figures", default=False,
@@ -1744,7 +1845,7 @@ def _print_cost_table(cost: CostEstimate, heading: str = "Estimated AWS cost") -
 @click.option("--infer-title", is_flag=True,
               help="If the document has no usable title after chunking, infer one "
                    "with a small Bedrock Claude call against the first page "
-                   "(one extra LLM call; off by default — see `rag fix-titles` "
+                   "(one extra LLM call; off by default — see `rag repair titles` "
                    "to backfill existing documents).")
 @click.option("--dpi", default=300, type=int, help="Render DPI for figure extraction.")
 @click.option("--micro-tokens", default=128, type=int, help="Max tokens per MICRO chunk.")
@@ -1828,7 +1929,7 @@ def ingest(
     backend: str,
     accurate_tables: bool | None,
 ) -> None:
-    """Full ingestion pipeline: analyse → figures → chunk → embed.
+    """Full ingestion pipeline: parse → figures → chunk → embed.
 
     Defaults to Docling (free, fast, handles tables/formulas/figures on
     native PDFs) and fails verbosely on scanned PDFs rather than silently
@@ -2199,7 +2300,7 @@ def _parse_page_range(spec: str) -> tuple[int, int]:
     return start, end
 
 
-@cli.command("reconvert-tables", short_help="Re-run table recognition on a page range.")
+@repair_group.command("reconvert", short_help="Re-run Docling table recognition (Docling only).")
 @click.argument("pdf_path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option(
     "--pages", "pages_spec", required=True,
@@ -2234,10 +2335,11 @@ def reconvert_tables_cmd(
     those table cells/text in place.
 
     Requires the document to already be ingested with the Docling backend
-    (so a cached `<doc_id>_outline.json` exists). On success it deletes the
-    cached chunk graph so the next `rag ingest` re-derives chunks (and
-    embeddings) from the patched outline — Docling layout analysis itself is
-    NOT re-run for the rest of the document.
+    (so a cached `<doc_id>_outline.json` exists) — Textract exposes no
+    equivalent re-run. On success it deletes the cached chunk graph; follow
+    with `rag repair chunks <doc-id>` and `rag repair embeddings <doc-id>` to
+    re-derive from the patched outline. Docling layout analysis itself is NOT
+    re-run for the rest of the document.
     """
     from datasheet_rag.chunking.layout_parser import DocumentOutline
     from datasheet_rag.docling_parser import content_hash, reconvert_tables_in_range
@@ -2251,9 +2353,9 @@ def reconvert_tables_cmd(
     if not outline_path.exists():
         raise click.ClickException(
             f"No cached layout outline for doc_id={did} at {outline_path}. "
-            "Run `rag ingest` (Docling backend) on this PDF first — "
-            "reconvert-tables only patches an existing outline, it doesn't "
-            "do a first-time conversion."
+            "`repair reconvert` is Docling-only and patches an existing "
+            "outline — it does not do a first-time conversion. Run "
+            "`rag ingest --backend docling` on this PDF first."
         )
 
     with open(outline_path) as f:
@@ -2335,16 +2437,12 @@ def reconvert_tables_cmd(
     if chunks_path.exists():
         chunks_path.unlink()
         console.print(
-            f"[green]Invalidated cached chunk graph[/] → removed [cyan]{chunks_path}[/]. "
-            f"Re-run `rag ingest {pdf_path}` (without --force) to re-derive "
-            f"chunks and embeddings from the patched outline — Docling layout "
-            f"analysis will be skipped since the outline cache still exists."
+            f"[green]Invalidated cached chunk graph[/] → removed [cyan]{chunks_path}[/]"
         )
-    else:
-        console.print("Run `rag ingest` to (re)derive chunks and embeddings from the patched outline.")
+    _next_steps(did, rechunk=True)
 
 
-@cli.command("table-structure-sweep", short_help="Report tables flagged untrustworthy.")
+@inspect_group.command("tables", short_help="Report tables that parsed badly.")
 @click.argument("doc_id", type=str)
 @click.option(
     "--list-flagged", is_flag=True,
@@ -2357,30 +2455,29 @@ def reconvert_tables_cmd(
         "randomly-sampled non-flagged tables, for manual eyeballing — a "
         "zero-cost spot-check of detector accuracy (false positives among "
         "the flagged sample, false negatives among the non-flagged one) "
-        "before spending on `rag repair-tables`. Sampling uses a fixed seed "
+        "before spending on `rag repair tables`. Sampling uses a fixed seed "
         "so repeated runs show the same tables."
     ),
 )
 def table_structure_sweep_cmd(doc_id: str, list_flagged: bool, sample_n: int) -> None:
-    """Report how many cached tables Docling's structure detectors flag as untrustworthy.
+    """Report how many of a document's tables parsed with untrustworthy structure.
 
-    This is the Phase-0 instrument from docs/table-structure-repair/plan.md —
-    a zero-cost (pure Python over the cached `<doc_id>_outline.json`, no
-    Docling re-run, no AWS calls) sweep across every TABLE element already in
-    the layout outline, reporting how many each of
-    docling_parser._detect_garbled_header (failure mode #1: repeated header
-    text) and _detect_fused_header_row (failure mode #3: data leaked into the
-    header band) independently catches, and their overlap.
+    Sweeps every table in the cached layout outline and counts the ones whose
+    header band looks wrong, in two independently-detected ways: a header
+    whose text is repeated across its cells, and a header the parser fused
+    with the first row of data. Both produce a table that reads as clean but
+    asserts the wrong column meanings — the failure worth catching before it
+    reaches search results.
 
-    The resulting "fraction flagged" number is what gates whether an
-    LLM-assisted repair pipeline (Stage 3 of that plan) belongs in the ingest
-    hot path, a lazy on-demand path, or an explicit opt-in maintenance
-    command — don't guess the cost shape, measure it.
+    Costs nothing: pure Python over `<doc_id>_outline.json`, no Docling re-run
+    and no AWS calls. Run it before `rag repair tables`, which does spend
+    money, to see how much there is to fix and to spot-check (with --sample)
+    whether the flags are accurate on this document.
 
-    Looks up the cache directly by doc_id (full hash or unambiguous prefix —
-    like `reconvert-tables`, this works straight off `<doc_id>_outline.json`,
-    not the sqlite ingest registry, since a layout conversion can be cached
-    without a completed ingest).
+    DOC_ID is a full hash or unambiguous prefix, looked up in the layout cache
+    rather than the ingest registry — like `repair reconvert`, this works on a
+    document whose layout was converted but whose ingest never completed.
+    Docling-only; see `rag repair tables` for what to do about what it finds.
     """
     from datasheet_rag.chunking.layout_parser import ContentElement, DocumentOutline, ElementType
     from datasheet_rag.docling_parser import (
@@ -2389,7 +2486,7 @@ def table_structure_sweep_cmd(doc_id: str, list_flagged: bool, sample_n: int) ->
         _table_cells_to_compact_text,
     )
 
-    did = _resolve_cached_doc_id(doc_id, "_outline.json")
+    did = _require_docling_outline(doc_id)
     outline_path = _cache_path(did, "_outline.json")
 
     with open(outline_path) as f:
@@ -2441,8 +2538,8 @@ def table_structure_sweep_cmd(doc_id: str, list_flagged: bool, sample_n: int) ->
     def _row(label: str, count: int) -> None:
         summary.add_row(label, f"{count:,}", f"{count / total:.1%}")
 
-    _row("_detect_garbled_header (mode #1: repeated text)", garbled_count)
-    _row("_detect_fused_header_row (mode #3: data-in-header)", fused_count)
+    _row("Repeated text across header cells", garbled_count)
+    _row("Data row fused into the header", fused_count)
     _row("caught by both", both_count)
     _row("[bold]flagged untrustworthy (either)[/]", flagged_count)
     console.print(summary)
@@ -2469,7 +2566,7 @@ def table_structure_sweep_cmd(doc_id: str, list_flagged: bool, sample_n: int) ->
 
         console.print(
             "\n[bold]Spot-check[/] — eyeball whether the detector's calls look "
-            "right before spending on `rag repair-tables` (zero AWS cost; "
+            "right before spending on `rag repair tables` (zero AWS cost; "
             "renders straight from the cached outline). For "
             "[yellow]flagged[/] tables, does the asserted structure below "
             "actually look broken? For [green]not flagged[/] tables, does it "
@@ -2493,7 +2590,7 @@ _MAX_HEADER_ROWS = 6
 _MAX_HEADER_FRACTION = 0.3
 
 
-@cli.command("repair-tables", short_help="LLM-repair tables flagged untrustworthy.")
+@repair_group.command("tables", short_help="LLM-repair tables flagged untrustworthy.")
 @click.argument("doc_id", type=str)
 @click.option(
     "--limit", type=int, default=None,
@@ -2547,11 +2644,11 @@ def repair_tables_cmd(
     band is implausibly large to crop reliably — repair is additive, never a
     regression; the existing structure-free rendering is kept.
 
-    Like `reconvert-tables`, this patches the cached `<doc_id>_outline.json`
-    in place and invalidates the cached chunk graph so the next `rag ingest`
-    re-derives chunks/embeddings from the repaired structure. Run
-    `rag table-structure-sweep <doc_id>` first to see what would be touched
-    and at roughly what volume.
+    Like `repair reconvert`, this patches the cached `<doc_id>_outline.json`
+    in place and invalidates the cached chunk graph; follow with
+    `rag repair chunks <doc_id>` and `rag repair embeddings <doc_id>` to
+    re-derive from the repaired structure. Run `rag inspect tables <doc_id>`
+    first to see what would be touched and at roughly what volume.
     """
     import io
 
@@ -2584,7 +2681,7 @@ def repair_tables_cmd(
             return "data rows disagree on column count — can't trust C"
         return None
 
-    did = _resolve_cached_doc_id(doc_id, "_outline.json")
+    did = _require_docling_outline(doc_id)
     outline_path = _cache_path(did, "_outline.json")
     chunks_path = _cache_path(did, "_chunks.json")
 
@@ -2615,7 +2712,7 @@ def repair_tables_cmd(
         console.print(
             f"[green]Nothing to repair[/] for doc_id={did[:SHORT_DOC_ID_LEN]} — "
             f"no untrustworthy tables without a cached repair ({hint}). "
-            "Run `rag table-structure-sweep` to confirm the flagged count."
+            "Run `rag inspect tables` to confirm the flagged count."
         )
         return
 
@@ -2722,15 +2819,9 @@ def repair_tables_cmd(
     if chunks_path.exists():
         chunks_path.unlink()
         console.print(
-            f"[green]Invalidated cached chunk graph[/] → removed [cyan]{chunks_path}[/]. "
-            f"Re-run `rag ingest` (without --force) to re-derive chunks and "
-            f"embeddings from the repaired structure — Docling layout "
-            f"analysis will be skipped since the outline cache still exists."
+            f"[green]Invalidated cached chunk graph[/] → removed [cyan]{chunks_path}[/]"
         )
-    else:
-        console.print(
-            "Run `rag ingest` to (re)derive chunks and embeddings from the repaired outline."
-        )
+    _next_steps(did, rechunk=True)
 
 
 # ---------------------------------------------------------------------------
@@ -2738,12 +2829,7 @@ def repair_tables_cmd(
 # ---------------------------------------------------------------------------
 
 
-@cli.group(short_help="Manage doc-level metadata.")
-def metadata() -> None:
-    """Manage the doc-level metadata sidecar (project, mpn, manufacturer, …)."""
-
-
-@metadata.command("set", short_help="Upsert document metadata.")
+@cli.command("metadata", short_help="Show or set doc-level metadata.")
 @click.argument("doc_id", type=str)
 @click.option("--title", "doc_title", default=None,
               help="Override doc_title on every chunk row (manual title fix).")
@@ -2776,7 +2862,7 @@ def metadata() -> None:
 @_db_option
 @click.option("--apply-to-chunks/--no-apply-to-chunks", default=True,
               help="Propagate project_id and group_name into the chunks table.")
-def metadata_set(
+def metadata_cmd(
     doc_id: str,
     doc_title: str | None,
     project_id: str | None,
@@ -2793,18 +2879,41 @@ def metadata_set(
     db_path: Path | None,
     apply_to_chunks: bool,
 ) -> None:
-    """Upsert document metadata. Only fields you pass are updated.
+    """Show a document's metadata sidecar row, or update it.
+
+    With no options this prints the document's current metadata. Pass any
+    field to update instead — only the fields you pass are touched:
+
+    \b
+        rag metadata <doc_id>                 # show
+        rag metadata <doc_id> --mpn INA226    # set
 
     Multiple MPNs (variants/aliases) can be stored on the same document.
     Use --mpn to set the primary MPN and --mpn-alias to append extras:
 
-        rag metadata set <doc_id> --mpn INA226 --mpn-alias INA226A --mpn-alias INA226B
+        rag metadata <doc_id> --mpn INA226 --mpn-alias INA226A --mpn-alias INA226B
 
-    Filtering with --mpn on 'metadata list' or via the MCP tools matches
-    any token in the comma-separated list.
+    Filtering with --mpn on `rag list` or via the MCP tools matches any
+    token in the comma-separated list.
     """
     from datasheet_rag.backend import MetadataPatch
     from datasheet_rag.project_config import get_project_config
+
+    # Decide read-vs-write from what the user actually typed, before any
+    # .rag.toml defaults get merged in below — otherwise a project config
+    # would silently turn every `rag metadata <doc>` into a write.
+    is_read = not any((
+        doc_title, project_id, group_name, mpn, mpn_aliases, manufacturer,
+        subsystem, doc_type, tags, clear_tags, attrs, unset_attrs,
+    ))
+    if is_read:
+        be = _backend_for(db_path)
+        existing = be.get_metadata(be.resolve_doc_id(doc_id))
+        if existing is None:
+            console.print(f"[yellow]No metadata recorded for[/] {doc_id}")
+            return
+        console.print(existing.model_dump_json(indent=2, exclude_none=True))
+        return
 
     proj_cfg = get_project_config()
     if proj_cfg is not None:
@@ -2875,92 +2984,6 @@ def metadata_set(
         console.print(f"  Propagated to {updated} chunk rows.")
 
 
-@metadata.command("get", short_help="Show one document's metadata row.")
-@click.argument("doc_id", type=str)
-@_db_option
-def metadata_get(doc_id: str, db_path: Path | None) -> None:
-    """Show the sidecar metadata row for a document."""
-    be = _backend_for(db_path)
-    doc_id = be.resolve_doc_id(doc_id)
-    meta = be.get_metadata(doc_id)
-    if meta is None:
-        console.print(f"[yellow]No metadata recorded for[/] {doc_id}")
-        return
-    console.print(meta.model_dump_json(indent=2, exclude_none=True))
-
-
-@metadata.command("list", short_help="List documents in the sidecar.")
-@click.option("--project-id", default=None,
-              help="Restrict to a project (default: scoped by .rag.toml if present).")
-@click.option("--global", "-g", "is_global", is_flag=True,
-              help="List documents across every project, ignoring any .rag.toml scoping.")
-@click.option("--group", "group_name", default=None, help="Restrict to a group.")
-@click.option("--mpn", default=None, help="Only show documents with this part number.")
-@click.option("--tag", "tags", multiple=True,
-              help="Only show documents that have this tag (repeatable — "
-                   "with multiple --tag, a document must have all of them).")
-@click.option("--attr", "attrs", multiple=True, metavar="KEY=VALUE",
-              help="Only show documents whose attributes contain this "
-                   "key=value pair (repeatable, all must match).")
-@_db_option
-def metadata_list(
-    project_id: str | None,
-    is_global: bool,
-    group_name: str | None,
-    mpn: str | None,
-    tags: tuple[str, ...],
-    attrs: tuple[str, ...],
-    db_path: Path | None,
-) -> None:
-    """List documents in the sidecar, optionally filtered."""
-    from datasheet_rag.project_config import resolve_cli_project_id
-
-    project_id = resolve_cli_project_id(project_id, is_global=is_global)
-
-    attr_filters: dict[str, str] = {}
-    for item in attrs:
-        key, sep, value = item.partition("=")
-        if not sep or not key:
-            raise click.BadParameter(
-                f"--attr expects KEY=VALUE, got {item!r}", param_hint="--attr"
-            )
-        attr_filters[key] = value
-
-    be = _backend_for(db_path)
-    docs = be.list_docs(project_id=project_id, group_name=group_name, mpn=mpn)
-
-    if tags:
-        wanted = set(tags)
-        docs = [d for d in docs if wanted.issubset(set(d.tags))]
-    if attr_filters:
-        docs = [
-            d for d in docs
-            if all(d.attributes.get(k) == v for k, v in attr_filters.items())
-        ]
-
-    if not docs:
-        console.print("[yellow]No documents match.[/]")
-        return
-
-    table = Table(title=f"Documents ({len(docs)})")
-    table.add_column("doc_id", style="cyan")
-    table.add_column("project")
-    table.add_column("group")
-    table.add_column("mpn")
-    table.add_column("manufacturer")
-    table.add_column("subsystem")
-    table.add_column("tags")
-
-    for d in docs:
-        table.add_row(
-            d.doc_id[:SHORT_DOC_ID_LEN], d.project_id or "—",
-            d.group_name or "—", d.mpn or "—",
-            d.manufacturer or "—", d.subsystem or "—",
-            ", ".join(d.tags) if d.tags else "—",
-        )
-    console.print(table)
-
-
 # ---------------------------------------------------------------------------
 # fix-titles (AI-inferred document titles for poorly-titled documents)
 # ---------------------------------------------------------------------------
@@ -2968,7 +2991,7 @@ def metadata_list(
 _BLANK_TITLES = (None, "", "—")
 
 
-@cli.command("fix-titles", short_help="Backfill missing document titles.")
+@repair_group.command("titles", short_help="Backfill missing document titles.")
 @click.option("--doc-id", default=None, help="Restrict to a single document.")
 @click.option("--force", is_flag=True,
               help="Re-infer even for documents that already have a title "
@@ -2993,7 +3016,7 @@ def fix_titles_cmd(
     "Contents", "Disclaimer") that the heuristic above wouldn't flag.
 
     Inferred titles are written to every chunk row for the document and
-    marked `title_inferred: true` in the metadata sidecar (`rag metadata get
+    marked `title_inferred: true` in the metadata sidecar (`rag metadata
     <doc_id>`) so they're distinguishable from titles Docling extracted
     directly. Re-run with --doc-id --force to overwrite an inferred title.
     """
@@ -3036,7 +3059,7 @@ def fix_titles_cmd(
 # ---------------------------------------------------------------------------
 
 
-@cli.group("eval", short_help="Evaluate retrieval quality.")
+@cli.group("eval", hidden=True, short_help="Evaluate retrieval quality.")
 def eval_group() -> None:
     """Retrieval-layer evaluation: golden set, metrics, ablations."""
 
