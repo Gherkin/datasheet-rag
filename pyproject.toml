@@ -92,3 +92,8 @@ select = ["E", "F", "I", "N", "W", "UP"]
 [tool.mypy]
 python_version = "3.11"
 strict = true
+
+[tool.pytest.ini_options]
+# Scope collection to tests/ — a bare `pytest` otherwise walks the repo root
+# and chokes on root-owned dirs like certs/.
+testpaths = ["tests"]
