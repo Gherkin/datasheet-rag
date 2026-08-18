@@ -95,7 +95,13 @@ ON CONFLICT(id) DO UPDATE SET
     page_numbers      = excluded.page_numbers,
     chapter_title     = excluded.chapter_title,
     section_title     = excluded.section_title,
-    doc_title         = excluded.doc_title,
+    -- A re-embed ships whatever title the cached chunk graph carried, which
+    -- is blank for a document whose title was inferred *after* ingest by
+    -- `rag repair titles` (that writes the chunks table, not the graph).
+    -- Overwriting unconditionally would silently wipe it, so an empty
+    -- incoming title defers to the stored one -- same reasoning as
+    -- figure_description below.
+    doc_title         = COALESCE(NULLIF(excluded.doc_title, ''), chunks.doc_title),
     parent_id         = excluded.parent_id,
     prev_id           = excluded.prev_id,
     next_id           = excluded.next_id,

@@ -55,6 +55,24 @@ def _cache_path(doc_id: str, suffix: str) -> Path:
     return get_settings().output_dir / f"{doc_id}{suffix}"
 
 
+def _resolve_store_first(arg: str) -> str | None:
+    """Expand a doc_id prefix via the store, or return None if it isn't there.
+
+    The store is the authoritative namespace: a doc_id printed by `rag list`
+    or `rag search` should resolve the same way everywhere. Cache-reading
+    commands consult this first and only fall back to prefix-matching the
+    local cache, which is what lets them still work on a PDF that was parsed
+    but never ingested.
+
+    Never raises — an unreachable server or an unknown prefix both mean "not
+    in the store", and the caller falls back to the cache.
+    """
+    try:
+        return _backend_for().resolve_doc_id(arg)
+    except Exception:
+        return None
+
+
 def _resolve_cached_doc_id(doc_id: str, suffix: str = "_outline.json") -> str:
     """Resolve a possibly-abbreviated doc_id against the local cache dir.
 
@@ -67,6 +85,14 @@ def _resolve_cached_doc_id(doc_id: str, suffix: str = "_outline.json") -> str:
     Raises ClickException on zero or ambiguous matches (consistent message).
     """
     settings = get_settings()
+
+    # Store first, so an abbreviation resolves the same way it does in
+    # `rag list` / `rag search`; fall back to the cache for docs not (yet)
+    # ingested.
+    full = _resolve_store_first(doc_id)
+    if full is not None and (settings.output_dir / f"{full}{suffix}").is_file():
+        return full
+
     matches = sorted(settings.output_dir.glob(f"{doc_id}*{suffix}"))
     if not matches:
         raise click.ClickException(
@@ -247,14 +273,36 @@ def _db_option(fn: _F) -> _F:
 # makes Click append `[default: ...]` to the help of every option that has a
 # concrete default. Options defaulting to None (and bare flags) still print
 # nothing, so those document their fallback in `help=` by hand.
-@click.group(context_settings={"show_default": True})
-@click.option("--bucket", envvar="RAG_S3_BUCKET", default=None, help="Override S3 bucket name.")
+class OrderedGroup(click.Group):
+    """A click.Group that lists its commands in a fixed, hand-picked order.
+
+    Click sorts alphabetically, which buries `ingest` and `search` among
+    commands most people touch once a year. Ordering by how often a command
+    is actually reached makes `rag --help` readable top-to-bottom.
+    """
+
+    def __init__(self, *args, order: list[str] | None = None, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._order = order or []
+
+    def list_commands(self, ctx: click.Context) -> list[str]:
+        known = [name for name in self._order if name in self.commands]
+        # Anything not named in the order falls to the end, alphabetically, so
+        # a newly added command shows up rather than silently disappearing.
+        return known + sorted(set(self.commands) - set(known))
+
+
+@click.group(
+    cls=OrderedGroup,
+    context_settings={"show_default": True},
+    order=[
+        "ingest", "metadata", "search", "list", "get",
+        "inspect", "config", "repair", "delete", "admin",
+    ],
+)
 @click.pass_context
-def cli(ctx: click.Context, bucket: str | None) -> None:
+def cli(ctx: click.Context) -> None:
     """Datasheet RAG Pipeline — electronics datasheet ingestion."""
-    if bucket:
-        import os
-        os.environ["RAG_S3_BUCKET"] = bucket
     # Remind the user when they're using the local sqlite file rather than a
     # shared server (printed to stderr, non-failing). Skipped for `config`,
     # which is the group that sets the server up.
@@ -500,12 +548,15 @@ def list_docs(
 
     # The sidecar is a separate table from the chunk store, so join by doc_id
     # rather than assuming every ingested document has a row in it.
-    meta_by_id = {}
-    if filtering or wide:
+    # Always fetched, not just when filtering: the stale marker lives in the
+    # sidecar and belongs in the default view.
+    try:
         meta_by_id = {
             m.doc_id: m
             for m in be.list_docs(project_id=project_id, group_name=group_name, mpn=mpn)
         }
+    except Exception:
+        meta_by_id = {}
 
     if filtering:
         wanted_tags = set(tags)
@@ -529,9 +580,17 @@ def list_docs(
     # appending them. Showing all eleven at once is unreadable on an 80-column
     # terminal, where Rich squeezes every cell down to nothing.
     show_meta = wide or filtering
+    stale_ids = {
+        d.doc_id for d in docs
+        if (m := meta_by_id.get(d.doc_id)) is not None
+        and m.attributes.get(_STALE_ATTR)
+    }
+
     table = Table(title="Ingested Documents")
     table.add_column("doc_id", style="cyan")
     table.add_column("title")
+    if stale_ids:
+        table.add_column("stale")
     if show_meta:
         for col in ("project", "group", "mpn", "manufacturer", "subsystem", "tags"):
             table.add_column(col)
@@ -542,6 +601,8 @@ def list_docs(
 
     for doc in docs:
         row = [doc.doc_id[:SHORT_DOC_ID_LEN], doc.doc_title or "—"]
+        if stale_ids:
+            row.append("[yellow]re-embed[/]" if doc.doc_id in stale_ids else "")
         if show_meta:
             m = meta_by_id.get(doc.doc_id)
             row += [
@@ -561,6 +622,13 @@ def list_docs(
         table.add_row(*row)
 
     console.print(table)
+    if stale_ids:
+        console.print(
+            f"  [yellow]{len(stale_ids)} document(s) were repaired since they were "
+            "last embedded[/] — their stored text has moved on from their vectors, "
+            "so `rag search` still returns the old wording. Run "
+            "[cyan]rag repair embeddings <doc-id>[/] on each to catch them up."
+        )
 
 
 @inspect_group.command("stats", short_help="Show chunk counts by zoom level.")
@@ -962,7 +1030,17 @@ def _resolve_layout_input(arg: str) -> tuple[str, str, Path]:
         )
 
     settings = get_settings()
-    for suffix, backend in (("_outline.json", "docling"), ("_blocks.json", "textract")):
+    artifacts = (("_outline.json", "docling"), ("_blocks.json", "textract"))
+
+    # Store first (see _resolve_store_first), cache second.
+    full = _resolve_store_first(arg)
+    if full is not None:
+        for suffix, backend in artifacts:
+            path = settings.output_dir / f"{full}{suffix}"
+            if path.is_file():
+                return full, backend, path
+
+    for suffix, backend in artifacts:
         if sorted(settings.output_dir.glob(f"{arg}*{suffix}")):
             doc_id = _resolve_cached_doc_id(arg, suffix)
             return doc_id, backend, _cache_path(doc_id, suffix)
@@ -1299,6 +1377,8 @@ def embed(
     except RagServerError as e:
         raise _friendly_server_error(e) from e
     console.print(f"[green]Inserted[/] {result.inserted} chunks.")
+    # Vectors now match the stored text again.
+    _set_stale(result.doc_id or doc_id, False)
 
 
 # ---------------------------------------------------------------------------
@@ -1391,6 +1471,34 @@ def search(
     console.print("[dim]Fetch a full chunk with: rag get chunk <chunk_id>[/]")
 
 
+# Sidecar attribute marking a document whose stored text has moved on from
+# its vectors. Set by the repairs that change embedded text, cleared by
+# `rag repair embeddings`, and surfaced as a column in `rag list`.
+_STALE_ATTR = "needs_reembed"
+
+
+def _set_stale(doc_id: str | None, stale: bool) -> None:
+    """Best-effort flip of the stale marker on *doc_id*'s sidecar row.
+
+    Deliberately swallows every failure: a repair that already succeeded must
+    not be reported as failed because a bookkeeping write didn't land, and
+    these commands legitimately run against documents that were parsed but
+    never ingested, which have no sidecar row to write to.
+    """
+    if not doc_id:
+        return
+    from datasheet_rag.backend import MetadataPatch
+
+    try:
+        be = _backend_for()
+        be.set_metadata(
+            be.resolve_doc_id(doc_id),
+            MetadataPatch(attributes={_STALE_ATTR: True if stale else None}),
+        )
+    except Exception:
+        pass
+
+
 def _next_steps(doc_id: str | None, *, rechunk: bool) -> None:
     """Print what still has to happen before a repair shows up in `rag search`.
 
@@ -1399,6 +1507,7 @@ def _next_steps(doc_id: str | None, *, rechunk: bool) -> None:
     outline need the chunk graph rebuilt first; repairs that edit chunk text
     in place only need re-embedding.
     """
+    _set_stale(doc_id, True)
     target = doc_id[:SHORT_DOC_ID_LEN] if doc_id else "<doc-id>"
     console.print()
     console.rule("[bold yellow]Not searchable yet[/]")
