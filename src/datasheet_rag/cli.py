@@ -271,7 +271,7 @@ def cli(ctx: click.Context, bucket: str | None) -> None:
 
 @cli.group("config", short_help="Manage configuration.")
 def config_group() -> None:
-    """Create and inspect this install's configuration."""
+    """Create and manage this install's configuration."""
 
 
 def _config_env_lines() -> list[str]:
@@ -397,11 +397,14 @@ def config_init(force: bool) -> None:
 
 @cli.group("inspect", short_help="Examine a document without changing it.")
 def inspect_group() -> None:
-    """Read-only reports about an ingested document.
+    """Read-only reports about a document.
 
-    Everything here reads the store or the cached layout artifacts and
-    prints — nothing under `inspect` writes, costs money, or calls an LLM.
+    Everything here prints and nothing writes, costs money, or calls an LLM.
     Use `repair` for the commands that act on what these turn up.
+
+    `stats` and `figures` read the store, so they only see ingested
+    documents; `layout` and `tables` read the local layout cache, so they
+    also work on a PDF that was parsed but whose ingest never finished.
     """
 
 
@@ -413,9 +416,10 @@ def repair_group() -> None:
     than re-ingesting — `rag ingest --force` would discard the layout analysis
     too, which is by far the most expensive step on a large datasheet.
 
-    Anything here that changes a document's text (`tables`, `titles`,
-    `figures`) needs `rag repair embeddings <doc-id>` afterwards before the
-    change shows up in `rag search`.
+    Anything here that changes a document's embedded text (`tables`,
+    `figures`, `chunks`) needs `rag repair embeddings <doc-id>` afterwards
+    before the change shows up in `rag search`. `titles` is the exception —
+    it writes doc_title directly and is visible immediately.
     """
 
 
@@ -628,6 +632,10 @@ def get_group() -> None:
     """Fetch a document, page, chunk, figure, or its text and save/show it.
 
     Subcommands: doc (or document), page, chunk, fig (or figure), text.
+
+    All of these need an ingested document except `text`, which reads the
+    local layout cache and so also works for a PDF that was parsed but whose
+    ingest never finished.
     """
 
 
@@ -1208,6 +1216,11 @@ def chunk_cmd(
             else:
                 console.print("  [yellow](no summary generated)[/]")
 
+    # Only nag when the graph landed where `repair embeddings` will look for
+    # it — with an explicit --output this is a scratch dump, not a re-index.
+    if output == settings.output_dir / f"{doc_id}_chunks.json":
+        _next_steps(doc_id, rechunk=False)
+
 
 # ---------------------------------------------------------------------------
 # Embed (Bedrock Titan + SQLite store)
@@ -1220,16 +1233,14 @@ def chunk_cmd(
 @click.option("--project-id", default=None, help="Project ID to attach to every chunk.")
 @click.option("--group", "group_name", default=None, help="Group name to attach to every chunk.")
 @click.option("--verbose/--quiet", default=True, help="Print per-batch progress.")
-@click.option("--dry-run", is_flag=True, help="Embed but do not write to the store.")
 def embed(
     doc_id: str,
     db_path: Path | None,
     project_id: str | None,
     group_name: str | None,
     verbose: bool,
-    dry_run: bool,
 ) -> None:
-    """Embed a document's chunk graph (produced by `rag repair chunks`) and store it.
+    """Embed a document's chunk graph and store it.
 
     DOC_ID is a doc_id (full hash or unambiguous prefix); the chunk graph is
     read from the cached ``{doc_id}_chunks.json``. An explicit chunks-JSON path
@@ -1237,7 +1248,8 @@ def embed(
 
     Embedding + insert run through the backend, so this writes to the remote
     server (which embeds) when RAG_SERVER_URL is set, or the local sqlite
-    store otherwise.
+    store otherwise. There is no dry run — embedding happens backend-side;
+    use `rag ingest --show-cost` to price a run without writing.
     """
     from datasheet_rag.backend import MetadataPatch, backend_mode
     from datasheet_rag.chunking.pipeline import load_chunk_graph
@@ -1257,13 +1269,6 @@ def embed(
                   f"(MACRO {stats['by_level']['MACRO']}, "
                   f"MESO {stats['by_level']['MESO']}, "
                   f"MICRO {stats['by_level']['MICRO']})")
-
-    if dry_run:
-        raise click.ClickException(
-            "embed --dry-run is no longer supported (embedding now happens via "
-            "the backend, server-side in remote mode). Use `rag ingest --dry-run "
-            "--show-cost` for an estimate without writing."
-        )
 
     be = _backend_for(db_path)
 
@@ -1384,6 +1389,30 @@ def search(
 
     console.print(table)
     console.print("[dim]Fetch a full chunk with: rag get chunk <chunk_id>[/]")
+
+
+def _next_steps(doc_id: str | None, *, rechunk: bool) -> None:
+    """Print what still has to happen before a repair shows up in `rag search`.
+
+    Every `repair` subcommand edits something upstream of the vectors, so none
+    of them take effect on their own. Repairs that patch the cached layout
+    outline need the chunk graph rebuilt first; repairs that edit chunk text
+    in place only need re-embedding.
+    """
+    target = doc_id[:SHORT_DOC_ID_LEN] if doc_id else "<doc-id>"
+    console.print()
+    console.rule("[bold yellow]Not searchable yet[/]")
+    if rechunk:
+        console.print(
+            "  This patched the cached layout outline. Rebuild and re-index it:\n"
+            f"    [cyan]rag repair chunks {target}[/]\n"
+            f"    [cyan]rag repair embeddings {target}[/]"
+        )
+    else:
+        console.print(
+            "  Re-embed to refresh the vectors before this shows up in search:\n"
+            f"    [cyan]rag repair embeddings {target}[/]"
+        )
 
 
 def _print_chunk_detail(chunk, *, show_context: bool = False) -> None:
@@ -1617,11 +1646,12 @@ def describe_figures_cmd(
     each image + caption + neighbour text to Bedrock Claude vision, and
     folds the response into the chunk row + context_text.
 
-    After running, re-embed the affected document so the new
-    descriptions show up in vector search:
+    Descriptions are folded into the existing chunk rows, so no re-chunk is
+    needed — just re-embed the affected document so they show up in vector
+    search:
 
+    \b
         rag repair figures --doc-id <doc>
-        rag repair chunks <doc>   # if needed
         rag repair embeddings <doc> --project-id <p>
     """
     be = _backend_for(db_path)
@@ -1652,10 +1682,7 @@ def describe_figures_cmd(
             console.print(f"  {desc}\n")
     elif descriptions:
         console.print("[green]Descriptions written to chunks + context_text.[/]")
-        console.print(
-            "  Re-run `rag repair embeddings <doc-id>` (or implement an "
-            "updated-only re-embed) to refresh the vectors."
-        )
+        _next_steps(doc_id, rechunk=False)
 
 
 # ---------------------------------------------------------------------------
@@ -1793,7 +1820,7 @@ def ingest(
     backend: str,
     accurate_tables: bool | None,
 ) -> None:
-    """Full ingestion pipeline: analyse → figures → chunk → embed.
+    """Full ingestion pipeline: parse → figures → chunk → embed.
 
     Defaults to Docling (free, fast, handles tables/formulas/figures on
     native PDFs) and fails verbosely on scanned PDFs rather than silently
@@ -2301,16 +2328,12 @@ def reconvert_tables_cmd(
     if chunks_path.exists():
         chunks_path.unlink()
         console.print(
-            f"[green]Invalidated cached chunk graph[/] → removed [cyan]{chunks_path}[/]. "
-            f"Re-run `rag ingest {pdf_path}` (without --force) to re-derive "
-            f"chunks and embeddings from the patched outline — Docling layout "
-            f"analysis will be skipped since the outline cache still exists."
+            f"[green]Invalidated cached chunk graph[/] → removed [cyan]{chunks_path}[/]"
         )
-    else:
-        console.print("Run `rag ingest` to (re)derive chunks and embeddings from the patched outline.")
+    _next_steps(did, rechunk=True)
 
 
-@inspect_group.command("tables", short_help="Report tables flagged untrustworthy.")
+@inspect_group.command("tables", short_help="Report tables that parsed badly.")
 @click.argument("doc_id", type=str)
 @click.option(
     "--list-flagged", is_flag=True,
@@ -2328,25 +2351,24 @@ def reconvert_tables_cmd(
     ),
 )
 def table_structure_sweep_cmd(doc_id: str, list_flagged: bool, sample_n: int) -> None:
-    """Report how many cached tables Docling's structure detectors flag as untrustworthy.
+    """Report how many of a document's tables parsed with untrustworthy structure.
 
-    This is the Phase-0 instrument from docs/table-structure-repair/plan.md —
-    a zero-cost (pure Python over the cached `<doc_id>_outline.json`, no
-    Docling re-run, no AWS calls) sweep across every TABLE element already in
-    the layout outline, reporting how many each of
-    docling_parser._detect_garbled_header (failure mode #1: repeated header
-    text) and _detect_fused_header_row (failure mode #3: data leaked into the
-    header band) independently catches, and their overlap.
+    Sweeps every table in the cached layout outline and counts the ones whose
+    header band looks wrong, in two independently-detected ways: a header
+    whose text is repeated across its cells, and a header the parser fused
+    with the first row of data. Both produce a table that reads as clean but
+    asserts the wrong column meanings — the failure worth catching before it
+    reaches search results.
 
-    The resulting "fraction flagged" number is what gates whether an
-    LLM-assisted repair pipeline (Stage 3 of that plan) belongs in the ingest
-    hot path, a lazy on-demand path, or an explicit opt-in maintenance
-    command — don't guess the cost shape, measure it.
+    Costs nothing: pure Python over `<doc_id>_outline.json`, no Docling re-run
+    and no AWS calls. Run it before `rag repair tables`, which does spend
+    money, to see how much there is to fix and to spot-check (with --sample)
+    whether the flags are accurate on this document.
 
-    Looks up the cache directly by doc_id (full hash or unambiguous prefix —
-    like `repair reconvert`, this works straight off `<doc_id>_outline.json`,
-    not the sqlite ingest registry, since a layout conversion can be cached
-    without a completed ingest).
+    DOC_ID is a full hash or unambiguous prefix, looked up in the layout cache
+    rather than the ingest registry — like `repair reconvert`, this works on a
+    document whose layout was converted but whose ingest never completed.
+    Docling-only; see `rag repair tables` for what to do about what it finds.
     """
     from datasheet_rag.chunking.layout_parser import ContentElement, DocumentOutline, ElementType
     from datasheet_rag.docling_parser import (
@@ -2407,8 +2429,8 @@ def table_structure_sweep_cmd(doc_id: str, list_flagged: bool, sample_n: int) ->
     def _row(label: str, count: int) -> None:
         summary.add_row(label, f"{count:,}", f"{count / total:.1%}")
 
-    _row("_detect_garbled_header (mode #1: repeated text)", garbled_count)
-    _row("_detect_fused_header_row (mode #3: data-in-header)", fused_count)
+    _row("Repeated text across header cells", garbled_count)
+    _row("Data row fused into the header", fused_count)
     _row("caught by both", both_count)
     _row("[bold]flagged untrustworthy (either)[/]", flagged_count)
     console.print(summary)
@@ -2514,10 +2536,10 @@ def repair_tables_cmd(
     regression; the existing structure-free rendering is kept.
 
     Like `repair reconvert`, this patches the cached `<doc_id>_outline.json`
-    in place and invalidates the cached chunk graph so the next `rag ingest`
-    re-derives chunks/embeddings from the repaired structure. Run
-    `rag inspect tables <doc_id>` first to see what would be touched
-    and at roughly what volume.
+    in place and invalidates the cached chunk graph; follow with
+    `rag repair chunks <doc_id>` and `rag repair embeddings <doc_id>` to
+    re-derive from the repaired structure. Run `rag inspect tables <doc_id>`
+    first to see what would be touched and at roughly what volume.
     """
     import io
 
@@ -2688,15 +2710,9 @@ def repair_tables_cmd(
     if chunks_path.exists():
         chunks_path.unlink()
         console.print(
-            f"[green]Invalidated cached chunk graph[/] → removed [cyan]{chunks_path}[/]. "
-            f"Re-run `rag ingest` (without --force) to re-derive chunks and "
-            f"embeddings from the repaired structure — Docling layout "
-            f"analysis will be skipped since the outline cache still exists."
+            f"[green]Invalidated cached chunk graph[/] → removed [cyan]{chunks_path}[/]"
         )
-    else:
-        console.print(
-            "Run `rag ingest` to (re)derive chunks and embeddings from the repaired outline."
-        )
+    _next_steps(did, rechunk=True)
 
 
 # ---------------------------------------------------------------------------
@@ -2759,6 +2775,7 @@ def metadata_cmd(
     With no options this prints the document's current metadata. Pass any
     field to update instead — only the fields you pass are touched:
 
+    \b
         rag metadata <doc_id>                 # show
         rag metadata <doc_id> --mpn INA226    # set
 
