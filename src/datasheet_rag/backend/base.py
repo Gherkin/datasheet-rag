@@ -152,9 +152,18 @@ class RagBackend(ABC):
     # ---- titles (text LLM, server-side) ----
     @abstractmethod
     def infer_title(
-        self, doc_id: str, *, model_id: str | None = None, dry_run: bool = False
+        self,
+        doc_id: str,
+        *,
+        model_id: str | None = None,
+        dry_run: bool = False,
+        force: bool = False,
     ) -> str | None:
-        """Infer and (unless dry_run) backfill a document's title."""
+        """Infer and (unless dry_run) backfill a document's title.
+
+        Returns None without writing when the stored title outranks an
+        inferred one (i.e. a human set it), unless ``force``.
+        """
 
     # ---- source PDF ----
     @abstractmethod

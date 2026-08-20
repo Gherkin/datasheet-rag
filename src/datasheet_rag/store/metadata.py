@@ -36,6 +36,81 @@ class DocMetadata(BaseModel):
     updated_at: str | None = None
 
 
+# ---------------------------------------------------------------------------
+# Title provenance
+#
+# Where a document's title came from decides whether the next write may
+# replace it. Ranked lowest to highest:
+#
+#   auto      derived by the layout parser at ingest, from the first
+#             title-ish text on page 1 — frequently "Contents", a running
+#             header, or a marketing strapline
+#   inferred  backfilled by `rag repair titles` from a first-page LLM read
+#   manual    set by a human via `rag metadata <doc> --title`
+#
+# A write only lands if its source ranks at least as high as the stored
+# one, so re-ingesting a document cannot demote a title a human or the LLM
+# chose. Enforced in `store.sqlite.set_doc_title` / `insert_chunks`, not in
+# the callers, so the CLI, MCP and server ingest routes all inherit it.
+#
+# Provenance lives here rather than on `chunks` because it is one fact per
+# document: a column alongside `chunks.doc_title` would be duplicated
+# across every row and could go inconsistent between them.
+# ---------------------------------------------------------------------------
+
+TITLE_SOURCES = ("auto", "inferred", "manual")
+
+_TITLE_RANK = {source: rank for rank, source in enumerate(TITLE_SOURCES)}
+
+
+def title_rank(source: str) -> int:
+    """Return the precedence rank of *source* (unknown values rank lowest)."""
+    return _TITLE_RANK.get(source, 0)
+
+
+def title_source_of(attributes: dict[str, Any]) -> str:
+    """Read title provenance out of a sidecar ``attributes`` dict.
+
+    Defaults to ``"auto"`` when nothing is recorded — an unmarked title is
+    one the parser produced, which is exactly the weakest case.
+
+    Older stores recorded provenance as a boolean ``title_inferred: true``
+    instead. That is read as ``"inferred"`` here, and rewritten into
+    ``title_source`` the next time the document's title is set, so no
+    separate migration step is needed.
+
+    Split out from :func:`get_title_source` so callers holding metadata
+    they already fetched — notably the CLI talking to a remote backend, which
+    has no connection to query — can classify it without a second round trip.
+    """
+    source = attributes.get("title_source")
+    if isinstance(source, str) and source in _TITLE_RANK:
+        return source
+
+    if attributes.get("title_inferred"):
+        return "inferred"
+    return "auto"
+
+
+def get_title_source(conn: sqlite3.Connection, doc_id: str) -> str:
+    """Return the recorded provenance of ``doc_id``'s title."""
+    md = get_metadata(conn, doc_id)
+    return title_source_of(md.attributes if md is not None else {})
+
+
+def set_title_source(conn: sqlite3.Connection, doc_id: str, source: str) -> None:
+    """Record ``doc_id``'s title provenance, retiring the legacy boolean."""
+    if source not in _TITLE_RANK:
+        raise ValueError(
+            f"unknown title source {source!r} (expected one of {TITLE_SOURCES})"
+        )
+    set_metadata(
+        conn,
+        doc_id,
+        attributes={"title_source": source, "title_inferred": None},
+    )
+
+
 def _row_to_metadata(row: sqlite3.Row) -> DocMetadata:
     tags_raw = row["tags"]
     attrs_raw = row["attributes"]
@@ -109,7 +184,10 @@ def set_metadata(
             subsystem=subsystem,
             doc_type=doc_type,
             tags=list(tags) if tags is not None else [],
-            attributes=dict(attributes) if attributes is not None else {},
+            # A None value means "drop this key" (see the merge branch
+            # below). There is nothing to drop on a brand-new row, but the
+            # key must not be stored as a null either.
+            attributes={k: v for k, v in (attributes or {}).items() if v is not None},
         )
     else:
         merged_attrs = dict(existing.attributes)

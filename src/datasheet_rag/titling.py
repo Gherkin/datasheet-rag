@@ -5,8 +5,9 @@ sometimes picks up a generic heading ("Contents", "Disclaimer", "Technical
 manual") as the title instead of the document's actual name. This module
 asks a small Claude model to read the first page and infer a real title,
 then backfills it onto every chunk for that document plus the
-`doc_metadata` sidecar (marked `title_inferred: true` so it can be
-reviewed or overridden later via `rag metadata`).
+`doc_metadata` sidecar (marked `title_source: inferred` so it can be
+reviewed or overridden later via `rag metadata`, and so a later
+re-ingest cannot demote it back to the parser's guess).
 """
 
 from __future__ import annotations
@@ -124,13 +125,19 @@ def infer_and_backfill_title(
     *,
     inferer: TitleInferer | None = None,
     dry_run: bool = False,
+    force: bool = False,
 ) -> str | None:
     """Infer a title for `doc_id` from its first page and persist it.
 
     Persists the inferred title onto every `chunks` row for the document
-    and records `title_inferred: true` in the `doc_metadata` sidecar
+    and records `title_source: inferred` in the `doc_metadata` sidecar
     attributes. Returns the inferred title, or None if no title could be
     inferred (in which case nothing is written).
+
+    Refuses to overwrite a title a human set by hand, returning None
+    without spending an LLM call — `inferred` ranks below `manual` (see
+    :mod:`datasheet_rag.store.metadata`). Pass `force=True` to overrule
+    that, which is what `rag repair titles --force` does.
 
     Two extra hints captured at ingest time (`doc_metadata.attributes`,
     see `ingest --infer-title`/the Docling path) are passed alongside the
@@ -144,7 +151,11 @@ def infer_and_backfill_title(
       two fields (e.g. Title="Programmer's Guide", Subject="CC Linux"),
       information Docling never sees since it isn't page content.
     """
-    from datasheet_rag.store.metadata import get_metadata, set_metadata
+    from datasheet_rag.store.metadata import get_metadata, get_title_source, title_rank
+    from datasheet_rag.store.sqlite import set_doc_title
+
+    if not force and title_rank("inferred") < title_rank(get_title_source(conn, doc_id)):
+        return None
 
     text = _first_page_text(conn, doc_id)
     if not text:
@@ -166,8 +177,6 @@ def infer_and_backfill_title(
         return None
 
     if not dry_run:
-        conn.execute("UPDATE chunks SET doc_title = ? WHERE doc_id = ?", (title, doc_id))
-        conn.commit()
-        set_metadata(conn, doc_id, attributes={"title_inferred": True})
+        set_doc_title(conn, doc_id, title, source="inferred", force=force)
 
     return title

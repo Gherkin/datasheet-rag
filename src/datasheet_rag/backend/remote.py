@@ -233,12 +233,17 @@ class RemoteBackend(RagBackend):
         return data["descriptions"], data["stats"]
 
     def infer_title(
-        self, doc_id: str, *, model_id: str | None = None, dry_run: bool = False
+        self,
+        doc_id: str,
+        *,
+        model_id: str | None = None,
+        dry_run: bool = False,
+        force: bool = False,
     ) -> str | None:
         data = self._json(
             "POST",
             f"/documents/{doc_id}/infer-title",
-            json={"model_id": model_id, "dry_run": dry_run},
+            json={"model_id": model_id, "dry_run": dry_run, "force": force},
         )
         return data["title"]
 

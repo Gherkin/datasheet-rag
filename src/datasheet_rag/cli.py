@@ -2832,7 +2832,8 @@ def repair_tables_cmd(
 @cli.command("metadata", short_help="Show or set doc-level metadata.")
 @click.argument("doc_id", type=str)
 @click.option("--title", "doc_title", default=None,
-              help="Override doc_title on every chunk row (manual title fix).")
+              help="Override doc_title on every chunk row. Recorded as a manual "
+                   "title, so re-ingesting the document won't overwrite it.")
 @click.option("--project-id", default=None, help="Set the document's project ID.")
 @click.option("--group", "group_name", default=None, help="Set the document's group name.")
 @click.option("--mpn", default=None,
@@ -3016,10 +3017,14 @@ def fix_titles_cmd(
     "Contents", "Disclaimer") that the heuristic above wouldn't flag.
 
     Inferred titles are written to every chunk row for the document and
-    marked `title_inferred: true` in the metadata sidecar (`rag metadata
+    marked `title_source: inferred` in the metadata sidecar (`rag metadata
     <doc_id>`) so they're distinguishable from titles Docling extracted
-    directly. Re-run with --doc-id --force to overwrite an inferred title.
+    directly, and so a later re-ingest can't demote them. A title set by
+    hand outranks an inferred one and is left alone — pass --force to
+    replace it anyway, or to overwrite an existing inferred title.
     """
+    from datasheet_rag.store.metadata import title_rank, title_source_of
+
     be = _backend_for(db_path)
 
     if doc_id:
@@ -3046,7 +3051,20 @@ def fix_titles_cmd(
     for d in docs:
         short_id = d.doc_id[:SHORT_DOC_ID_LEN]
         current = d.doc_title
-        title = be.infer_title(d.doc_id, model_id=model_id, dry_run=dry_run)
+        md = be.get_metadata(d.doc_id)
+        source = title_source_of(md.attributes if md is not None else {})
+        # Say why we're leaving a hand-set title alone, rather than letting
+        # the store's refusal surface as an indistinguishable "could not
+        # infer" further down.
+        if not force and title_rank(source) > title_rank("inferred"):
+            console.print(
+                f"  [yellow]skipped[/] {short_id} — title was set by hand "
+                f"({current!r}); pass --force to replace it"
+            )
+            continue
+        title = be.infer_title(
+            d.doc_id, model_id=model_id, dry_run=dry_run, force=force
+        )
         if title is None:
             console.print(f"  [yellow]could not infer[/] {short_id} (was: {current!r})")
             continue

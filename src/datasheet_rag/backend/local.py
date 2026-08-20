@@ -396,14 +396,23 @@ class LocalBackend(RagBackend):
         return descriptions, describer.stats()
 
     def infer_title(
-        self, doc_id: str, *, model_id: str | None = None, dry_run: bool = False
+        self,
+        doc_id: str,
+        *,
+        model_id: str | None = None,
+        dry_run: bool = False,
+        force: bool = False,
     ) -> str | None:
         from datasheet_rag.titling import TitleInferer, infer_and_backfill_title
 
         inferer = TitleInferer(model_id=model_id)
         with self._write_lock:
             return infer_and_backfill_title(
-                self._get_conn(), doc_id, inferer=inferer, dry_run=dry_run
+                self._get_conn(),
+                doc_id,
+                inferer=inferer,
+                dry_run=dry_run,
+                force=force,
             )
 
     # -- source PDF ----------------------------------------------------

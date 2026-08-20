@@ -27,6 +27,11 @@ from datasheet_rag.models.chunk import (
     ChunkMetadata,
     LayoutType,
 )
+from datasheet_rag.store.metadata import (
+    get_title_source,
+    set_title_source,
+    title_rank,
+)
 
 # ---------------------------------------------------------------------------
 # Figure path portability
@@ -99,8 +104,9 @@ ON CONFLICT(id) DO UPDATE SET
     -- is blank for a document whose title was inferred *after* ingest by
     -- `rag repair titles` (that writes the chunks table, not the graph).
     -- Overwriting unconditionally would silently wipe it, so an empty
-    -- incoming title defers to the stored one -- same reasoning as
-    -- figure_description below.
+    -- incoming title defers to the stored one, and insert_chunks blanks an
+    -- incoming title that would demote better provenance (see there) so it
+    -- lands on this same path. Same reasoning as figure_description below.
     doc_title         = COALESCE(NULLIF(excluded.doc_title, ''), chunks.doc_title),
     parent_id         = excluded.parent_id,
     prev_id           = excluded.prev_id,
@@ -127,6 +133,7 @@ def _chunk_row(
     *,
     project_id: str | None,
     group_name: str | None,
+    keep_title: bool = True,
 ) -> tuple[object, ...]:
     """Flatten a :class:`Chunk` into the parameter tuple for :data:`_INSERT_SQL`.
 
@@ -134,6 +141,10 @@ def _chunk_row(
     metadata when supplied (non-None); otherwise we fall back to the
     chunk's own values (currently always None on the model — callers wire
     this in at insert time).
+
+    ``keep_title=False`` blanks the outgoing ``doc_title`` so the upsert's
+    ``NULLIF`` defers to the stored one — how :func:`insert_chunks` drops a
+    title that would demote better-sourced provenance.
     """
     md = chunk.metadata
     page_numbers_json = json.dumps(md.page_numbers)
@@ -152,7 +163,7 @@ def _chunk_row(
         page_numbers_json,
         md.chapter_title,
         md.section_title,
-        md.doc_title,
+        md.doc_title if keep_title else "",
         chunk.parent_id,
         chunk.prev_id,
         chunk.next_id,
@@ -172,6 +183,8 @@ def insert_chunks(
     *,
     project_id: str | None = None,
     group_name: str | None = None,
+    title_source: str = "auto",
+    force_title: bool = False,
 ) -> int:
     """Bulk-insert chunks (and optionally their vectors) in one transaction.
 
@@ -187,6 +200,12 @@ def insert_chunks(
         text-only (useful for partial re-ingest).
     project_id, group_name:
         If provided, override the column for every inserted row.
+    title_source:
+        Provenance of the ``doc_title`` these chunks carry. Ingest parses
+        the title out of page 1, so it defaults to ``"auto"`` — the
+        weakest source, which is what stops a re-ingest overwriting a title
+        a human or `rag repair titles` chose. ``force_title=True`` takes the
+        incoming title regardless.
 
     Returns
     -------
@@ -195,12 +214,23 @@ def insert_chunks(
     """
     cur = conn.cursor()
     count = 0
+    # One provenance lookup per document rather than per chunk — a graph is
+    # thousands of chunks over (almost always) a single doc_id.
+    keep_title: dict[str, bool] = {}
     try:
         for chunk in chunks:
+            keep = keep_title.get(chunk.doc_id)
+            if keep is None:
+                keep = force_title or title_rank(title_source) >= title_rank(
+                    get_title_source(conn, chunk.doc_id)
+                )
+                keep_title[chunk.doc_id] = keep
+
             row = _chunk_row(
                 chunk,
                 project_id=project_id,
                 group_name=group_name,
+                keep_title=keep,
             )
             cur.execute(_INSERT_SQL, row)
 
@@ -225,6 +255,8 @@ def insert_chunk_graph(
     *,
     project_id: str | None = None,
     group_name: str | None = None,
+    title_source: str = "auto",
+    force_title: bool = False,
 ) -> int:
     """Convenience wrapper: insert every chunk in a :class:`ChunkGraph`."""
     return insert_chunks(
@@ -233,6 +265,8 @@ def insert_chunk_graph(
         vectors=vectors,
         project_id=project_id,
         group_name=group_name,
+        title_source=title_source,
+        force_title=force_title,
     )
 
 
@@ -400,14 +434,39 @@ def get_doc_titles(conn: sqlite3.Connection) -> dict[str, str]:
     return {row["doc_id"]: row["doc_title"] for row in rows}
 
 
-def set_doc_title(conn: sqlite3.Connection, doc_id: str, title: str) -> int:
+def set_doc_title(
+    conn: sqlite3.Connection,
+    doc_id: str,
+    title: str,
+    *,
+    source: str = "manual",
+    force: bool = False,
+) -> int:
     """Overwrite ``doc_title`` on every chunk row for *doc_id*.
 
-    Returns the number of rows updated. Caller is responsible for committing.
+    ``source`` records where the title came from and decides whether the
+    write is allowed: it lands only if it ranks at least as high as the
+    provenance already on record (see :mod:`datasheet_rag.store.metadata`).
+    A lower-ranked write is refused and returns 0 rather than raising —
+    re-ingest hits this constantly and a blocked demotion is the expected
+    outcome, not an error. Pass ``force=True`` to write regardless, which
+    is what ``rag repair titles --force`` does.
+
+    An empty *title* is a real value here, not "leave it alone": clearing a
+    title is a deliberate act and is recorded with the provenance of
+    whoever cleared it, so a later ingest can't quietly refill it.
+
+    Commits, since the title and its provenance live in two tables and must
+    land together. Returns the number of chunk rows updated.
     """
+    stored = get_title_source(conn, doc_id)
+    if not force and title_rank(source) < title_rank(stored):
+        return 0
+
     cur = conn.execute(
         "UPDATE chunks SET doc_title = ? WHERE doc_id = ?", (title, doc_id)
     )
+    set_title_source(conn, doc_id, source)  # commits both statements
     return cur.rowcount
 
 

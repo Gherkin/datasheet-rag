@@ -101,6 +101,7 @@ class DescribeFiguresBody(BaseModel):
 class InferTitleBody(BaseModel):
     model_id: str | None = None
     dry_run: bool = False
+    force: bool = False
 
 
 class CreateKeyBody(BaseModel):
@@ -348,7 +349,12 @@ def build_app() -> FastAPI:
         be: LocalBackend = Depends(get_backend),
     ) -> dict:
         try:
-            title = be.infer_title(doc_id, model_id=body.model_id, dry_run=body.dry_run)
+            title = be.infer_title(
+                doc_id,
+                model_id=body.model_id,
+                dry_run=body.dry_run,
+                force=body.force,
+            )
         except Exception as exc:
             audit(
                 request, be, action="infer_title", status="error",
