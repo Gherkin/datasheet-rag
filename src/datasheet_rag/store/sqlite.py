@@ -393,15 +393,19 @@ def insert_chunk_graph(
     group_name: str | None = None,
     title_source: str = "auto",
     force_title: bool = False,
-    prune: bool = False,
+    prune: bool = True,
 ) -> InsertStats:
     """Convenience wrapper: insert every chunk in a :class:`ChunkGraph`.
 
-    ``prune=True`` also drops the rows of ``graph.doc_id`` that this graph
-    does not carry — see :func:`insert_chunks_stats`. A :class:`ChunkGraph`
-    is a whole document by construction, so this is the safe place to ask
-    for it, and the reason this one returns the full
-    :class:`InsertStats`: whoever prunes should be able to report it.
+    Pruning is on here, unlike :func:`insert_chunks_stats`: a
+    :class:`ChunkGraph` *is* a whole document (see its docstring, and every
+    site that builds one), so rows of ``graph.doc_id`` this graph does not
+    carry are leftovers from a previous chunking — and forgetting to ask
+    for the cleanup is how GH #44 happened in the first place. Pass
+    ``prune=False`` for a graph that is deliberately partial.
+
+    Returns the full :class:`InsertStats` for the same reason: whoever
+    prunes should be able to report it.
     """
     return insert_chunks_stats(
         conn,

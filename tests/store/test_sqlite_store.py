@@ -46,6 +46,7 @@ from datasheet_rag.store.sqlite import (
     get_chunk,
     insert_chunk_graph,
     insert_chunks,
+    insert_chunks_stats,
 )
 
 # Small embedding dim keeps the tests fast and makes hand-built unit
@@ -371,13 +372,33 @@ def test_prune_leaves_other_documents_alone(conn: sqlite3.Connection) -> None:
     assert get_chunk(conn, "doc2:2:1") is not None
 
 
-def test_insert_does_not_prune_by_default(conn: sqlite3.Connection) -> None:
-    # The default keeps partial inserts safe: a caller that ships a handful
-    # of chunks must not wipe the rest of the document.
+def test_insert_chunks_does_not_prune_by_default(conn: sqlite3.Connection) -> None:
+    # insert_chunks takes any iterable, so it must assume a partial one: a
+    # caller shipping a handful of chunks must not wipe the rest of the doc.
+    chunks = _seed_chunks()
+    insert_chunks(conn, chunks, vectors=_seed_vectors(chunks))
+
+    survivors = [c for c in chunks if c.id not in ("doc1:2:2", "doc1:2:3")]
+    stats = insert_chunks_stats(conn, survivors)
+    assert stats.pruned == 0
+    assert count_chunks(conn, doc_id="doc1") == 5
+
+
+def test_insert_chunk_graph_prunes_without_being_asked(
+    conn: sqlite3.Connection,
+) -> None:
+    # A ChunkGraph is a whole document, so the cleanup is the default —
+    # a caller that forgets to ask for it would re-open GH #44.
     chunks = _seed_chunks()
     insert_chunks(conn, chunks, vectors=_seed_vectors(chunks))
 
     stats = insert_chunk_graph(conn, _shorter_doc1_graph())
+    assert stats.pruned == 2
+    assert count_chunks(conn, doc_id="doc1") == 3
+
+    # ...and a deliberately partial graph can still opt out.
+    insert_chunks(conn, chunks, vectors=_seed_vectors(chunks))
+    stats = insert_chunk_graph(conn, _shorter_doc1_graph(), prune=False)
     assert stats.pruned == 0
     assert count_chunks(conn, doc_id="doc1") == 5
 
