@@ -79,9 +79,7 @@ def _ancestors(chunk_id: str, graph: dict[str, GraphNode]) -> list[str]:
     return out
 
 
-def lineage_relevant_ids(
-    gold_chunk_ids: Sequence[str], graph: dict[str, GraphNode]
-) -> set[str]:
+def lineage_relevant_ids(gold_chunk_ids: Sequence[str], graph: dict[str, GraphNode]) -> set[str]:
     """Expand gold chunk ids into the set of lineage-equivalent chunk ids.
 
     A chunk is lineage-relevant to a gold chunk if it is the gold chunk
@@ -137,9 +135,7 @@ def relevance_vector(results: Sequence[SearchResult], item: GoldenItem) -> list[
     return [is_hit(r.chunk, item) for r in results]
 
 
-def lineage_relevance_vector(
-    results: Sequence[SearchResult], relevant_ids: set[str]
-) -> list[bool]:
+def lineage_relevance_vector(results: Sequence[SearchResult], relevant_ids: set[str]) -> list[bool]:
     """Strict (lineage) boolean relevance per result, in rank order."""
     return [is_hit_lineage(r.chunk, relevant_ids) for r in results]
 
@@ -164,9 +160,7 @@ def reciprocal_rank(rel: Sequence[bool]) -> float:
 
 
 def _dcg(rel: Sequence[bool], k: int) -> float:
-    return sum(
-        (1.0 / math.log2(i + 1)) for i, hit in enumerate(rel[:k], start=1) if hit
-    )
+    return sum((1.0 / math.log2(i + 1)) for i, hit in enumerate(rel[:k], start=1) if hit)
 
 
 def ndcg_at_k(rel: Sequence[bool], k: int) -> float:
@@ -269,12 +263,8 @@ class CategoryMetrics(BaseModel):
             )
         mrr = sum(o.reciprocal_rank for o in outcomes) / n
         ndcg = sum(o.ndcg for o in outcomes) / n
-        hit_rate = {
-            k: sum(o.hit_at_ks.get(k, 0.0) for o in outcomes) / n for k in ks
-        }
-        hit_rate_loose = {
-            k: sum(o.hit_at_ks_loose.get(k, 0.0) for o in outcomes) / n for k in ks
-        }
+        hit_rate = {k: sum(o.hit_at_ks.get(k, 0.0) for o in outcomes) / n for k in ks}
+        hit_rate_loose = {k: sum(o.hit_at_ks_loose.get(k, 0.0) for o in outcomes) / n for k in ks}
         latency = sum(o.latency_ms for o in outcomes) / n
         return cls(
             n=n,
@@ -295,8 +285,6 @@ def aggregate_by_category(
     buckets: dict[str, list[QueryOutcome]] = {}
     for o in outcomes:
         buckets.setdefault(o.category, []).append(o)
-    report = {
-        cat: CategoryMetrics.aggregate(group, ks=ks) for cat, group in buckets.items()
-    }
+    report = {cat: CategoryMetrics.aggregate(group, ks=ks) for cat, group in buckets.items()}
     report["overall"] = CategoryMetrics.aggregate(outcomes, ks=ks)
     return report

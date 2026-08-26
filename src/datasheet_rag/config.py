@@ -392,7 +392,7 @@ class Settings(BaseSettings):
     description_concurrency: int = Field(
         default=4,
         description="Concurrent vision API calls. Lower than embeddings — "
-                    "vision is slower and rate-limits are tighter.",
+        "vision is slower and rate-limits are tighter.",
     )
 
     # Table-structure repair (Bedrock Claude vision — see
@@ -428,14 +428,20 @@ class Settings(BaseSettings):
     table_repair_concurrency: int = Field(
         default=2,
         description="Concurrent table-repair API calls. Lower than figure "
-                    "description — larger payloads (image + full cell list), "
-                    "slower responses, and this is an opt-in maintenance "
-                    "path (rag repair tables), not an ingest hot-path knob.",
+        "description — larger payloads (image + full cell list), "
+        "slower responses, and this is an opt-in maintenance "
+        "path (rag repair tables), not an ingest hot-path knob.",
     )
 
     @field_validator(
-        "figures_dir", "pdf_dir", "output_dir", "sqlite_db_path", "default_project_id",
-        "server_url", "server_token", "s3_bucket",
+        "figures_dir",
+        "pdf_dir",
+        "output_dir",
+        "sqlite_db_path",
+        "default_project_id",
+        "server_url",
+        "server_token",
+        "s3_bucket",
         mode="before",
     )
     @classmethod

@@ -169,8 +169,7 @@ def _resolve_layout_types(layout_types: list[str] | None) -> list[LayoutType] | 
             out.append(LayoutType(lt.lower()))
         except ValueError as e:
             raise ValueError(
-                f"Unknown layout_type '{lt}'. Valid: "
-                f"{[m.value for m in LayoutType]}"
+                f"Unknown layout_type '{lt}'. Valid: {[m.value for m in LayoutType]}"
             ) from e
     return out
 
@@ -689,17 +688,20 @@ def build_server(
         - `layout_types`: restrict to text/table/figure/key_value/list.
         """
         return _search_impl(
-            query, mode=mode, k=k, project_id=project_id,
-            doc_id=doc_id, level=level, layout_types=layout_types,
+            query,
+            mode=mode,
+            k=k,
+            project_id=project_id,
+            doc_id=doc_id,
+            level=level,
+            layout_types=layout_types,
             backend=backend,
         )
 
     @mcp.tool()
     def get_chunk(chunk_id: str, include_neighbors: bool = False) -> dict[str, Any] | None:
         """Fetch a chunk by ID. If include_neighbors, also returns parent/prev/next."""
-        return _get_chunk_impl(
-            chunk_id, include_neighbors=include_neighbors, backend=backend
-        )
+        return _get_chunk_impl(chunk_id, include_neighbors=include_neighbors, backend=backend)
 
     @mcp.tool()
     def navigate(chunk_id: str, direction: Direction) -> list[dict[str, Any]]:
@@ -731,7 +733,10 @@ def build_server(
         that do have metadata, since that is the only place those live.
         """
         return _list_documents_impl(
-            project_id=project_id, group=group, mpn=mpn, manufacturer=manufacturer,
+            project_id=project_id,
+            group=group,
+            mpn=mpn,
+            manufacturer=manufacturer,
             backend=backend,
         )
 
@@ -765,6 +770,7 @@ def build_server(
         block is what the client renders.
         """
         import base64
+
         try:
             result = _get_figure_impl(chunk_id, backend=backend)
         except FigureUnavailableError as exc:
@@ -824,6 +830,7 @@ def build_server(
         description if none), page number, and section.
         """
         import base64
+
         try:
             result = _get_figure_impl(chunk_id, backend=backend)
         except FigureUnavailableError as exc:
@@ -962,6 +969,7 @@ def build_server(
     # disappointing; show_page covers the remote case by rendering inline.
     # GH #45 tracks serving PDFs from the server so this can come back.
     if local_client:
+
         @mcp.tool()
         def show_pdf(doc_id: str, page: int = 1):
             """Open the source PDF in a browser-based interactive viewer.
@@ -994,13 +1002,15 @@ def build_server(
                 parts = [meta.get("mpn") or "", meta.get("manufacturer") or ""]
                 label = " — ".join(p for p in parts if p)
             desc = f" ({label})" if label else ""
-            return [TextContent(
-                type="text",
-                text=(
-                    f"PDF viewer{desc}: {url}\n\n"
-                    "Open this URL in your browser to view the full document."
-                ),
-            )]
+            return [
+                TextContent(
+                    type="text",
+                    text=(
+                        f"PDF viewer{desc}: {url}\n\n"
+                        "Open this URL in your browser to view the full document."
+                    ),
+                )
+            ]
 
     @mcp.tool(meta={"ui": {"resourceUri": "ui://datasheet-rag/figure-app"}})
     def show_page(doc_id: str, page: int = 1):
@@ -1065,10 +1075,12 @@ def build_server(
         Claude Desktop's built-in apps use). Hosts that support MCP Apps
         load the ``ui://datasheet-rag/hello`` resource into a sandboxed iframe.
         """
-        return [TextContent(
-            type="text",
-            text="Hello MCP App rendered above (if host supports it).",
-        )]
+        return [
+            TextContent(
+                type="text",
+                text="Hello MCP App rendered above (if host supports it).",
+            )
+        ]
 
     @mcp.resource(
         "ui://datasheet-rag/hello",
@@ -1153,15 +1165,17 @@ def main() -> None:
     settings = get_settings()
     mode = backend_mode()
     print(
-        json.dumps({
-            "event": "rag-mcp.start",
-            "mode": mode,
-            "server_url": settings.server_url,
-            "server_token_set": bool(settings.server_token) if mode == "remote" else None,
-            "db_path": str(settings.sqlite_db_path) if mode == "local" else None,
-            "default_project_id": settings.default_project_id,
-            "embedding_model_id": settings.embedding_model_id,
-        }),
+        json.dumps(
+            {
+                "event": "rag-mcp.start",
+                "mode": mode,
+                "server_url": settings.server_url,
+                "server_token_set": bool(settings.server_token) if mode == "remote" else None,
+                "db_path": str(settings.sqlite_db_path) if mode == "local" else None,
+                "default_project_id": settings.default_project_id,
+                "embedding_model_id": settings.embedding_model_id,
+            }
+        ),
         file=sys.stderr,
     )
     # In local mode, emit the one-line notice too (consistent with the CLI).

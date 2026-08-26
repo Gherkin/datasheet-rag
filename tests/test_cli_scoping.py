@@ -69,7 +69,9 @@ def _run_list(db_path: Path, *extra_args: str) -> str:
     return result.output
 
 
-def test_rag_toml_scopes_list_by_default(db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_rag_toml_scopes_list_by_default(
+    db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     project_dir = tmp_path / "project"
     project_dir.mkdir()
     (project_dir / ".rag.toml").write_text('project_id = "proj-a"\n')
@@ -82,7 +84,9 @@ def test_rag_toml_scopes_list_by_default(db_path: Path, tmp_path: Path, monkeypa
     assert "doc-b" not in output
 
 
-def test_global_flag_overrides_rag_toml_scoping(db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_global_flag_overrides_rag_toml_scoping(
+    db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     project_dir = tmp_path / "project"
     project_dir.mkdir()
     (project_dir / ".rag.toml").write_text('project_id = "proj-a"\n')
@@ -95,7 +99,9 @@ def test_global_flag_overrides_rag_toml_scoping(db_path: Path, tmp_path: Path, m
     assert "doc-b" in output
 
 
-def test_explicit_project_id_overrides_global_and_rag_toml(db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_explicit_project_id_overrides_global_and_rag_toml(
+    db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     project_dir = tmp_path / "project"
     project_dir.mkdir()
     (project_dir / ".rag.toml").write_text('project_id = "proj-a"\n')
@@ -108,7 +114,9 @@ def test_explicit_project_id_overrides_global_and_rag_toml(db_path: Path, tmp_pa
     assert "doc-a" not in output
 
 
-def test_no_rag_toml_lists_everything_by_default(db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_no_rag_toml_lists_everything_by_default(
+    db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     empty_dir = tmp_path / "empty"
     empty_dir.mkdir()
     monkeypatch.chdir(empty_dir)

@@ -36,9 +36,7 @@ def _chunk(chunk_id: str, text: str, *, page: int, pos: int) -> tuple[Chunk, lis
         text=text,
         context_text=text,
         token_count=len(text.split()),
-        metadata=ChunkMetadata(
-            doc_id="doc1", page_numbers=[page], layout_type=LayoutType.TEXT
-        ),
+        metadata=ChunkMetadata(doc_id="doc1", page_numbers=[page], layout_type=LayoutType.TEXT),
     )
     return chunk, _unit(pos)
 
@@ -99,7 +97,9 @@ def eval_set() -> EvalSet:
 
 def test_vector_mode_ranks_target_first(conn, eval_set) -> None:
     report = run_eval(
-        conn, eval_set, RunConfig(mode="vector", k=3, ks=(1, 3)),
+        conn,
+        eval_set,
+        RunConfig(mode="vector", k=3, ks=(1, 3)),
         embedder=_MockEmbedder(),
     )
     for o in report.outcomes:
@@ -111,29 +111,33 @@ def test_vector_mode_ranks_target_first(conn, eval_set) -> None:
 def test_keyword_mode_no_embedder_needed(conn) -> None:
     # FTS5 ANDs the quoted terms, so keyword queries must use terms that
     # actually appear in the target chunk (a real property of this branch).
-    es = EvalSet(items=[
-        GoldenItem(
-            question="I2C clock stretching SCL",
-            category="identifier",
-            doc_id="doc1",
-            gold_chunk_ids=["doc1:2:0"],
-            gold_pages=[5],
-        ),
-        GoldenItem(
-            question="thermal junction temperature",
-            category="identifier",
-            doc_id="doc1",
-            gold_chunk_ids=["doc1:2:1"],
-            gold_pages=[7],
-        ),
-    ])
+    es = EvalSet(
+        items=[
+            GoldenItem(
+                question="I2C clock stretching SCL",
+                category="identifier",
+                doc_id="doc1",
+                gold_chunk_ids=["doc1:2:0"],
+                gold_pages=[5],
+            ),
+            GoldenItem(
+                question="thermal junction temperature",
+                category="identifier",
+                doc_id="doc1",
+                gold_chunk_ids=["doc1:2:1"],
+                gold_pages=[7],
+            ),
+        ]
+    )
     report = run_eval(conn, es, RunConfig(mode="keyword", k=3, ks=(1, 3)))
     assert report.by_category["overall"].hit_rate_at_k[3] == 1.0
 
 
 def test_hybrid_mode_runs(conn, eval_set) -> None:
     report = run_eval(
-        conn, eval_set, RunConfig(mode="hybrid", k=3, ks=(1, 3)),
+        conn,
+        eval_set,
+        RunConfig(mode="hybrid", k=3, ks=(1, 3)),
         embedder=_MockEmbedder(),
     )
     assert report.by_category["overall"].hit_rate_at_k[3] == 1.0
@@ -142,20 +146,22 @@ def test_hybrid_mode_runs(conn, eval_set) -> None:
 def test_page_only_label_scores_loose_not_strict(conn) -> None:
     # Gold labels only a page, no exact chunk id. Strict lineage has no chunk
     # to anchor on, so it cannot credit; the loose page metric still does.
-    es = EvalSet(items=[
-        GoldenItem(
-            question="How does I2C clock stretching work?",
-            category="conceptual",
-            doc_id="doc1",
-            gold_chunk_ids=[],
-            gold_pages=[5],
-        )
-    ])
+    es = EvalSet(
+        items=[
+            GoldenItem(
+                question="How does I2C clock stretching work?",
+                category="conceptual",
+                doc_id="doc1",
+                gold_chunk_ids=[],
+                gold_pages=[5],
+            )
+        ]
+    )
     report = run_eval(conn, es, RunConfig(mode="vector", k=3, ks=(1,)), embedder=_MockEmbedder())
     outcome = report.outcomes[0]
-    assert outcome.first_relevant_rank is None        # strict: no anchor
+    assert outcome.first_relevant_rank is None  # strict: no anchor
     assert outcome.hit_at_ks == {1: 0.0}
-    assert outcome.hit_at_ks_loose == {1: 1.0}        # loose: page-overlap credit
+    assert outcome.hit_at_ks_loose == {1: 1.0}  # loose: page-overlap credit
 
 
 def test_vector_mode_requires_embedder(conn, eval_set) -> None:
@@ -166,8 +172,11 @@ def test_vector_mode_requires_embedder(conn, eval_set) -> None:
 def test_trace_file_written(conn, eval_set, tmp_path: Path) -> None:
     trace = tmp_path / "trace.jsonl"
     run_eval(
-        conn, eval_set, RunConfig(mode="vector", k=3, ks=(1, 3)),
-        embedder=_MockEmbedder(), trace_path=trace,
+        conn,
+        eval_set,
+        RunConfig(mode="vector", k=3, ks=(1, 3)),
+        embedder=_MockEmbedder(),
+        trace_path=trace,
     )
     lines = [json.loads(ln) for ln in trace.read_text().splitlines() if ln.strip()]
     assert len(lines) == 2

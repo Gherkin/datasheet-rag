@@ -196,8 +196,10 @@ def validate_header_grid(
     for entry in proposed:
         try:
             row, col, row_span, col_span = (
-                int(entry["row"]), int(entry["col"]),
-                int(entry["row_span"]), int(entry["col_span"]),
+                int(entry["row"]),
+                int(entry["col"]),
+                int(entry["row_span"]),
+                int(entry["col_span"]),
             )
         except (TypeError, ValueError):
             return f"cell {entry!r} has non-integer row/col/span values"
@@ -222,8 +224,7 @@ def validate_header_grid(
 
     # Anti-degenerate: same long text still repeated across distinct columns
     counts = Counter(
-        text for text in texts_by_pos.values()
-        if len(text) >= _GARBLED_HEADER_MIN_CHARS
+        text for text in texts_by_pos.values() if len(text) >= _GARBLED_HEADER_MIN_CHARS
     )
     for text, count in counts.most_common(1):
         if count >= _GARBLED_HEADER_MIN_REPEATS:
@@ -276,15 +277,17 @@ def splice_header_band(
         text = str(entry.get("text", "")).strip()
         for r in range(row, row + row_span):
             for c in range(col, col + col_span):
-                new_header.append({
-                    "row": r,
-                    "col": c,
-                    "row_span": row_span,
-                    "col_span": col_span,
-                    "text": text,
-                    "is_header": True,
-                    "is_origin": (r, c) == (row, col),
-                })
+                new_header.append(
+                    {
+                        "row": r,
+                        "col": c,
+                        "row_span": row_span,
+                        "col_span": col_span,
+                        "text": text,
+                        "is_header": True,
+                        "is_origin": (r, c) == (row, col),
+                    }
+                )
 
     rest = [c for c in cells if c["row"] > header_rows]
     return sorted(new_header + rest, key=lambda c: (c["row"], c["col"]))
@@ -336,9 +339,7 @@ class TableRepairer:
         verbose: bool = False,
     ) -> None:
         settings = get_settings()
-        self.model_id = (
-            model_id or settings.table_repair_model_id or settings.description_model_id
-        )
+        self.model_id = model_id or settings.table_repair_model_id or settings.description_model_id
         self.max_tokens = max_tokens or settings.table_repair_max_tokens
         self.max_concurrency = max_concurrency or settings.table_repair_concurrency
         self.verbose = verbose
@@ -356,6 +357,7 @@ class TableRepairer:
     def _get_client(self) -> Any:
         if self.client is None:
             from datasheet_rag.local_models import get_chat_client
+
             self.client = get_chat_client(kind="vision", region=self.region, profile=self.profile)
         return self.client
 

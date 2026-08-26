@@ -157,9 +157,7 @@ class LocalBackend(RagBackend):
                 out.append(child)
         return out
 
-    def count_chunks(
-        self, *, doc_id: str | None = None, project_id: str | None = None
-    ) -> int:
+    def count_chunks(self, *, doc_id: str | None = None, project_id: str | None = None) -> int:
         return count_chunks(self._get_conn(), doc_id=doc_id, project_id=project_id)
 
     # -- documents / titles -------------------------------------------
@@ -237,15 +235,11 @@ class LocalBackend(RagBackend):
                 if doc_id in listed:
                     continue
                 title, page_count = self._derived_doc_fields(doc_id)
-                out.append(
-                    DocSummary(doc_id=doc_id, doc_title=title, page_count=page_count)
-                )
+                out.append(DocSummary(doc_id=doc_id, doc_title=title, page_count=page_count))
             out.sort(key=lambda d: d.doc_id)
         return out
 
-    def get_ingested_docs(
-        self, *, project_id: str | None = None
-    ) -> list[IngestedDoc]:
+    def get_ingested_docs(self, *, project_id: str | None = None) -> list[IngestedDoc]:
         rows = get_ingested_docs(self._get_conn(), project_id=project_id)
         return [IngestedDoc(**r) for r in rows]
 
@@ -277,18 +271,14 @@ class LocalBackend(RagBackend):
         group_name: str | None = None,
         mpn: str | None = None,
     ) -> list[DocMetadata]:
-        return list_docs(
-            self._get_conn(), project_id=project_id, group_name=group_name, mpn=mpn
-        )
+        return list_docs(self._get_conn(), project_id=project_id, group_name=group_name, mpn=mpn)
 
     def apply_metadata_to_chunks(self, doc_id: str) -> int:
         with self._write_lock:
             return apply_metadata_to_chunks(self._get_conn(), doc_id)
 
     # -- stats ---------------------------------------------------------
-    def stats(
-        self, *, project_id: str | None = None, doc_id: str | None = None
-    ) -> StatsResult:
+    def stats(self, *, project_id: str | None = None, doc_id: str | None = None) -> StatsResult:
         conn = self._get_conn()
         total = count_chunks(conn, doc_id=doc_id, project_id=project_id)
         where: list[str] = []
@@ -355,9 +345,7 @@ class LocalBackend(RagBackend):
 
             settings = get_settings()
             client = s3_client()
-            resp = client.get_object(
-                Bucket=settings.s3_bucket, Key=chunk.figure_s3_key
-            )
+            resp = client.get_object(Bucket=settings.s3_bucket, Key=chunk.figure_s3_key)
             data = resp["Body"].read()
             ext = Path(chunk.figure_s3_key).suffix.lstrip(".").lower() or "png"
             return data, ext, None
@@ -372,18 +360,11 @@ class LocalBackend(RagBackend):
             raise ValueError(f"unknown chunk_id: {chunk_id}")
         if chunk.metadata.layout_type != LayoutType.FIGURE:
             raise ValueError(
-                f"chunk {chunk_id} is not a figure "
-                f"(layout_type={chunk.metadata.layout_type.value})"
+                f"chunk {chunk_id} is not a figure (layout_type={chunk.metadata.layout_type.value})"
             )
         image_bytes, fmt, resolved = self._read_figure_image(chunk)
         pages = chunk.metadata.page_numbers
-        page = (
-            str(pages[0])
-            if len(pages) == 1
-            else f"{pages[0]}-{pages[-1]}"
-            if pages
-            else ""
-        )
+        page = str(pages[0]) if len(pages) == 1 else f"{pages[0]}-{pages[-1]}" if pages else ""
         return FigureBytes.from_bytes(
             chunk_id=chunk.id,
             doc_id=chunk.doc_id,
@@ -536,9 +517,7 @@ class LocalBackend(RagBackend):
                 )
 
                 embedder_tmp = self._get_embedder() if embed else None
-                vectors_tmp = (
-                    embed_chunk_graph(graph, embedder=embedder_tmp) if embed else None
-                )
+                vectors_tmp = embed_chunk_graph(graph, embedder=embedder_tmp) if embed else None
                 pruned += insert_chunk_graph(
                     conn,
                     graph,
@@ -566,9 +545,7 @@ class LocalBackend(RagBackend):
                         chunk.figure_description = row["figure_description"]
                         tag = f"Description: {row['figure_description']}"
                         if tag not in (chunk.context_text or ""):
-                            chunk.context_text = (
-                                chunk.context_text or chunk.text
-                            ) + "\n" + tag
+                            chunk.context_text = (chunk.context_text or chunk.text) + "\n" + tag
 
             # 3. Final embed + insert.
             vectors = None

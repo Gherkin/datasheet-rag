@@ -61,9 +61,7 @@ def create_api_key(
         (key_id, label, hash_token(token), json.dumps(scopes)),
     )
     conn.commit()
-    rec = ApiKeyRecord(
-        id=key_id, label=label, scopes=scopes, created_at=None, revoked_at=None
-    )
+    rec = ApiKeyRecord(id=key_id, label=label, scopes=scopes, created_at=None, revoked_at=None)
     return rec, token
 
 
@@ -78,9 +76,7 @@ def lookup_api_key(conn: sqlite3.Connection, token: str) -> ApiKeyRecord | None:
     return None if rec.revoked else rec
 
 
-def list_api_keys(
-    conn: sqlite3.Connection, *, include_revoked: bool = True
-) -> list[ApiKeyRecord]:
+def list_api_keys(conn: sqlite3.Connection, *, include_revoked: bool = True) -> list[ApiKeyRecord]:
     sql = "SELECT * FROM api_keys"
     if not include_revoked:
         sql += " WHERE revoked_at IS NULL"

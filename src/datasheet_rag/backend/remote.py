@@ -46,9 +46,7 @@ class RemoteBackend(RagBackend):
         headers = {}
         if token:
             headers["Authorization"] = f"Bearer {token}"
-        self._client = httpx.Client(
-            base_url=base_url.rstrip("/"), timeout=timeout, headers=headers
-        )
+        self._client = httpx.Client(base_url=base_url.rstrip("/"), timeout=timeout, headers=headers)
 
     def close(self) -> None:
         self._client.close()
@@ -109,9 +107,7 @@ class RemoteBackend(RagBackend):
         data = self._json("GET", f"/chunks/{chunk_id}/children")
         return [Chunk.model_validate(c) for c in data["chunks"]]
 
-    def count_chunks(
-        self, *, doc_id: str | None = None, project_id: str | None = None
-    ) -> int:
+    def count_chunks(self, *, doc_id: str | None = None, project_id: str | None = None) -> int:
         params = _drop_none(doc_id=doc_id, project_id=project_id)
         return int(self._json("GET", "/chunks/count", params=params)["count"])
 
@@ -133,9 +129,7 @@ class RemoteBackend(RagBackend):
         data = self._json("GET", "/documents", params=params)
         return [DocSummary.model_validate(d) for d in data["documents"]]
 
-    def get_ingested_docs(
-        self, *, project_id: str | None = None
-    ) -> list[IngestedDoc]:
+    def get_ingested_docs(self, *, project_id: str | None = None) -> list[IngestedDoc]:
         params = _drop_none(project_id=project_id)
         data = self._json("GET", "/documents/ingested", params=params)
         return [IngestedDoc.model_validate(d) for d in data["documents"]]
@@ -177,14 +171,10 @@ class RemoteBackend(RagBackend):
         return [DocMetadata.model_validate(d) for d in data["documents"]]
 
     def apply_metadata_to_chunks(self, doc_id: str) -> int:
-        return int(
-            self._json("POST", f"/documents/{doc_id}/apply-metadata")["updated"]
-        )
+        return int(self._json("POST", f"/documents/{doc_id}/apply-metadata")["updated"])
 
     # -- stats ---------------------------------------------------------
-    def stats(
-        self, *, project_id: str | None = None, doc_id: str | None = None
-    ) -> StatsResult:
+    def stats(self, *, project_id: str | None = None, doc_id: str | None = None) -> StatsResult:
         params = _drop_none(project_id=project_id, doc_id=doc_id)
         return StatsResult.model_validate(self._json("GET", "/stats", params=params))
 
@@ -205,9 +195,7 @@ class RemoteBackend(RagBackend):
         return [Chunk.model_validate(c) for c in data["chunks"]]
 
     def get_figure_bytes(self, chunk_id: str) -> FigureBytes:
-        return FigureBytes.model_validate(
-            self._json("GET", f"/figures/{chunk_id}/bytes")
-        )
+        return FigureBytes.model_validate(self._json("GET", f"/figures/{chunk_id}/bytes"))
 
     def update_figure_description(
         self, chunk_id: str, description: str, *, update_context_text: bool = True
@@ -294,9 +282,7 @@ class RemoteBackend(RagBackend):
         ]
         for chunk_id, (img_bytes, ext) in (figures or {}).items():
             ext = (ext or "png").lstrip(".")
-            files.append(
-                ("figures", (f"{chunk_id}.{ext}", img_bytes, f"image/{ext}"))
-            )
+            files.append(("figures", (f"{chunk_id}.{ext}", img_bytes, f"image/{ext}")))
         data = self._json("POST", "/ingest", files=files)
         return IngestResult.model_validate(data)
 

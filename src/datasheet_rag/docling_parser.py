@@ -331,22 +331,23 @@ def _table_to_cells(table_item: Any) -> list[dict[str, Any]]:
     try:
         for row_idx, row in enumerate(table_item.data.grid):
             for col_idx, cell in enumerate(row):
-                is_origin = (
-                    row_idx == getattr(cell, "start_row_offset_idx", row_idx)
-                    and col_idx == getattr(cell, "start_col_offset_idx", col_idx)
+                is_origin = row_idx == getattr(
+                    cell, "start_row_offset_idx", row_idx
+                ) and col_idx == getattr(cell, "start_col_offset_idx", col_idx)
+                cells.append(
+                    {
+                        "row": row_idx + 1,
+                        "col": col_idx + 1,
+                        "row_span": getattr(cell, "row_span", 1),
+                        "col_span": getattr(cell, "col_span", 1),
+                        "text": getattr(cell, "text", ""),
+                        "is_header": (
+                            getattr(cell, "column_header", False)
+                            or getattr(cell, "row_header", False)
+                        ),
+                        "is_origin": is_origin,
+                    }
                 )
-                cells.append({
-                    "row": row_idx + 1,
-                    "col": col_idx + 1,
-                    "row_span": getattr(cell, "row_span", 1),
-                    "col_span": getattr(cell, "col_span", 1),
-                    "text": getattr(cell, "text", ""),
-                    "is_header": (
-                        getattr(cell, "column_header", False)
-                        or getattr(cell, "row_header", False)
-                    ),
-                    "is_origin": is_origin,
-                })
     except (AttributeError, TypeError):
         pass
     return cells
@@ -388,7 +389,8 @@ def _detect_garbled_header(cells: list[dict[str, Any]]) -> str | None:
     header_texts = [
         c["text"].strip()
         for c in cells
-        if c.get("is_header") and c.get("is_origin", True)
+        if c.get("is_header")
+        and c.get("is_origin", True)
         and len(c["text"].strip()) >= _GARBLED_HEADER_MIN_CHARS
     ]
     for text, count in Counter(header_texts).most_common(1):
@@ -437,14 +439,10 @@ def _detect_fused_header_row(cells: list[dict[str, Any]]) -> str | None:
     """
     origin = [c for c in cells if c.get("is_origin", True)]
     header_texts = {
-        c["text"].strip().casefold()
-        for c in origin
-        if c.get("is_header") and c["text"].strip()
+        c["text"].strip().casefold() for c in origin if c.get("is_header") and c["text"].strip()
     }
     data_texts = {
-        c["text"].strip().casefold()
-        for c in origin
-        if not c.get("is_header") and c["text"].strip()
+        c["text"].strip().casefold() for c in origin if not c.get("is_header") and c["text"].strip()
     }
     candidates = {t for t in (header_texts & data_texts) if len(t) >= _FUSED_HEADER_MIN_CHARS}
     if not candidates:
@@ -652,7 +650,7 @@ def _build_outline(
     current_section: DocumentSection | None = None
     section_stack: list[DocumentSection] = []
     counter = 0
-    figure_counter = 0   # tracks PICTURE items only — must match _build_figure_regions
+    figure_counter = 0  # tracks PICTURE items only — must match _build_figure_regions
     formula_counter = 0  # tracks FORMULA items only — must match _build_figure_regions
 
     # Last PICTURE/FORMULA element waiting for a CAPTION to be assigned.
@@ -697,7 +695,10 @@ def _build_outline(
             if not doc_title:
                 doc_title = text
             section = DocumentSection(
-                title=text, level=0, page_start=page_no, page_end=page_no,
+                title=text,
+                level=0,
+                page_start=page_no,
+                page_end=page_no,
                 header_block_id=block_id,
             )
             _flush(section_stack, sections)
@@ -709,7 +710,10 @@ def _build_outline(
             text = _clean_text(getattr(item, "text", ""))
             pending_caption_element = None
             section = DocumentSection(
-                title=text, level=doc_level, page_start=page_no, page_end=page_no,
+                title=text,
+                level=doc_level,
+                page_start=page_no,
+                page_end=page_no,
                 header_block_id=block_id,
             )
             # Pop back to a parent that is strictly shallower than this section.
@@ -831,13 +835,11 @@ def _build_outline(
             )
             pending_caption_element = element
 
-        elif label in (DocItemLabel.TEXT, DocItemLabel.LIST_ITEM,
-                       DocItemLabel.CODE):
+        elif label in (DocItemLabel.TEXT, DocItemLabel.LIST_ITEM, DocItemLabel.CODE):
             pending_caption_element = None
             text = _clean_text(getattr(item, "text", ""))
             if text:
-                etype = (ElementType.LIST if label == DocItemLabel.LIST_ITEM
-                         else ElementType.TEXT)
+                etype = ElementType.LIST if label == DocItemLabel.LIST_ITEM else ElementType.TEXT
                 element = ContentElement(
                     element_type=etype,
                     text=text,
@@ -1186,8 +1188,7 @@ def _merge_continued_sections(sections: list[DocumentSection]) -> list[DocumentS
                     target.children.extend(s.children)
                     target.page_end = max(target.page_end, s.page_end)
                     console.print(
-                        f"[dim]Merge:[/] folded '{s.title}' (p{s.page_start}) "
-                        f"into '{target.title}'"
+                        f"[dim]Merge:[/] folded '{s.title}' (p{s.page_start}) into '{target.title}'"
                     )
                     continue  # drop the continuation — absorbed into base
                 # No matching base in this sibling list — keep and register
@@ -1282,8 +1283,7 @@ def _filter_toc_sections(sections: list[DocumentSection]) -> list[DocumentSectio
     for s in sections:
         if _is_toc_section(s):
             console.print(
-                f"[yellow]ToC filter:[/] dropped '{s.title}' "
-                f"({len(s.elements)} elements)"
+                f"[yellow]ToC filter:[/] dropped '{s.title}' ({len(s.elements)} elements)"
             )
             continue
         s.children = _filter_toc_sections(s.children)

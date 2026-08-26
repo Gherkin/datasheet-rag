@@ -346,9 +346,7 @@ def parse_textract_blocks(
         bt = block.get("BlockType", "")
         block_id = block.get("Id", "")
         page = block.get("Page", 1)
-        bbox = BoundingBox.from_textract(
-            block.get("Geometry", {}).get("BoundingBox", {})
-        )
+        bbox = BoundingBox.from_textract(block.get("Geometry", {}).get("BoundingBox", {}))
 
         # Skip blocks that are children of other layout blocks (avoid duplication)
         if block_id in child_layout_ids:
@@ -404,7 +402,10 @@ def parse_textract_blocks(
             element = _parse_table_element(block, id_map, table_blocks, page, bbox)
             if current_section is None:
                 current_section = DocumentSection(
-                    title="(Untitled)", level=0, page_start=page, page_end=page,
+                    title="(Untitled)",
+                    level=0,
+                    page_start=page,
+                    page_end=page,
                 )
                 section_stack = [current_section]
             current_section.elements.append(element)
@@ -422,7 +423,10 @@ def parse_textract_blocks(
             )
             if current_section is None:
                 current_section = DocumentSection(
-                    title="(Untitled)", level=0, page_start=page, page_end=page,
+                    title="(Untitled)",
+                    level=0,
+                    page_start=page,
+                    page_end=page,
                 )
                 section_stack = [current_section]
             current_section.elements.append(element)
@@ -440,7 +444,10 @@ def parse_textract_blocks(
                 )
                 if current_section is None:
                     current_section = DocumentSection(
-                        title="(Untitled)", level=0, page_start=page, page_end=page,
+                        title="(Untitled)",
+                        level=0,
+                        page_start=page,
+                        page_end=page,
                     )
                     section_stack = [current_section]
                 current_section.elements.append(element)
@@ -458,7 +465,10 @@ def parse_textract_blocks(
                 )
                 if current_section is None:
                     current_section = DocumentSection(
-                        title="(Untitled)", level=0, page_start=page, page_end=page,
+                        title="(Untitled)",
+                        level=0,
+                        page_start=page,
+                        page_end=page,
                     )
                     section_stack = [current_section]
                 current_section.elements.append(element)
@@ -503,11 +513,7 @@ def _collect_text(block: dict[str, Any], id_map: dict[str, dict[str, Any]]) -> s
     if "Text" in block:
         return block["Text"]
 
-    child_ids = [
-        rel["Ids"]
-        for rel in block.get("Relationships", [])
-        if rel["Type"] == "CHILD"
-    ]
+    child_ids = [rel["Ids"] for rel in block.get("Relationships", []) if rel["Type"] == "CHILD"]
     flat_ids = [cid for ids in child_ids for cid in ids]
 
     texts: list[str] = []
@@ -555,7 +561,11 @@ def _parse_table_element(
     if not table_text_parts:
         table_text_parts.append(_collect_text(layout_block, id_map).strip())
 
-    text = table_title + "\n" + "\n".join(table_text_parts) if table_title else "\n".join(table_text_parts)
+    text = (
+        table_title + "\n" + "\n".join(table_text_parts)
+        if table_title
+        else "\n".join(table_text_parts)
+    )
 
     return ContentElement(
         element_type=ElementType.TABLE,
@@ -586,14 +596,16 @@ def _extract_table_cells(
                 continue
 
             cell_text = _collect_text(child, id_map).strip()
-            cells.append({
-                "row": child.get("RowIndex", 0),
-                "col": child.get("ColumnIndex", 0),
-                "row_span": child.get("RowSpan", 1),
-                "col_span": child.get("ColumnSpan", 1),
-                "text": cell_text,
-                "is_header": child.get("EntityTypes", []) == ["COLUMN_HEADER"],
-            })
+            cells.append(
+                {
+                    "row": child.get("RowIndex", 0),
+                    "col": child.get("ColumnIndex", 0),
+                    "row_span": child.get("RowSpan", 1),
+                    "col_span": child.get("ColumnSpan", 1),
+                    "text": cell_text,
+                    "is_header": child.get("EntityTypes", []) == ["COLUMN_HEADER"],
+                }
+            )
 
     return cells
 
@@ -626,10 +638,9 @@ def _find_figure_caption(
 ) -> str:
     """Find caption text near a figure block."""
     fig_page = fig_block.get("Page", 1)
-    fig_bottom = (
-        fig_block.get("Geometry", {}).get("BoundingBox", {}).get("Top", 0)
-        + fig_block.get("Geometry", {}).get("BoundingBox", {}).get("Height", 0)
-    )
+    fig_bottom = fig_block.get("Geometry", {}).get("BoundingBox", {}).get("Top", 0) + fig_block.get(
+        "Geometry", {}
+    ).get("BoundingBox", {}).get("Height", 0)
 
     fig_idx = None
     for i, lb in enumerate(layout_blocks):
@@ -651,10 +662,7 @@ def _find_figure_caption(
         cand_top = candidate.get("Geometry", {}).get("BoundingBox", {}).get("Top", 0)
         if bt == "LAYOUT_TEXT" and (cand_top - fig_bottom) < 0.05:
             text = _collect_text(candidate, id_map).strip()
-            if text and (
-                text.lower().startswith(("figure", "fig.", "fig "))
-                or len(text) < 200
-            ):
+            if text and (text.lower().startswith(("figure", "fig.", "fig ")) or len(text) < 200):
                 return text
     return ""
 

@@ -111,9 +111,7 @@ def save_chunk_graph(graph: ChunkGraph, path: Path) -> Path:
         "chunks": {},
     }
     for chunk_id, chunk in graph.chunks.items():
-        chunk_dict = chunk.model_dump(
-            exclude={"content_embedding", "context_embedding"}
-        )
+        chunk_dict = chunk.model_dump(exclude={"content_embedding", "context_embedding"})
         data["chunks"][chunk_id] = chunk_dict
 
     with open(path, "w") as f:

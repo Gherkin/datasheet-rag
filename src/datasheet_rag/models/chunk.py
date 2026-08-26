@@ -11,9 +11,9 @@ from pydantic import BaseModel, Field
 class ChunkLevel(int, Enum):
     """Zoom level for multi-scale chunking."""
 
-    MACRO = 0    # Chapter / full-section summaries — ~2000 tokens
-    MESO = 1     # Subsection chunks — ~512 tokens
-    MICRO = 2    # Paragraph / table / figure level — ~128 tokens
+    MACRO = 0  # Chapter / full-section summaries — ~2000 tokens
+    MESO = 1  # Subsection chunks — ~512 tokens
+    MICRO = 2  # Paragraph / table / figure level — ~128 tokens
 
 
 class LayoutType(str, Enum):
@@ -78,17 +78,17 @@ class Chunk(BaseModel):
     metadata: ChunkMetadata
 
     # Navigation links (IDs of other chunks)
-    parent_id: str | None = None        # Zoom out
+    parent_id: str | None = None  # Zoom out
     children_ids: list[str] = Field(default_factory=list)  # Zoom in
-    prev_id: str | None = None          # Previous in reading order (same level)
-    next_id: str | None = None          # Next in reading order (same level)
+    prev_id: str | None = None  # Previous in reading order (same level)
+    next_id: str | None = None  # Next in reading order (same level)
     chapter_root_id: str | None = None  # Jump to chapter start (level 0)
 
     # Figure / multi-modal references
-    figure_image_path: str | None = None     # Local path to cropped figure image
-    figure_s3_key: str | None = None         # S3 key for the figure image
-    figure_caption: str | None = None        # Detected or nearby caption text
-    figure_description: str | None = None    # LLM-generated description for text embedding
+    figure_image_path: str | None = None  # Local path to cropped figure image
+    figure_s3_key: str | None = None  # S3 key for the figure image
+    figure_caption: str | None = None  # Detected or nearby caption text
+    figure_description: str | None = None  # LLM-generated description for text embedding
     # Whether the image can actually be read *on the host that owns the figure
     # store*. Set when a chunk is hydrated from the store (see
     # ``store.sqlite._row_to_chunk``); ``None`` means "not checked" — a chunk
@@ -141,7 +141,5 @@ class ChunkGraph(BaseModel):
     def stats(self) -> dict[str, Any]:
         return {
             "total_chunks": len(self.chunks),
-            "by_level": {
-                level.name: len(self.by_level(level)) for level in ChunkLevel
-            },
+            "by_level": {level.name: len(self.by_level(level)) for level in ChunkLevel},
         }

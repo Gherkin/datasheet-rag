@@ -293,9 +293,9 @@ class TransformersChatClient:
             prompt = self._proc.apply_chat_template(
                 messages, tokenize=False, add_generation_prompt=True
             )
-            inputs = self._proc(
-                text=[prompt], images=images or None, return_tensors="pt"
-            ).to(self._device)
+            inputs = self._proc(text=[prompt], images=images or None, return_tensors="pt").to(
+                self._device
+            )
             in_len = inputs["input_ids"].shape[1]
             with torch.no_grad():
                 out = self._model.generate(**inputs, **gen_kwargs)

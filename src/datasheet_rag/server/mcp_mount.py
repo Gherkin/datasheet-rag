@@ -68,15 +68,17 @@ async def _send_json(
     headers: tuple[tuple[bytes, bytes], ...] = (),
 ) -> None:
     raw = json.dumps(body).encode()
-    await send({
-        "type": "http.response.start",
-        "status": status,
-        "headers": [
-            (b"content-type", b"application/json"),
-            (b"content-length", str(len(raw)).encode()),
-            *headers,
-        ],
-    })
+    await send(
+        {
+            "type": "http.response.start",
+            "status": status,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(raw)).encode()),
+                *headers,
+            ],
+        }
+    )
     await send({"type": "http.response.body", "body": raw})
 
 

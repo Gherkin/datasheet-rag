@@ -143,9 +143,7 @@ def test_local_ingest_rewrites_uploaded_figure_path(
     did = "b" * 64
     g = _graph_with_figure(did)
     png = b"\x89PNG\r\n\x1a\nfake"
-    res = backend.ingest_chunk_graph(
-        g, figures={f"{did}:L2:0": (png, "png")}, embed=False
-    )
+    res = backend.ingest_chunk_graph(g, figures={f"{did}:L2:0": (png, "png")}, embed=False)
     assert res.inserted == 2
     ch = backend.get_chunk(f"{did}:L2:0")
     # Path is stored RELATIVE to figures_dir (portable) — not the client path,
@@ -158,9 +156,7 @@ def test_local_ingest_rewrites_uploaded_figure_path(
     assert fig.image_bytes() == png
 
 
-def test_local_delete_doc_purges_local_files(
-    backend: LocalBackend, tmp_path, monkeypatch
-) -> None:
+def test_local_delete_doc_purges_local_files(backend: LocalBackend, tmp_path, monkeypatch) -> None:
     from datasheet_rag.config import get_settings
 
     settings = get_settings()
@@ -281,9 +277,7 @@ def test_server_ingest_pdf_streams_sse(client, monkeypatch) -> None:
         if progress:
             progress(ProgressEvent(kind="step", text="Docling layout analysis", step=1))
             progress(ProgressEvent(kind="detail", text="10 chunks", step=1))
-        return ParseResult(
-            graph=ChunkGraph(doc_id=did), doc_id=did, resolved_backend="docling"
-        )
+        return ParseResult(graph=ChunkGraph(doc_id=did), doc_id=did, resolved_backend="docling")
 
     monkeypatch.setattr(ip, "parse_pdf_to_graph", fake_parse)
     monkeypatch.setattr(
@@ -311,7 +305,7 @@ def test_server_ingest_pdf_streams_sse(client, monkeypatch) -> None:
     for block in body.split("\n\n"):
         if "event: result" in block:
             data_line = [ln for ln in block.splitlines() if ln.startswith("data:")][0]
-            result = json.loads(data_line[len("data:"):].strip())
+            result = json.loads(data_line[len("data:") :].strip())
     assert result == {
         "doc_id": did,
         "inserted": 10,
@@ -424,7 +418,10 @@ def test_admin_key_lifecycle_and_ingest(conn, monkeypatch) -> None:
     # Ingest key can ingest (and read via implied scope).
     assert c.get("/stats", headers=_auth(ingest_token)).status_code == 200
     did = "f" * 64
-    assert c.post("/ingest", files=_ingest_payload(did), headers=_auth(ingest_token)).status_code == 200
+    assert (
+        c.post("/ingest", files=_ingest_payload(did), headers=_auth(ingest_token)).status_code
+        == 200
+    )
 
     # Audit row recorded with the key's label, never the token.
     audit = c.get("/audit", headers=_auth(admin_token)).json()["entries"]
@@ -434,7 +431,10 @@ def test_admin_key_lifecycle_and_ingest(conn, monkeypatch) -> None:
 
     # Revoke → immediately locked out, no restart.
     assert c.delete(f"/admin/keys/{key_id}", headers=_auth(admin_token)).status_code == 200
-    assert c.post("/ingest", files=_ingest_payload("0" * 64), headers=_auth(ingest_token)).status_code == 401
+    assert (
+        c.post("/ingest", files=_ingest_payload("0" * 64), headers=_auth(ingest_token)).status_code
+        == 401
+    )
 
 
 def test_cors_preflight(conn, monkeypatch) -> None:

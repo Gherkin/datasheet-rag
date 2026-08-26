@@ -35,11 +35,13 @@ def _figure_element(block_id: str, caption: str, page: int = 3) -> ContentElemen
 
 def _outline(*elements: ContentElement) -> DocumentOutline:
     section = DocumentSection(
-        title="Mechanical", level=0, page_start=3, page_end=3,
+        title="Mechanical",
+        level=0,
+        page_start=3,
+        page_end=3,
         elements=list(elements),
     )
-    return DocumentOutline(title="Widget Manual", doc_id="doc1", total_pages=4,
-                           sections=[section])
+    return DocumentOutline(title="Widget Manual", doc_id="doc1", total_pages=4, sections=[section])
 
 
 def _manifest(*entries: tuple[str, str, str]) -> dict[str, Any]:
@@ -60,7 +62,8 @@ def _manifest(*entries: tuple[str, str, str]) -> dict[str, Any]:
 
 def _figures(graph: Any, level: ChunkLevel) -> list[Any]:
     return [
-        c for c in graph.chunks.values()
+        c
+        for c in graph.chunks.values()
         if c.level == level and c.metadata.layout_type == LayoutType.FIGURE
     ]
 

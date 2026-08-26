@@ -163,9 +163,7 @@ def build_app() -> FastAPI:
 
     @app.exception_handler(RagServerError)
     async def _rag_err(_: Any, exc: RagServerError) -> JSONResponse:
-        return JSONResponse(
-            status_code=exc.status_code or 500, content={"detail": exc.detail}
-        )
+        return JSONResponse(status_code=exc.status_code or 500, content={"detail": exc.detail})
 
     @app.exception_handler(FigureUnavailableError)
     async def _fig_unavailable(_: Any, exc: FigureUnavailableError) -> JSONResponse:
@@ -244,9 +242,7 @@ def build_app() -> FastAPI:
         return Response(content=data, media_type="application/pdf")
 
     @app.get("/documents/{doc_id}/metadata", dependencies=dep)
-    def document_metadata(
-        doc_id: str, be: LocalBackend = Depends(get_backend)
-    ) -> Response:
+    def document_metadata(doc_id: str, be: LocalBackend = Depends(get_backend)) -> Response:
         md = be.get_metadata(doc_id)
         if md is None:
             return Response(status_code=204)
@@ -265,9 +261,7 @@ def build_app() -> FastAPI:
         return {"updated": be.set_doc_title(doc_id, body.title)}
 
     @app.post("/documents/{doc_id}/apply-metadata", dependencies=ingest_dep)
-    def document_apply_metadata(
-        doc_id: str, be: LocalBackend = Depends(get_backend)
-    ) -> dict:
+    def document_apply_metadata(doc_id: str, be: LocalBackend = Depends(get_backend)) -> dict:
         return {"updated": be.apply_metadata_to_chunks(doc_id)}
 
     @app.delete("/documents/{doc_id}", dependencies=ingest_dep)
@@ -278,13 +272,21 @@ def build_app() -> FastAPI:
             deleted = be.delete_doc(doc_id)
         except Exception as exc:
             audit(
-                request, be, action="delete_doc", status="error",
-                doc_id=doc_id, error=str(exc),
+                request,
+                be,
+                action="delete_doc",
+                status="error",
+                doc_id=doc_id,
+                error=str(exc),
             )
             raise
         audit(
-            request, be, action="delete_doc", status="ok",
-            doc_id=doc_id, detail={"deleted": deleted},
+            request,
+            be,
+            action="delete_doc",
+            status="ok",
+            doc_id=doc_id,
+            detail={"deleted": deleted},
         )
         return {"deleted": deleted}
 
@@ -369,13 +371,23 @@ def build_app() -> FastAPI:
             )
         except Exception as exc:
             audit(
-                request, be, action="describe_figures", status="error",
-                doc_id=body.doc_id, project_id=body.project_id, error=str(exc),
+                request,
+                be,
+                action="describe_figures",
+                status="error",
+                doc_id=body.doc_id,
+                project_id=body.project_id,
+                error=str(exc),
             )
             raise
         audit(
-            request, be, action="describe_figures", status="ok",
-            doc_id=body.doc_id, project_id=body.project_id, detail=stats,
+            request,
+            be,
+            action="describe_figures",
+            status="ok",
+            doc_id=body.doc_id,
+            project_id=body.project_id,
+            detail=stats,
         )
         return {"descriptions": descriptions, "stats": stats}
 
@@ -395,13 +407,21 @@ def build_app() -> FastAPI:
             )
         except Exception as exc:
             audit(
-                request, be, action="infer_title", status="error",
-                doc_id=doc_id, error=str(exc),
+                request,
+                be,
+                action="infer_title",
+                status="error",
+                doc_id=doc_id,
+                error=str(exc),
             )
             raise
         audit(
-            request, be, action="infer_title", status="ok",
-            doc_id=doc_id, detail={"title": title, "dry_run": body.dry_run},
+            request,
+            be,
+            action="infer_title",
+            status="ok",
+            doc_id=doc_id,
+            detail={"title": title, "dry_run": body.dry_run},
         )
         return {"title": title}
 
@@ -420,11 +440,7 @@ def build_app() -> FastAPI:
             name = f.filename or ""
             chunk_id, _, ext = name.rpartition(".")
             fig_uploads[chunk_id] = (await f.read(), ext or "png")
-        metadata = (
-            MetadataPatch.model_validate(data["metadata"])
-            if data.get("metadata")
-            else None
-        )
+        metadata = MetadataPatch.model_validate(data["metadata"]) if data.get("metadata") else None
         try:
             result = be.ingest_chunk_graph(
                 graph,
@@ -439,13 +455,21 @@ def build_app() -> FastAPI:
             )
         except Exception as exc:
             audit(
-                request, be, action="ingest", status="error",
-                project_id=data.get("project_id"), error=str(exc),
+                request,
+                be,
+                action="ingest",
+                status="error",
+                project_id=data.get("project_id"),
+                error=str(exc),
             )
             raise
         audit(
-            request, be, action="ingest", status="ok",
-            doc_id=result.doc_id, project_id=data.get("project_id"),
+            request,
+            be,
+            action="ingest",
+            status="ok",
+            doc_id=result.doc_id,
+            project_id=data.get("project_id"),
             detail={
                 "inserted": result.inserted,
                 "pruned": result.pruned,
@@ -510,9 +534,7 @@ def build_app() -> FastAPI:
                 embed_step = {"kind": "step", "text": "Embed & store", "step": max_step["n"] + 1}
                 loop.call_soon_threadsafe(queue.put_nowait, ("progress", embed_step))
                 metadata = (
-                    MetadataPatch.model_validate(opts["metadata"])
-                    if opts.get("metadata")
-                    else None
+                    MetadataPatch.model_validate(opts["metadata"]) if opts.get("metadata") else None
                 )
                 result = be.ingest_chunk_graph(
                     parsed.graph,
@@ -528,9 +550,7 @@ def build_app() -> FastAPI:
                     queue.put_nowait, ("result", result.model_dump(mode="json"))
                 )
             except Exception as exc:  # surfaced to the client as an error event
-                loop.call_soon_threadsafe(
-                    queue.put_nowait, ("error", {"detail": str(exc)})
-                )
+                loop.call_soon_threadsafe(queue.put_nowait, ("error", {"detail": str(exc)}))
             finally:
                 loop.call_soon_threadsafe(queue.put_nowait, ("__done__", None))
 
@@ -558,7 +578,10 @@ def build_app() -> FastAPI:
                 tmp_path.unlink(missing_ok=True)
                 if status == "ok" and result_doc is not None:
                     audit(
-                        request, be, action="ingest", status="ok",
+                        request,
+                        be,
+                        action="ingest",
+                        status="ok",
                         doc_id=result_doc.get("doc_id"),
                         project_id=opts.get("project_id"),
                         detail={
@@ -569,17 +592,19 @@ def build_app() -> FastAPI:
                     )
                 else:
                     audit(
-                        request, be, action="ingest", status="error",
-                        project_id=opts.get("project_id"), error=error_detail,
+                        request,
+                        be,
+                        action="ingest",
+                        status="error",
+                        project_id=opts.get("project_id"),
+                        error=error_detail,
                     )
 
         return StreamingResponse(event_gen(), media_type="text/event-stream")
 
     # -- admin: API key management ---------------------------------------
     @app.post("/admin/keys", dependencies=admin_dep)
-    def admin_create_key(
-        body: CreateKeyBody, be: LocalBackend = Depends(get_backend)
-    ) -> dict:
+    def admin_create_key(body: CreateKeyBody, be: LocalBackend = Depends(get_backend)) -> dict:
         with be.write_lock:
             rec, token = create_api_key(be.conn, label=body.label, scopes=body.scopes)
         # Plaintext token returned exactly once; never stored or shown again.

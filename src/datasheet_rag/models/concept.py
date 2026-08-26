@@ -92,9 +92,7 @@ class ConceptGraph(BaseModel):
         links = self.chunks_for_concept(concept_id)
         return [link for link in links if link.chunk_id != chunk_id]
 
-    def lateral_search(
-        self, chunk_id: str, top_k: int = 5
-    ) -> list[tuple[str, list[ConceptLink]]]:
+    def lateral_search(self, chunk_id: str, top_k: int = 5) -> list[tuple[str, list[ConceptLink]]]:
         """From a chunk, find related concepts, then find chunks for each.
 
         Returns list of (concept_id, [links to other chunks]) sorted by
@@ -108,7 +106,8 @@ class ConceptGraph(BaseModel):
 
         for sc in source_concepts[:top_k]:
             related = [
-                link for link in self.chunks_for_concept(sc.concept_id)
+                link
+                for link in self.chunks_for_concept(sc.concept_id)
                 if link.chunk_id not in seen_chunks
             ]
             if related:

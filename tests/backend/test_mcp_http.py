@@ -128,9 +128,7 @@ def test_tools_list_omits_the_loopback_pdf_viewer(client: TestClient) -> None:
 # ---- project scoping -----------------------------------------------------
 
 
-def test_path_segment_scopes_the_search_to_one_project(
-    client: TestClient, app_and_backend
-) -> None:
+def test_path_segment_scopes_the_search_to_one_project(client: TestClient, app_and_backend) -> None:
     _, backend = app_and_backend
     a = _seed(backend, "a", "proj-a", "thermal shutdown threshold")
     b = _seed(backend, "b", "proj-b", "thermal shutdown threshold")
@@ -147,9 +145,7 @@ def test_path_segment_scopes_the_search_to_one_project(
     assert ids("/mcp/") == {a, b}
 
 
-def test_project_header_scopes_when_the_path_does_not(
-    client: TestClient, app_and_backend
-) -> None:
+def test_project_header_scopes_when_the_path_does_not(client: TestClient, app_and_backend) -> None:
     _, backend = app_and_backend
     a = _seed(backend, "a", "proj-a", "thermal shutdown threshold")
     _seed(backend, "b", "proj-b", "thermal shutdown threshold")
@@ -162,9 +158,7 @@ def test_project_header_scopes_when_the_path_does_not(
     assert {r["doc_id"] for r in result["structuredContent"]["result"]} == {a}
 
 
-def test_explicit_project_argument_beats_the_url(
-    client: TestClient, app_and_backend
-) -> None:
+def test_explicit_project_argument_beats_the_url(client: TestClient, app_and_backend) -> None:
     _, backend = app_and_backend
     _seed(backend, "a", "proj-a", "thermal shutdown threshold")
     b = _seed(backend, "b", "proj-b", "thermal shutdown threshold")
@@ -177,9 +171,7 @@ def test_explicit_project_argument_beats_the_url(
     assert {r["doc_id"] for r in result["structuredContent"]["result"]} == {b}
 
 
-def test_scoping_does_not_leak_between_requests(
-    client: TestClient, app_and_backend
-) -> None:
+def test_scoping_does_not_leak_between_requests(client: TestClient, app_and_backend) -> None:
     # The project rides a ContextVar. If it were process-wide instead, the
     # scoped call below would poison every later one.
     _, backend = app_and_backend
@@ -205,9 +197,7 @@ def test_open_mode_allows_unauthenticated_mcp(client: TestClient) -> None:
     assert _rpc(client, "tools/list").status_code == 200
 
 
-def test_read_token_is_required_when_configured(
-    client: TestClient, read_token: str
-) -> None:
+def test_read_token_is_required_when_configured(client: TestClient, read_token: str) -> None:
     r = _rpc(client, "tools/list")
     assert r.status_code == 401
     assert r.headers["www-authenticate"].startswith("Bearer")
@@ -218,9 +208,7 @@ def test_read_token_is_required_when_configured(
     assert ok.status_code == 200
 
 
-def test_ingest_key_also_opens_mcp(
-    client: TestClient, app_and_backend, read_token: str
-) -> None:
+def test_ingest_key_also_opens_mcp(client: TestClient, app_and_backend, read_token: str) -> None:
     # Ingest implies read, so a client with an ingest key can search too.
     from datasheet_rag.store import create_api_key
 
@@ -233,9 +221,7 @@ def test_ingest_key_also_opens_mcp(
 # ---- opting out ----------------------------------------------------------
 
 
-def test_mcp_can_be_disabled(
-    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_mcp_can_be_disabled(conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("datasheet_rag.server.app.get_backend", lambda: LocalBackend(conn=conn))
     monkeypatch.setattr(get_settings(), "server_mcp_enabled", False)
 

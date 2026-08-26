@@ -80,9 +80,7 @@ def _verify_links(graph: ChunkGraph) -> None:
             chunk.next_id = None
         if chunk.chapter_root_id and chunk.chapter_root_id not in graph.chunks:
             chunk.chapter_root_id = None
-        chunk.children_ids = [
-            cid for cid in chunk.children_ids if cid in graph.chunks
-        ]
+        chunk.children_ids = [cid for cid in chunk.children_ids if cid in graph.chunks]
 
 
 def _chunk_sort_key(chunk: Chunk) -> tuple[int, int]:

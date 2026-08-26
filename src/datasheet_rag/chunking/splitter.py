@@ -188,7 +188,9 @@ def split_document(
 # ---------------------------------------------------------------------------
 
 
-def _collect_section_elements(section: DocumentSection) -> list[tuple[ContentElement, DocumentSection]]:
+def _collect_section_elements(
+    section: DocumentSection,
+) -> list[tuple[ContentElement, DocumentSection]]:
     """Collect all elements with their immediate section context, depth-first."""
     results: list[tuple[ContentElement, DocumentSection]] = []
     for elem in section.elements:
@@ -340,7 +342,9 @@ def _create_micro_chunks(
                 max_tokens=config.micro_max_tokens,
                 prefer_sentences=config.prefer_sentence_breaks,
             )
-            layout_type = LayoutType.LIST if elem.element_type == ElementType.LIST else LayoutType.TEXT
+            layout_type = (
+                LayoutType.LIST if elem.element_type == ElementType.LIST else LayoutType.TEXT
+            )
 
             for text_piece in text_chunks:
                 chunk = _make_chunk(
@@ -396,9 +400,7 @@ def _create_meso_chunks(
             return
 
         combined_text = "\n\n".join(c.text for c in current_group)
-        pages = sorted(set(
-            p for c in current_group for p in c.metadata.page_numbers
-        ))
+        pages = sorted(set(p for c in current_group for p in c.metadata.page_numbers))
         # Determine dominant layout type
         types = [c.metadata.layout_type for c in current_group]
         layout_type = types[0] if len(set(types)) == 1 else LayoutType.MIXED

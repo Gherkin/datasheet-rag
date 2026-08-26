@@ -26,8 +26,8 @@ from datasheet_rag.project_config import get_project_config
 from datasheet_rag.store.schema import connect
 from datasheet_rag.store.sqlite import insert_chunks
 
-DOC_ID = "a" * 64          # has chunks + a real PDF on disk
-DOC_NO_PDF = "b" * 64      # has chunks but no PDF file on disk
+DOC_ID = "a" * 64  # has chunks + a real PDF on disk
+DOC_NO_PDF = "b" * 64  # has chunks but no PDF file on disk
 PAGE_COUNT = 3
 
 
@@ -42,12 +42,22 @@ def _make_pdf(path: Path, n_pages: int = PAGE_COUNT) -> None:
 
 def _chunk(doc_id: str) -> Chunk:
     md = ChunkMetadata(
-        doc_id=doc_id, doc_title="Doc", section_title="", chapter_title="",
-        page_numbers=[1], layout_type=LayoutType.TEXT, context_string="",
+        doc_id=doc_id,
+        doc_title="Doc",
+        section_title="",
+        chapter_title="",
+        page_numbers=[1],
+        layout_type=LayoutType.TEXT,
+        context_string="",
     )
     return Chunk(
-        id=f"{doc_id}:L2:0", doc_id=doc_id, level=ChunkLevel.MICRO,
-        text="t", context_text="t", token_count=1, metadata=md,
+        id=f"{doc_id}:L2:0",
+        doc_id=doc_id,
+        level=ChunkLevel.MICRO,
+        text="t",
+        context_text="t",
+        token_count=1,
+        metadata=md,
     )
 
 
@@ -98,9 +108,7 @@ def test_get_page_positional_arg(tmp_path, db_path, monkeypatch) -> None:
     expected_name = f"{DOC_ID[:SHORT_DOC_ID_LEN]}_p2.png"
     saved = workdir / expected_name
     assert saved.exists()
-    assert saved.read_bytes() == _expected_png_bytes(
-        get_settings().pdf_dir / f"{DOC_ID}.pdf", 2
-    )
+    assert saved.read_bytes() == _expected_png_bytes(get_settings().pdf_dir / f"{DOC_ID}.pdf", 2)
     assert expected_name in result.output
 
 
@@ -114,9 +122,7 @@ def test_get_page_via_option_flag(tmp_path, db_path, monkeypatch) -> None:
 
     saved = workdir / f"{DOC_ID[:SHORT_DOC_ID_LEN]}_p3.png"
     assert saved.exists()
-    assert saved.read_bytes() == _expected_png_bytes(
-        get_settings().pdf_dir / f"{DOC_ID}.pdf", 3
-    )
+    assert saved.read_bytes() == _expected_png_bytes(get_settings().pdf_dir / f"{DOC_ID}.pdf", 3)
 
 
 def test_get_page_positional_and_option_disagree_are_distinct_renders(

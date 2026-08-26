@@ -95,9 +95,7 @@ def _clear_render_cache(cache_dir: Path) -> None:
     for path in stale:
         path.unlink(missing_ok=True)
     if stale:
-        console.print(
-            f"[dim]Page render cache:[/] --force discarded {len(stale)} cached files"
-        )
+        console.print(f"[dim]Page render cache:[/] --force discarded {len(stale)} cached files")
 
 
 @dataclass
@@ -213,18 +211,12 @@ def find_figure_regions(blocks: list[dict[str, Any]]) -> list[FigureRegion]:
     return figures
 
 
-def _collect_text_from_block(
-    block: dict[str, Any], id_map: dict[str, dict[str, Any]]
-) -> str:
+def _collect_text_from_block(block: dict[str, Any], id_map: dict[str, dict[str, Any]]) -> str:
     """Recursively collect text from a block and its children."""
     if "Text" in block:
         return block["Text"]
 
-    child_ids = [
-        rel["Ids"]
-        for rel in block.get("Relationships", [])
-        if rel["Type"] == "CHILD"
-    ]
+    child_ids = [rel["Ids"] for rel in block.get("Relationships", []) if rel["Type"] == "CHILD"]
     flat_ids = [cid for ids in child_ids for cid in ids]
     texts = []
     for cid in flat_ids:
@@ -242,10 +234,9 @@ def _find_caption(
 ) -> str:
     """Find a caption near the figure (text block immediately after on same page)."""
     fig_page = fig_block.get("Page", 1)
-    fig_bottom = (
-        fig_block.get("Geometry", {}).get("BoundingBox", {}).get("Top", 0)
-        + fig_block.get("Geometry", {}).get("BoundingBox", {}).get("Height", 0)
-    )
+    fig_bottom = fig_block.get("Geometry", {}).get("BoundingBox", {}).get("Top", 0) + fig_block.get(
+        "Geometry", {}
+    ).get("BoundingBox", {}).get("Height", 0)
 
     # Look at the next few layout blocks for caption-like text
     for j in range(fig_index + 1, min(fig_index + 4, len(layout_blocks))):
@@ -539,13 +530,9 @@ def _compute_adjacent_crop_caps(
                 # Gap exists but is smaller than padding — cap at the neighbour's edge.
                 # This is safe: we only prevent over-padding, never cut actual content.
                 caps.setdefault(a.block_id, {})
-                caps[a.block_id]["max_right"] = min(
-                    caps[a.block_id].get("max_right", 1.0), b_left
-                )
+                caps[a.block_id]["max_right"] = min(caps[a.block_id].get("max_right", 1.0), b_left)
                 caps.setdefault(b.block_id, {})
-                caps[b.block_id]["min_left"] = max(
-                    caps[b.block_id].get("min_left", 0.0), a_right
-                )
+                caps[b.block_id]["min_left"] = max(caps[b.block_id].get("min_left", 0.0), a_right)
                 console.print(
                     f"[yellow]Column cap:[/] page {a.page} "
                     f"{a.block_id}↔{b.block_id} gap={gap:.4f} < padding {padding_pct:.3f}; "
@@ -574,6 +561,7 @@ def extract_figures_from_regions(
     """
     if output_dir is None:
         from datasheet_rag.config import get_settings
+
         output_dir = get_settings().figures_dir / doc_id
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -598,13 +586,17 @@ def extract_figures_from_regions(
     render_cache_dir: Path | None = None
     try:
         from datasheet_rag.config import get_settings
+
         render_cache_dir = get_settings().rag_home / "page_render_cache" / doc_id
     except Exception:
         pass
 
     page_images = render_pdf_pages(
-        pdf_path, dpi=dpi, pages=needed_pages,
-        cache_dir=render_cache_dir, refresh_cache=force,
+        pdf_path,
+        dpi=dpi,
+        pages=needed_pages,
+        cache_dir=render_cache_dir,
+        refresh_cache=force,
     )
 
     crop_caps = _compute_adjacent_crop_caps(regions, padding_pct)
@@ -621,7 +613,9 @@ def extract_figures_from_regions(
 
         caps = crop_caps.get(region.block_id, {})
         cropped = crop_figure(
-            page_img, region, padding_pct=padding_pct,
+            page_img,
+            region,
+            padding_pct=padding_pct,
             max_right=caps.get("max_right", 1.0),
             min_left=caps.get("min_left", 0.0),
         )
@@ -630,12 +624,14 @@ def extract_figures_from_regions(
         image_path = output_dir / filename
         _save_image_atomic(cropped, image_path, image_format)
 
-        manifest.figures.append(ExtractedFigure(
-            region=region,
-            image_path=image_path,
-            width_px=cropped.width,
-            height_px=cropped.height,
-        ))
+        manifest.figures.append(
+            ExtractedFigure(
+                region=region,
+                image_path=image_path,
+                width_px=cropped.width,
+                height_px=cropped.height,
+            )
+        )
 
     console.print(f"[green]Extracted {len(manifest.figures)} regions[/] → {output_dir}")
     return manifest
@@ -655,9 +651,13 @@ def extract_figures(
     """Extract figures from a PDF using Textract layout blocks (Textract path)."""
     regions = find_figure_regions(blocks)
     return extract_figures_from_regions(
-        pdf_path, regions, doc_id,
-        output_dir=output_dir, dpi=dpi,
-        image_format=image_format, padding_pct=padding_pct,
+        pdf_path,
+        regions,
+        doc_id,
+        output_dir=output_dir,
+        dpi=dpi,
+        image_format=image_format,
+        padding_pct=padding_pct,
         force=force,
     )
 

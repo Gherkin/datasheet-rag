@@ -230,9 +230,7 @@ class BedrockEmbedder(_ChunkEmbeddingMixin):
         self.dimensions: int = (
             dimensions if dimensions is not None else settings.embedding_dimensions
         )
-        self.normalize: bool = (
-            normalize if normalize is not None else settings.embedding_normalize
-        )
+        self.normalize: bool = normalize if normalize is not None else settings.embedding_normalize
         self.max_concurrency: int = (
             max_concurrency if max_concurrency is not None else settings.embedding_batch_size
         )
@@ -254,9 +252,7 @@ class BedrockEmbedder(_ChunkEmbeddingMixin):
                 )
 
         if self.max_concurrency < 1:
-            raise ValueError(
-                f"max_concurrency must be >= 1, got {self.max_concurrency}."
-            )
+            raise ValueError(f"max_concurrency must be >= 1, got {self.max_concurrency}.")
 
         # --- Client ------------------------------------------------------
         if client is not None:
@@ -367,9 +363,7 @@ class BedrockEmbedder(_ChunkEmbeddingMixin):
             payload = json.loads(raw)
             vector = payload["embedding"]
             if not isinstance(vector, list):
-                raise TypeError(
-                    f"Bedrock returned non-list embedding: {type(vector).__name__}"
-                )
+                raise TypeError(f"Bedrock returned non-list embedding: {type(vector).__name__}")
             # Token count is informational; older models may omit it.
             tokens_in = payload.get("inputTextTokenCount", 0)
         except Exception:
@@ -416,17 +410,13 @@ class OllamaEmbedder(_ChunkEmbeddingMixin):
     ) -> None:
         settings = get_settings()
         self.model = model or settings.local_embedding_model
-        self.dimensions = (
-            dimensions if dimensions is not None else settings.embedding_dimensions
-        )
+        self.dimensions = dimensions if dimensions is not None else settings.embedding_dimensions
         self.host = (host or settings.ollama_host).rstrip("/")
         self.max_concurrency = (
             max_concurrency if max_concurrency is not None else settings.embedding_batch_size
         )
         if self.max_concurrency < 1:
-            raise ValueError(
-                f"max_concurrency must be >= 1, got {self.max_concurrency}."
-            )
+            raise ValueError(f"max_concurrency must be >= 1, got {self.max_concurrency}.")
         self.verbose = verbose
 
         self.total_tokens_in: int = 0  # Ollama embeddings don't report tokens.
@@ -472,6 +462,7 @@ class OllamaEmbedder(_ChunkEmbeddingMixin):
                 "The local embedding backend needs the 'httpx' package "
                 "(part of the base install). Reinstall:  pip install datasheet-rag"
             ) from exc
+
         def _post() -> list[float] | None:
             # Use the newer /api/embed endpoint with truncate=True so inputs
             # longer than the model's context window are truncated rather than
@@ -500,9 +491,7 @@ class OllamaEmbedder(_ChunkEmbeddingMixin):
                         "Ollama, or serve bge-m3 in-process (transformers)."
                     )
                 if resp.status_code >= 500:
-                    raise _TransientOllamaError(
-                        f"Ollama HTTP {resp.status_code}: {detail!r}"
-                    )
+                    raise _TransientOllamaError(f"Ollama HTTP {resp.status_code}: {detail!r}")
                 resp.raise_for_status()
             # /api/embed returns {"embeddings": [[...]]} (one row per input).
             rows = resp.json().get("embeddings") or []
@@ -577,9 +566,7 @@ class SentenceTransformerEmbedder(_ChunkEmbeddingMixin):
     ) -> None:
         settings = get_settings()
         self.model_name = model or settings.local_embedding_model
-        self.dimensions = (
-            dimensions if dimensions is not None else settings.embedding_dimensions
-        )
+        self.dimensions = dimensions if dimensions is not None else settings.embedding_dimensions
         self.normalize = normalize if normalize is not None else settings.embedding_normalize
         self.device = device
         # batch_size for the GPU forward pass (reuses the embedding batch knob).

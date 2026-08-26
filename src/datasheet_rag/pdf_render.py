@@ -57,9 +57,9 @@ def load_pdf_bytes(doc_id: str) -> bytes:
             )
             for obj in resp.get("Contents", []):
                 if obj["Key"].lower().endswith(".pdf"):
-                    body = client.get_object(
-                        Bucket=settings.s3_bucket, Key=obj["Key"]
-                    )["Body"].read()
+                    body = client.get_object(Bucket=settings.s3_bucket, Key=obj["Key"])[
+                        "Body"
+                    ].read()
                     with _pdf_cache_lock:
                         _pdf_cache[doc_id] = body
                     return body

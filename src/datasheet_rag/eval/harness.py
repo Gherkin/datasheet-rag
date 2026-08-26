@@ -80,13 +80,9 @@ class RunConfig(BaseModel):
         if self.level:
             parts.append(f"level={self.level}")
         if self.mode == "hybrid" and (
-            self.vector_weight != 1.0
-            or self.keyword_weight != 1.0
-            or self.rrf_k != 60
+            self.vector_weight != 1.0 or self.keyword_weight != 1.0 or self.rrf_k != 60
         ):
-            parts.append(
-                f"rrf_k={self.rrf_k},vw={self.vector_weight},kw={self.keyword_weight}"
-            )
+            parts.append(f"rrf_k={self.rrf_k},vw={self.vector_weight},kw={self.keyword_weight}")
         return " ".join(parts)
 
 
@@ -129,9 +125,7 @@ def _search(
     )
 
 
-def _load_doc_graph(
-    conn: sqlite3.Connection, doc_id: str
-) -> dict[str, GraphNode]:
+def _load_doc_graph(conn: sqlite3.Connection, doc_id: str) -> dict[str, GraphNode]:
     """Load the lineage links for one document's chunks from the store."""
     rows = conn.execute(
         "SELECT id, parent_id, prev_id, next_id FROM chunks WHERE doc_id = ?",
@@ -178,9 +172,7 @@ def run_eval(
     try:
         for item, relevant_ids in zip(eval_set.items, relevant_by_item):
             t0 = time.perf_counter()
-            results = _search(
-                conn, config, item.question, embedder=embedder, fetch_n=fetch_n
-            )
+            results = _search(conn, config, item.question, embedder=embedder, fetch_n=fetch_n)
             latency_ms = (time.perf_counter() - t0) * 1000.0
 
             outcome = QueryOutcome.score(

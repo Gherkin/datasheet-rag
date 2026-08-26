@@ -320,7 +320,9 @@ def hybrid_search(
     over_fetch = max(k * 4, 40)
 
     vec_results = vector_search(conn, query_embedding, k=over_fetch, filters=filters)
-    kw_results = keyword_search(conn, query_text, k=over_fetch, filters=filters, coverage_exponent=coverage_exponent)
+    kw_results = keyword_search(
+        conn, query_text, k=over_fetch, filters=filters, coverage_exponent=coverage_exponent
+    )
 
     ranks: dict[str, dict[str, int | None]] = {}
     for i, r in enumerate(vec_results, start=1):

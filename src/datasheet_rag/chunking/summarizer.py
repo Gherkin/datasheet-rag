@@ -41,13 +41,13 @@ console = Console()
 # ---------------------------------------------------------------------------
 
 CONTENT_WEIGHTS: dict[LayoutType, float] = {
-    LayoutType.TABLE: 1.5,       # Tables with specs are high-value
-    LayoutType.KEY_VALUE: 1.4,   # Key-value pairs (specs, params)
-    LayoutType.FIGURE: 0.8,      # Figures contribute via captions
-    LayoutType.LIST: 1.0,        # Lists (feature lists, etc.)
-    LayoutType.TEXT: 1.0,        # Regular text
-    LayoutType.HEADER: 0.3,      # Headers are structural, less content
-    LayoutType.MIXED: 1.0,       # Mixed content
+    LayoutType.TABLE: 1.5,  # Tables with specs are high-value
+    LayoutType.KEY_VALUE: 1.4,  # Key-value pairs (specs, params)
+    LayoutType.FIGURE: 0.8,  # Figures contribute via captions
+    LayoutType.LIST: 1.0,  # Lists (feature lists, etc.)
+    LayoutType.TEXT: 1.0,  # Regular text
+    LayoutType.HEADER: 0.3,  # Headers are structural, less content
+    LayoutType.MIXED: 1.0,  # Mixed content
 }
 
 
@@ -102,20 +102,15 @@ class ExtractiveSummarizer:
                     micro_digests.append((digest, weight))
 
                 # Pass 2: Combine MICRO digests into MESO summary
-                meso_summary = _weighted_combine(
-                    micro_digests, self.meso_summary_max_chars
-                )
+                meso_summary = _weighted_combine(micro_digests, self.meso_summary_max_chars)
                 # MESO weight is the average of its micro weights
                 avg_weight = (
-                    sum(w for _, w in micro_digests) / len(micro_digests)
-                    if micro_digests else 1.0
+                    sum(w for _, w in micro_digests) / len(micro_digests) if micro_digests else 1.0
                 )
                 meso_summaries.append((meso_summary, avg_weight))
 
             # Pass 3: Combine MESO summaries into MACRO summary
-            macro_text = _weighted_combine(
-                meso_summaries, self.macro_summary_max_chars
-            )
+            macro_text = _weighted_combine(meso_summaries, self.macro_summary_max_chars)
 
             macro.text = macro_text
             macro.token_count = len(macro_text) // 4
@@ -198,8 +193,7 @@ def _weighted_combine(
         total_weight = len(items)
 
     allocations = [
-        max(_MIN_ITEM_CHARS, int((weight / total_weight) * max_chars))
-        for _, weight in items
+        max(_MIN_ITEM_CHARS, int((weight / total_weight) * max_chars)) for _, weight in items
     ]
 
     # Scale down if total exceeds budget — no floor here, since a floor
@@ -289,6 +283,7 @@ class AbstractiveSummarizer:
     def _get_client(self) -> Any:
         if self._client is None:
             from datasheet_rag.local_models import get_chat_client
+
             self._client = get_chat_client(kind="text", region=self.region)
         return self._client
 
@@ -301,26 +296,28 @@ class AbstractiveSummarizer:
         """
         client = self._get_client()
 
-        body = json.dumps({
-            "anthropic_version": "bedrock-2023-05-31",
-            "max_tokens": max_tokens,
-            "system": (
-                "You are a technical indexer for electronics datasheets. "
-                "Your job is to describe what a chapter or section CONTAINS — "
-                "the actual data, tables, and specifications present in the source text — "
-                "not to explain the subject matter in general terms. "
-                "A chapter with one feature table should be described in terms of what "
-                "that table shows: which devices, which parameters, which value ranges. "
-                "A short chapter has a short accurate summary. Never pad with general "
-                "background knowledge. "
-                "STRICT RULE: Only use facts, values, part numbers, and specifications "
-                "that are explicitly stated in the provided source text. "
-                "If a value is not in the source, do not include it. "
-                "Never infer, extrapolate, or recall facts from your training data."
-            ),
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.0,
-        })
+        body = json.dumps(
+            {
+                "anthropic_version": "bedrock-2023-05-31",
+                "max_tokens": max_tokens,
+                "system": (
+                    "You are a technical indexer for electronics datasheets. "
+                    "Your job is to describe what a chapter or section CONTAINS — "
+                    "the actual data, tables, and specifications present in the source text — "
+                    "not to explain the subject matter in general terms. "
+                    "A chapter with one feature table should be described in terms of what "
+                    "that table shows: which devices, which parameters, which value ranges. "
+                    "A short chapter has a short accurate summary. Never pad with general "
+                    "background knowledge. "
+                    "STRICT RULE: Only use facts, values, part numbers, and specifications "
+                    "that are explicitly stated in the provided source text. "
+                    "If a value is not in the source, do not include it. "
+                    "Never infer, extrapolate, or recall facts from your training data."
+                ),
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.0,
+            }
+        )
 
         t0 = time.perf_counter()
         response = client.invoke_model(
@@ -389,8 +386,7 @@ class AbstractiveSummarizer:
                 )
                 meso_summary = self._invoke(prompt, self.meso_summary_max_tokens)
                 avg_weight = (
-                    sum(w for _, w in micro_digests) / len(micro_digests)
-                    if micro_digests else 1.0
+                    sum(w for _, w in micro_digests) / len(micro_digests) if micro_digests else 1.0
                 )
                 meso_summaries.append((meso_summary, avg_weight))
 
@@ -438,7 +434,7 @@ class AbstractiveSummarizer:
 
         digests: list[tuple[str, float]] = []
         for i in range(0, len(items), _MAX_REDUCE_FANIN):
-            batch = items[i:i + _MAX_REDUCE_FANIN]
+            batch = items[i : i + _MAX_REDUCE_FANIN]
             prompt = _group_digest_prompt(batch, chapter_title, doc_title)
             digest = self._invoke(prompt, self.meso_summary_max_tokens)
             avg_weight = sum(w for _, w in batch) / len(batch)
@@ -486,7 +482,9 @@ def _micro_digest_prompt(
 ) -> str:
     type_hint = ""
     if layout_type == LayoutType.TABLE:
-        type_hint = "This is a specification table. Describe what parameters and value ranges it contains."
+        type_hint = (
+            "This is a specification table. Describe what parameters and value ranges it contains."
+        )
     elif layout_type == LayoutType.FIGURE:
         type_hint = "This is a figure or diagram. Describe what it shows."
     elif layout_type == LayoutType.KEY_VALUE:
@@ -516,9 +514,7 @@ def _meso_summary_prompt(
     chapter_title: str | None = None,
     doc_title: str | None = None,
 ) -> str:
-    digests_text = "\n".join(
-        f"- [weight={w:.1f}] {text}" for text, w in micro_digests
-    )
+    digests_text = "\n".join(f"- [weight={w:.1f}] {text}" for text, w in micro_digests)
     context = ""
     if doc_title:
         context += f"Document: {doc_title}\n"
@@ -543,9 +539,7 @@ def _macro_summary_prompt(
     chapter_title: str,
     doc_title: str,
 ) -> str:
-    summaries_text = "\n".join(
-        f"- [weight={w:.1f}] {text}" for text, w in meso_summaries
-    )
+    summaries_text = "\n".join(f"- [weight={w:.1f}] {text}" for text, w in meso_summaries)
     return (
         f"Document: {doc_title}\n"
         f"Chapter: {chapter_title}\n\n"
