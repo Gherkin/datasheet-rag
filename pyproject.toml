@@ -95,6 +95,26 @@ select = ["E", "F", "I", "N", "W", "UP"]
 python_version = "3.11"
 strict = true
 
+# Third-party modules that reach us untyped. Two separate reasons, one setting:
+#
+#   * fitz (PyMuPDF), sqlite_vec — installed, but ship no py.typed marker and
+#     have no stubs on typeshed.
+#   * sentence_transformers, transformers, torch — behind the `local-hf` extra,
+#     which CI does not install (multi-GB torch wheels for a type check). Every
+#     import of them in src/ is already lazy and guarded.
+#
+# Everything else the project depends on is typed, including docling and boto3
+# (via boto3-stubs in the `dev` extra), and is checked normally.
+[[tool.mypy.overrides]]
+module = [
+    "fitz.*",
+    "sentence_transformers.*",
+    "sqlite_vec.*",
+    "torch.*",
+    "transformers.*",
+]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 # Scope collection to tests/ — a bare `pytest` otherwise walks the repo root
 # and chokes on root-owned dirs like certs/.
