@@ -36,17 +36,52 @@ prompt_secret() {
 echo "datasheet-rag MCP setup"
 echo "================="
 echo "Choose a mode:"
-echo "  1) Remote — talk to a shared datasheet-rag server over HTTP"
-echo "  2) Local  — open a SQLite database on this machine directly"
+echo "  1) Server  — connect straight to a datasheet-rag server's /mcp endpoint"
+echo "  2) Local   — open a SQLite database on this machine directly"
+echo "  3) Bridge  — run a local stdio server that forwards to a remote server"
+echo "               (only for clients that cannot speak HTTP MCP)"
 read -r -p "Mode [1]: " mode
 mode="${mode:-1}"
 
 env_args=()
 
+# Mode 1 needs no local process at all: the server hosts the MCP endpoint, so
+# Claude Code just holds a URL and a token. Registered and done, well before
+# the stdio plumbing the other two modes share below.
 if [ "$mode" = "1" ]; then
     prompt SERVER_URL "Server URL (e.g. https://rag.internal:8080)"
     if [ -z "$SERVER_URL" ]; then
-        echo "error: Server URL is required for remote mode" >&2
+        echo "error: Server URL is required" >&2
+        exit 1
+    fi
+    prompt DEFAULT_PROJECT_ID "Default Project ID (optional, leave blank to search globally)"
+
+    # The project id is a path segment on the endpoint — the remote stand-in
+    # for the .rag.toml a local server would find in your checkout.
+    url="${SERVER_URL%/}/mcp"
+    if [ -n "$DEFAULT_PROJECT_ID" ]; then
+        url="$url/$DEFAULT_PROJECT_ID"
+    fi
+
+    header_args=()
+    prompt_secret SERVER_TOKEN "Access Token (leave blank if the server is open)"
+    if [ -n "$SERVER_TOKEN" ]; then
+        header_args+=(--header "Authorization: Bearer $SERVER_TOKEN")
+    fi
+
+    claude mcp remove datasheet-rag -s user >/dev/null 2>&1 || true
+    claude mcp add --transport http datasheet-rag -s user "${header_args[@]}" "$url"
+
+    echo
+    echo "Registered 'datasheet-rag' at $url (user scope)."
+    echo "Restart Claude Code (or run /mcp) to connect."
+    exit 0
+fi
+
+if [ "$mode" = "3" ]; then
+    prompt SERVER_URL "Server URL (e.g. https://rag.internal:8080)"
+    if [ -z "$SERVER_URL" ]; then
+        echo "error: Server URL is required for bridge mode" >&2
         exit 1
     fi
     env_args+=(-e "RAG_SERVER_URL=$SERVER_URL")

@@ -172,7 +172,67 @@ RAG_DOMAIN=rag.example.com RAG_DATA_DIR=$HOME/.rag/rag-data \
 The overlay stops publishing port 8080 to the host, so only Caddy's :443 is
 reachable, and clients use `https://rag.example.com`.
 
-TODO: explain integration into harnesses, MCP or the straight runnable
+### Connecting an agent (MCP)
+
+The tools an agent uses — `search`, `navigate`, `show_figure`, `show_page` and
+the rest — are exposed over MCP. There are two ways to reach them.
+
+**Against a server: point the client at `/mcp`.** The server hosts the MCP
+endpoint itself, so there is nothing to install on the client machine and no
+local process to keep alive. Add this to your project's `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "datasheet-rag": {
+      "type": "http",
+      "url": "http://rag.internal:8080/mcp/pcb-rev-a",
+      "headers": { "Authorization": "Bearer <read-token>" }
+    }
+  }
+}
+```
+
+The last path segment is the project id the tools scope themselves to — the
+remote equivalent of the `.rag.toml` a local server would find in your
+checkout. Drop it (`/mcp`) to search the whole store, or pass an
+`X-RAG-Project` header instead if your client pins the URL. Individual tool
+calls can still override it with a `project_id` argument.
+
+The endpoint takes the same credentials as the REST API: a read token or any
+API key with the `read` scope (`ingest` and `admin` imply it). While the server
+is in open mode, `/mcp` is open too. Set `RAG_SERVER_MCP_ENABLED=false` to
+serve the REST API only.
+
+`show_pdf` is absent here. It works by serving the PDF from a loopback port on
+the machine the MCP server runs on, which is the *server* in this setup — so
+the URL would be useless to you. `show_page` renders a page inline instead and
+works either way; see [#45](https://github.com/Gherkin/datasheet-rag/issues/45)
+for serving PDFs from the server properly.
+
+<details>
+<summary>DNS-rebinding protection</summary>
+
+The MCP SDK can reject requests whose `Host` header it does not recognise,
+which guards a *desktop-local* MCP server against a web page in the user's
+browser reaching it. This server is normally reached by several names and
+through a proxy, and is guarded by a bearer token, so the check is off unless
+you enumerate the hosts you serve:
+
+```bash
+-e RAG_MCP_ALLOWED_HOSTS="rag.internal:8080,rag.example.com"
+```
+
+Entries are exact or port-wildcarded (`rag.internal:*`). There is no `*`
+catch-all — an allowlist you set is an allowlist that is enforced.
+</details>
+
+**Without a server: run `rag-mcp` over stdio.** This is the right shape when
+the store is a sqlite file on your own disk. The client launches the process
+and scopes it via the environment (or a `.rag.toml` in the checkout it starts
+in). See `.mcp.json.example` for both variants, and `scripts/install-mcp.sh`
+to wire it into Claude Code.
+
 
 ### Shell completion
 

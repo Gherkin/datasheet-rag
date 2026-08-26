@@ -25,7 +25,7 @@ app = build_app()
 
 
 def _startup_posture() -> str:
-    """One-line description of the server's auth + CORS posture, for the log."""
+    """One-line description of the server's auth, CORS and MCP posture."""
     from datasheet_rag.config import get_settings
     from datasheet_rag.server.deps import get_backend
     from datasheet_rag.store import count_api_keys
@@ -42,7 +42,13 @@ def _startup_posture() -> str:
         mode = ", ".join(parts)
     cors = s.cors_origins_list()
     cors_desc = f"CORS allowlist={cors}" if cors else "CORS locked (no origins)"
-    return f"auth: {mode}; {cors_desc}"
+    if not s.server_mcp_enabled:
+        mcp_desc = "MCP off"
+    else:
+        hosts = s.mcp_allowed_hosts_list()
+        mcp_desc = "MCP at /mcp/<project_id>"
+        mcp_desc += f" (Host allowlist={hosts})" if hosts else " (no Host allowlist)"
+    return f"auth: {mode}; {cors_desc}; {mcp_desc}"
 
 
 def _run_server() -> None:
