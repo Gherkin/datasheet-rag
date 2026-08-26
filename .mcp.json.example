@@ -1,8 +1,19 @@
 {
-  "//": "Copy this to your electronics project's repo as `.mcp.json` so Claude Code launches an datasheet-rag MCP server scoped to that project. Pick ONE of the two server blocks below (local or remote) and delete the other.",
+  "//": "Copy this to your electronics project's repo as `.mcp.json` so Claude Code gets a datasheet-rag MCP server scoped to that project. Pick ONE of the three server blocks below, rename it to `mcpServers`, and delete the others.",
 
-  "//local": "LOCAL mode — opens the SQLite db on this machine directly. Adjust RAG_DEFAULT_PROJECT_ID and RAG_SQLITE_DB_PATH per project.",
+  "//http": "HTTP — talk straight to a datasheet-rag server's MCP endpoint. Nothing to install locally: the server owns the db, embedder, figures and PDFs, and hosts the tools itself. The last path segment is the project id the tools scope to (drop it to search the whole store, or send an `X-RAG-Project` header instead). Omit `headers` if the server is open. This is the block to use when a server exists.",
   "mcpServers": {
+    "datasheet-rag": {
+      "type": "http",
+      "url": "https://rag.internal:8080/mcp/pcb-rev-a",
+      "headers": {
+        "Authorization": "Bearer your-read-or-ingest-token"
+      }
+    }
+  },
+
+  "//local": "LOCAL — no server at all: open the SQLite db on this machine directly, over stdio. Adjust RAG_DEFAULT_PROJECT_ID and RAG_SQLITE_DB_PATH per project.",
+  "mcpServers_local_example": {
     "datasheet-rag": {
       "command": "rag-mcp",
       "args": [],
@@ -16,8 +27,8 @@
     }
   },
 
-  "//remote": "REMOTE mode — talk to a shared datasheet-rag server over HTTP. The server owns the db, embedder, figures, and PDFs, so no local SQLite/S3/AWS config is needed. Set RAG_SERVER_TOKEN only if the server requires auth. To use this, rename this block to `mcpServers` and remove the local one above.",
-  "mcpServers_remote_example": {
+  "//bridge": "BRIDGE — a local stdio server that forwards every call to a remote one. Only worth it for a client that cannot speak HTTP MCP; otherwise prefer the `http` block above, which skips this process entirely.",
+  "mcpServers_bridge_example": {
     "datasheet-rag": {
       "command": "rag-mcp",
       "args": [],

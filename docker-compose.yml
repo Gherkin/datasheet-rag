@@ -69,6 +69,18 @@ services:
       RAG_SERVER_READ_TOKEN: ${RAG_SERVER_READ_TOKEN:-}
       # Lock CORS to known browser origins (empty = no cross-origin access).
       RAG_SERVER_CORS_ORIGINS: ${RAG_SERVER_CORS_ORIGINS:-}
+      #
+      # --- MCP over HTTP -------------------------------------------------
+      # The MCP tools are served at /mcp/<project_id>, so an agent needs only
+      # that URL and a read token — no local rag-mcp process. Set false to
+      # serve the plain REST API only.
+      RAG_SERVER_MCP_ENABLED: ${RAG_SERVER_MCP_ENABLED:-true}
+      # Optional Host allowlist for /mcp (DNS-rebinding protection). Entries
+      # are exact or port-wildcarded ("rag.internal:*"); there is no "*"
+      # catch-all, so an allowlist you set is one you must keep complete.
+      # Empty = check disabled, which is the default for a server reached by
+      # several names or through the Caddy proxy.
+      RAG_MCP_ALLOWED_HOSTS: ${RAG_MCP_ALLOWED_HOSTS:-}
     volumes:
       # Database, PDFs, figures and the HF model cache (HF_HOME=/data/hf-cache).
       - ${RAG_DATA_DIR:-~/.rag/rag-data}:/data
