@@ -714,6 +714,15 @@ def stats_cmd(
     table.add_row("TOTAL", str(result.total_chunks), style="bold")
     console.print(table)
 
+    # Store-wide, so it is reported however the counts above were scoped.
+    if result.fts_missing:
+        console.print(
+            f"  [yellow]{result.fts_missing} chunk(s) are missing from the "
+            f"keyword index[/] — `--mode keyword` cannot see them and "
+            f"`--mode hybrid` is running on its vector half alone. Run "
+            f"[cyan]rag repair fts[/] to rebuild it."
+        )
+
 
 # ---------------------------------------------------------------------------
 # Get (doc / page / chunk / fig — fetch something and save/show it)
@@ -2054,6 +2063,75 @@ def relink_figures_cmd(doc_id: str | None, do_apply: bool, db_path: Path | None)
             )
     else:
         console.print("[yellow]Dry run — pass --apply to write the links.[/]")
+
+
+@repair_group.command("fts", short_help="Rebuild the keyword (BM25) search index.")
+@click.option("--check", is_flag=True,
+              help="Report coverage and exit without writing.")
+@_db_option
+def repair_fts_cmd(check: bool, db_path: Path | None) -> None:
+    """Rebuild `chunk_fts`, the FTS5 index behind keyword and hybrid search.
+
+    The index is kept in step with `chunks` by triggers, so it is normally
+    correct. When it is not — a store restored from a partial backup, or one
+    whose chunks were written before the index existed — the failure is
+    silent: `rag search --mode keyword` returns nothing and `--mode hybrid`
+    quietly degrades to vector-only, losing the half that matches exact part
+    numbers, register names and signal names (GH #23).
+
+    Rebuilding re-derives the whole index from `chunks`. It reads no PDFs,
+    calls no LLM, costs nothing, and is safe to run at any time.
+
+    Runs against a local store only — it rewrites an index in the database
+    file. On a server deployment, run it there (or against the mounted
+    database file with --db).
+
+    \b
+        rag repair fts --check      # report coverage, write nothing
+        rag repair fts              # rebuild
+    """
+    from datasheet_rag.store import connect, fts_status, rebuild_fts
+
+    path = _require_local_db(db_path)
+    conn = connect(path)
+    before = fts_status(conn)
+
+    if before.indexed is None:
+        console.print(
+            "[yellow]Cannot measure the keyword index[/] on this store — it "
+            "was built with a table shape this command does not recognise."
+        )
+        if check:
+            return
+
+    if check:
+        if before.healthy:
+            console.print(
+                f"[green]Keyword index is in sync[/] — "
+                f"{before.indexed} of {before.chunks} chunks indexed."
+            )
+        else:
+            console.print(
+                f"[yellow]Keyword index is out of sync[/] — "
+                f"{before.indexed} of {before.chunks} chunks indexed "
+                f"({before.missing} missing). Run [cyan]rag repair fts[/] "
+                f"to rebuild."
+            )
+        return
+
+    console.print(f"Rebuilding the keyword index over {before.chunks} chunk(s)…")
+    after = rebuild_fts(conn)
+    if after.indexed is None:
+        console.print("[green]Rebuilt[/] the keyword index (coverage unmeasurable).")
+        return
+    console.print(f"[green]Indexed[/] {after.indexed} of {after.chunks} chunks.")
+    if before.healthy:
+        console.print("  [dim]It was already in sync — nothing was broken.[/]")
+    else:
+        console.print(
+            f"  [dim]{before.missing} chunk(s) were missing before the "
+            f"rebuild — keyword and hybrid search can see them now.[/]"
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+from typing import NamedTuple
 
 import sqlite_vec
 from rich.console import Console
@@ -99,6 +100,10 @@ def connect(
     # chunk schema version and embedding dim, so ensure them on every open
     # — IF NOT EXISTS makes this idempotent and brings older DBs forward.
     _ensure_control_tables(conn)
+    # Same reasoning: the FTS index is ensured on every open, not only on a
+    # fresh DB, so a store that predates it gets one instead of an error.
+    _ensure_fts(conn)
+    _warn_if_fts_stale(conn)
 
     return conn
 
@@ -208,6 +213,184 @@ def _ensure_control_tables(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+# ---------------------------------------------------------------------------
+# chunk_fts: the keyword half of hybrid search
+# ---------------------------------------------------------------------------
+
+
+def _ensure_fts(conn: sqlite3.Connection) -> None:
+    """Create ``chunk_fts`` and its sync triggers if they are absent.
+
+    Ensured on every open (like :func:`_ensure_control_tables`) rather than
+    only on a fresh DB: a store written before the FTS feature landed has no
+    ``chunk_fts`` at all, and ``init_schema`` never runs again on an existing
+    DB, so keyword search would raise "no such table" forever.
+
+    Creating the table on a store that already holds chunks leaves it *empty*
+    — ``CREATE … IF NOT EXISTS`` indexes nothing retroactively, and the
+    triggers only fire on rows written from here on. That is precisely the
+    silent-degradation state of GH #23, so we backfill immediately.
+    """
+    cur = conn.cursor()
+    fresh = (
+        cur.execute(
+            "SELECT name FROM sqlite_master WHERE name = 'chunk_fts'"
+        ).fetchone()
+        is None
+    )
+
+    # External-content FTS5 over chunks. The ``porter`` stemmer plus
+    # ``unicode61 remove_diacritics 2`` tokenizer keeps technical tokens
+    # (e.g. "3.3V", "I2C") reasonably intact while still folding case
+    # and accents.
+    cur.execute(
+        """
+        CREATE VIRTUAL TABLE IF NOT EXISTS chunk_fts USING fts5(
+            context_text,
+            text,
+            content='chunks',
+            content_rowid='rowid',
+            tokenize = 'porter unicode61 remove_diacritics 2'
+        )
+        """
+    )
+
+    # Triggers keep the FTS index in sync with ``chunks``. For external
+    # content tables we issue ``INSERT INTO chunk_fts(chunk_fts, rowid, …)
+    # VALUES('delete', …)`` to remove the old row before re-indexing.
+    cur.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
+            INSERT INTO chunk_fts(rowid, context_text, text)
+            VALUES (new.rowid, new.context_text, new.text);
+        END
+        """
+    )
+    cur.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
+            INSERT INTO chunk_fts(chunk_fts, rowid, context_text, text)
+            VALUES ('delete', old.rowid, old.context_text, old.text);
+            DELETE FROM chunk_vecs WHERE chunk_id = old.id;
+        END
+        """
+    )
+    cur.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE ON chunks BEGIN
+            INSERT INTO chunk_fts(chunk_fts, rowid, context_text, text)
+            VALUES ('delete', old.rowid, old.context_text, old.text);
+            INSERT INTO chunk_fts(rowid, context_text, text)
+            VALUES (new.rowid, new.context_text, new.text);
+        END
+        """
+    )
+
+    if fresh and _count(conn, "chunks"):
+        cur.execute("INSERT INTO chunk_fts(chunk_fts) VALUES('rebuild')")
+        console.print(
+            "[yellow]Built the keyword (FTS5) index for a store that predates "
+            "it[/] — hybrid search now has its BM25 half back."
+        )
+    conn.commit()
+
+
+def _count(conn: sqlite3.Connection, table: str) -> int:
+    """Row count for a known-safe table name (never user input)."""
+    return int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+
+
+class FtsStatus(NamedTuple):
+    """How much of ``chunks`` the ``chunk_fts`` index actually covers.
+
+    ``indexed`` is ``None`` when coverage cannot be determined (see
+    :func:`fts_status`) — that is "unknown", not "broken".
+    """
+
+    chunks: int
+    indexed: int | None
+
+    @property
+    def healthy(self) -> bool:
+        return self.indexed is None or self.indexed == self.chunks
+
+    @property
+    def missing(self) -> int:
+        """Chunks absent from the index (0 when healthy or unknown)."""
+        if self.indexed is None:
+            return 0
+        return max(self.chunks - self.indexed, 0)
+
+
+def fts_status(conn: sqlite3.Connection) -> FtsStatus:
+    """Compare the number of indexed rows against the number of chunks.
+
+    The obvious check — ``SELECT count(*) FROM chunk_fts`` — cannot see this
+    failure: on an external-content FTS5 table an unconstrained scan is
+    answered from the *content* table, so it returns the number of chunks
+    even when the index holds nothing. ``INSERT INTO chunk_fts(chunk_fts)
+    VALUES('integrity-check')`` is no help either; it verifies that the index
+    is self-consistent, not that it covers every content row, and passes
+    happily on a half-empty index.
+
+    What does tell the truth is the ``chunk_fts_docsize`` shadow table: one
+    row per indexed document. It is absent only for ``columnsize=0`` tables,
+    which we never create — if it is missing anyway we report ``None`` rather
+    than guess, so an unrecognised store shape stays quiet instead of
+    crying wolf.
+    """
+    chunks = _count(conn, "chunks")
+    has_docsize = (
+        conn.execute(
+            "SELECT name FROM sqlite_master WHERE name = 'chunk_fts_docsize'"
+        ).fetchone()
+        is not None
+    )
+    indexed = _count(conn, "chunk_fts_docsize") if has_docsize else None
+    return FtsStatus(chunks=chunks, indexed=indexed)
+
+
+def rebuild_fts(conn: sqlite3.Connection) -> FtsStatus:
+    """Repopulate ``chunk_fts`` from ``chunks`` and return the status after.
+
+    FTS5's own ``'rebuild'`` command discards the index and re-derives it
+    from the content table, so this repairs any degree of desync — empty,
+    partial, or stale — without touching ``chunks`` or re-running ingest.
+    """
+    _ensure_fts(conn)
+    conn.execute("INSERT INTO chunk_fts(chunk_fts) VALUES('rebuild')")
+    conn.commit()
+    return fts_status(conn)
+
+
+def _warn_if_fts_stale(conn: sqlite3.Connection) -> None:
+    """Say so, loudly, when the keyword index does not cover the chunks.
+
+    A desynced index makes ``keyword_search`` return ``[]`` for every query
+    and ``hybrid_search`` silently collapse to vector-only — same results,
+    same shape, no error, just without the BM25 half that catches exact part
+    numbers and register names (GH #23). Nothing downstream can tell; the
+    only place that can is here, where the store is opened.
+    """
+    try:
+        status = fts_status(conn)
+    except sqlite3.Error:
+        return  # Never let a health check stop the store from opening.
+    if status.healthy or not status.chunks:
+        return
+    lost = (
+        "Keyword search finds nothing"
+        if not status.indexed
+        else "Keyword search is missing hits"
+    )
+    console.print(
+        f"[yellow]Keyword index out of sync[/]: chunk_fts covers "
+        f"{status.indexed} of {status.chunks} chunks. {lost} and hybrid "
+        f"search has silently lost its BM25 half. Run "
+        f"[cyan]rag repair fts[/] to rebuild it."
+    )
+
+
 def init_schema(conn: sqlite3.Connection, *, embedding_dim: int) -> None:
     """Create all tables, indexes and triggers if they do not already exist.
 
@@ -267,52 +450,7 @@ def init_schema(conn: sqlite3.Connection, *, embedding_dim: int) -> None:
     )
 
     # ---- chunk_fts -------------------------------------------------------
-    # External-content FTS5 over chunks. The ``porter`` stemmer plus
-    # ``unicode61 remove_diacritics 2`` tokenizer keeps technical tokens
-    # (e.g. "3.3V", "I2C") reasonably intact while still folding case
-    # and accents.
-    cur.execute(
-        """
-        CREATE VIRTUAL TABLE IF NOT EXISTS chunk_fts USING fts5(
-            context_text,
-            text,
-            content='chunks',
-            content_rowid='rowid',
-            tokenize = 'porter unicode61 remove_diacritics 2'
-        )
-        """
-    )
-
-    # Triggers keep the FTS index in sync with ``chunks``. For external
-    # content tables we issue ``INSERT INTO chunk_fts(chunk_fts, rowid, …)
-    # VALUES('delete', …)`` to remove the old row before re-indexing.
-    cur.execute(
-        """
-        CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
-            INSERT INTO chunk_fts(rowid, context_text, text)
-            VALUES (new.rowid, new.context_text, new.text);
-        END
-        """
-    )
-    cur.execute(
-        """
-        CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
-            INSERT INTO chunk_fts(chunk_fts, rowid, context_text, text)
-            VALUES ('delete', old.rowid, old.context_text, old.text);
-            DELETE FROM chunk_vecs WHERE chunk_id = old.id;
-        END
-        """
-    )
-    cur.execute(
-        """
-        CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE ON chunks BEGIN
-            INSERT INTO chunk_fts(chunk_fts, rowid, context_text, text)
-            VALUES ('delete', old.rowid, old.context_text, old.text);
-            INSERT INTO chunk_fts(rowid, context_text, text)
-            VALUES (new.rowid, new.context_text, new.text);
-        END
-        """
-    )
+    _ensure_fts(conn)
 
     # ---- doc_metadata ----------------------------------------------------
     # Sidecar: not a FK to chunks so metadata can be registered before

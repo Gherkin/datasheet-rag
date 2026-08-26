@@ -42,6 +42,7 @@ from datasheet_rag.store import (
     delete_doc,
     delete_metadata,
     figure_source_available,
+    fts_status,
     get_chunk,
     get_doc_titles,
     get_ingested_docs,
@@ -309,11 +310,15 @@ class LocalBackend(RagBackend):
             except ValueError:
                 name = str(row["level"])
             by_level[name] = int(row["c"])
+        # Store-wide, deliberately unscoped: a desynced keyword index breaks
+        # search for every project, and this rollup is where someone looks
+        # when results seem off (GH #23).
         return StatsResult(
             total_chunks=total,
             by_level=by_level,
             project_id=project_id,
             doc_id=doc_id,
+            fts_missing=fts_status(conn).missing,
         )
 
     # -- figures -------------------------------------------------------

@@ -41,12 +41,19 @@ class IngestedDoc(BaseModel):
 
 
 class StatsResult(BaseModel):
-    """Chunk-count rollup for a scope."""
+    """Chunk-count rollup for a scope.
+
+    ``fts_missing`` is the one field that is *not* scoped: the keyword index
+    covers the whole store, so its health is reported store-wide however the
+    counts above were filtered. ``None`` means the backend did not report it
+    (an older server), which is not the same as zero.
+    """
 
     total_chunks: int = 0
     by_level: dict[str, int] = Field(default_factory=dict)
     project_id: str | None = None
     doc_id: str | None = None
+    fts_missing: int | None = None
 
 
 class FigureCitation(BaseModel):

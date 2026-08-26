@@ -939,3 +939,131 @@ def test_set_figure_source_relinks_and_preserves_a_curated_caption(
     assert relinked.figure_caption == "Figure 9: Power tree"
     # An existing caption wins — a repair reattaches images, not prose.
     assert get_chunk(conn, "fig:curated").figure_caption == "Hand-written"
+
+
+# ---------------------------------------------------------------------------
+# Keyword index health: a desynced chunk_fts must be loud and repairable (GH #23)
+# ---------------------------------------------------------------------------
+
+
+def _desync_fts(conn: sqlite3.Connection) -> None:
+    """Empty the FTS index while leaving ``chunks`` and the triggers intact.
+
+    This is the state the bug is about: search still runs, finds nothing on
+    the keyword side, and says nothing about it.
+    """
+    conn.execute("INSERT INTO chunk_fts(chunk_fts) VALUES('delete-all')")
+    conn.commit()
+
+
+def test_fts_status_sees_an_empty_index_that_count_star_cannot(
+    conn: sqlite3.Connection,
+) -> None:
+    from datasheet_rag.store import fts_status
+
+    chunks = _seed_chunks()
+    insert_chunks(conn, chunks, vectors=_seed_vectors(chunks))
+    assert fts_status(conn).healthy
+
+    _desync_fts(conn)
+
+    status = fts_status(conn)
+    assert status.chunks == len(chunks)
+    assert status.indexed == 0
+    assert status.missing == len(chunks)
+    assert not status.healthy
+
+    # The obvious check is the one that cannot see this: on an
+    # external-content table an unconstrained scan is answered from
+    # ``chunks``, so count(*) reports full coverage over a dead index.
+    naive = conn.execute("SELECT COUNT(*) FROM chunk_fts").fetchone()[0]
+    assert naive == len(chunks)
+
+
+def test_a_desynced_index_makes_hybrid_collapse_to_vector_only(
+    conn: sqlite3.Connection,
+) -> None:
+    """The symptom itself — pinned so a regression cannot pass unnoticed."""
+    chunks = _seed_chunks()
+    vectors = _seed_vectors(chunks)
+    insert_chunks(conn, chunks, vectors=vectors)
+
+    target = next(c for c in chunks if c.id == "doc1:2:0")
+    query_vec = vectors[chunks[0].id]  # deliberately *not* the keyword hit
+
+    healthy_hybrid = [r.chunk_id for r in hybrid_search(conn, query_vec, "clock stretching", k=5)]
+    vector_only = [r.chunk_id for r in vector_search(conn, query_vec, k=5)]
+    assert target.id in healthy_hybrid
+    assert healthy_hybrid != vector_only, "BM25 must move the ranking while healthy"
+
+    _desync_fts(conn)
+
+    assert keyword_search(conn, "clock stretching", k=5) == []
+    degraded = [r.chunk_id for r in hybrid_search(conn, query_vec, "clock stretching", k=5)]
+    assert degraded == vector_only, "expected the silent degradation this bug is about"
+
+
+def test_rebuild_fts_restores_keyword_and_hybrid_search(
+    conn: sqlite3.Connection,
+) -> None:
+    from datasheet_rag.store import rebuild_fts
+
+    chunks = _seed_chunks()
+    vectors = _seed_vectors(chunks)
+    insert_chunks(conn, chunks, vectors=vectors)
+    _desync_fts(conn)
+
+    status = rebuild_fts(conn)
+    assert status.healthy
+    assert status.indexed == len(chunks)
+
+    results = keyword_search(conn, "clock stretching", k=5)
+    assert results and results[0].chunk_id == "doc1:2:0"
+
+    query_vec = vectors[chunks[0].id]
+    hybrid = [r.chunk_id for r in hybrid_search(conn, query_vec, "clock stretching", k=5)]
+    assert "doc1:2:0" in hybrid
+
+
+def test_rebuild_fts_is_a_no_op_on_a_healthy_index(conn: sqlite3.Connection) -> None:
+    from datasheet_rag.store import rebuild_fts
+
+    chunks = _seed_chunks()
+    insert_chunks(conn, chunks, vectors=_seed_vectors(chunks))
+    before = [r.chunk_id for r in keyword_search(conn, "clock stretching", k=5)]
+
+    assert rebuild_fts(conn).healthy
+    assert [r.chunk_id for r in keyword_search(conn, "clock stretching", k=5)] == before
+
+
+def test_opening_a_store_that_predates_fts_indexes_what_is_already_there() -> None:
+    """The path that produces a dead index: chunks written, table added later.
+
+    ``CREATE VIRTUAL TABLE IF NOT EXISTS`` indexes nothing retroactively and
+    the triggers only fire on later writes, so without a backfill at open the
+    store would come up with a permanently empty index and no complaint.
+    """
+    import tempfile
+
+    from datasheet_rag.store import fts_status
+
+    with tempfile.TemporaryDirectory() as td:
+        db_path = f"{td}/pre-fts.sqlite"
+
+        c1 = connect(db_path, embedding_dim=EMBED_DIM)
+        chunks = _seed_chunks()
+        insert_chunks(c1, chunks, vectors=_seed_vectors(chunks))
+        # Rewind to a store that never had the index or its triggers.
+        for trigger in ("chunks_ai", "chunks_ad", "chunks_au"):
+            c1.execute(f"DROP TRIGGER {trigger}")
+        c1.execute("DROP TABLE chunk_fts")
+        c1.commit()
+        c1.close()
+
+        c2 = connect(db_path, embedding_dim=EMBED_DIM)
+        try:
+            assert fts_status(c2).healthy
+            results = keyword_search(c2, "clock stretching", k=5)
+            assert results and results[0].chunk_id == "doc1:2:0"
+        finally:
+            c2.close()

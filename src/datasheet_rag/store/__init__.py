@@ -33,7 +33,13 @@ from datasheet_rag.store.metadata import (
     list_docs,
     set_metadata,
 )
-from datasheet_rag.store.schema import connect, init_schema
+from datasheet_rag.store.schema import (
+    FtsStatus,
+    connect,
+    fts_status,
+    init_schema,
+    rebuild_fts,
+)
 from datasheet_rag.store.search import (
     SearchFilters,
     SearchResult,
@@ -80,7 +86,10 @@ __all__ = [
     "get_metadata",
     "hash_token",
     "hybrid_search",
+    "FtsStatus",
+    "fts_status",
     "init_schema",
+    "rebuild_fts",
     "InsertStats",
     "insert_chunk_graph",
     "insert_chunks",
