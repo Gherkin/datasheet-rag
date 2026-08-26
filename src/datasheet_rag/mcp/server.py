@@ -41,7 +41,13 @@ from threading import Thread
 from typing import Any, Literal
 
 from datasheet_rag import pdf_viewer
-from datasheet_rag.backend import RagBackend, backend_mode, emit_local_notice, get_backend
+from datasheet_rag.backend import (
+    FigureUnavailableError,
+    RagBackend,
+    backend_mode,
+    emit_local_notice,
+    get_backend,
+)
 from datasheet_rag.config import get_settings
 from datasheet_rag.models.chunk import ChunkLevel, LayoutType
 from datasheet_rag.store import SearchFilters, SearchResult
@@ -125,6 +131,20 @@ def _resolve_layout_types(layout_types: list[str] | None) -> list[LayoutType] | 
 # ---------------------------------------------------------------------------
 
 
+def _figure_is_retrievable(chunk: Any) -> bool:
+    """Whether ``show_figure``/``get_figure`` would actually return an image.
+
+    ``figure_available`` is computed by the host that owns the figure store
+    (see ``store.sqlite._row_to_chunk``), so it is authoritative in local mode
+    and travels over HTTP in remote mode. ``None`` means nobody checked — a
+    server older than GH #41 — so fall back to the historical
+    is-the-column-set guess rather than hiding every figure it serves.
+    """
+    if chunk.figure_available is None:
+        return bool(chunk.figure_image_path or chunk.figure_s3_key)
+    return bool(chunk.figure_available)
+
+
 def _shape_chunk(result_or_chunk: Any, *, score: float | None = None) -> dict[str, Any]:
     """Convert a Chunk or SearchResult into a compact dict for the agent."""
     if isinstance(result_or_chunk, SearchResult):
@@ -139,7 +159,7 @@ def _shape_chunk(result_or_chunk: Any, *, score: float | None = None) -> dict[st
         page = str(pages[0]) if len(pages) == 1 else f"{pages[0]}-{pages[-1]}"
 
     is_figure = chunk.metadata.layout_type == LayoutType.FIGURE
-    has_figure = is_figure and bool(chunk.figure_image_path or chunk.figure_s3_key)
+    has_figure = is_figure and _figure_is_retrievable(chunk)
 
     out: dict[str, Any] = {
         "chunk_id": chunk.id,
@@ -166,6 +186,21 @@ def _shape_chunk(result_or_chunk: Any, *, score: float | None = None) -> dict[st
             f"This chunk has a figure. If it is relevant to the user's question, "
             f"you MUST call show_figure('{chunk.id}') — do not skip it. "
             f"If relevance is uncertain, offer it to the user instead of silently skipping."
+        )
+    elif is_figure:
+        # A figure-typed chunk with no image: caption text only. Say so
+        # explicitly — silence here is what sent agents into a retry loop of
+        # show_figure calls that could never succeed (GH #41).
+        out["has_figure"] = False
+        out["figure_caption"] = chunk.figure_caption or ""
+        if chunk.figure_description:
+            out["figure_description"] = chunk.figure_description
+        out["DISPLAY_INSTRUCTION"] = (
+            "This chunk describes a figure but no image is stored for it. "
+            "Do NOT call show_figure or get_figure on it — they will fail. "
+            f"To let the user see it, call show_pdf('{chunk.doc_id}'"
+            + (f", {pages[0]})" if pages else ")")
+            + " instead."
         )
     if chunk.metadata.layout_type == LayoutType.TABLE and pages:
         warning = chunk.metadata.table_structure_warning
@@ -385,6 +420,26 @@ def _compress_for_mcp(image_bytes: bytes, fmt: str) -> tuple[bytes, str]:
     return buf.getvalue(), "jpg"
 
 
+def _figure_unavailable_text(chunk_id: str, exc: Exception) -> str:
+    """The text a figure tool returns when there is no image to return.
+
+    A hard error here reads like a transient fault and invites a retry; the
+    agent then burns turns re-calling a tool that can never succeed (GH #41).
+    So the tools answer normally, state that the image does not exist, and
+    point at the one thing that does work — the source page.
+    """
+    doc_id = chunk_id.split(":", 1)[0]
+    return (
+        f"No image is stored for chunk {chunk_id} ({exc}). This is permanent, "
+        f"not a transient failure — do not retry show_figure or get_figure on "
+        f"this chunk, and do not try other figure chunks from the same "
+        f"document expecting a different result. The chunk's own text and "
+        f"caption are all there is. If the user needs to see the figure, call "
+        f"show_pdf('{doc_id}', <page>) with the chunk's page and let them read "
+        f"it in the source document."
+    )
+
+
 def _get_figure_impl(
     chunk_id: str,
     *,
@@ -472,9 +527,13 @@ def build_server() -> Any:
             "`navigate` with direction='next' to read sequentially. "
             "\n\n"
             "Figures: search and get_chunk results include `has_figure: "
-            "true` when the chunk is a diagram, schematic, or block-diagram. "
-            "Use `figure_description` and `figure_caption` to reason about "
-            "the content without fetching it. "
+            "true` when the chunk is a diagram, schematic, or block-diagram "
+            "AND its image can actually be served. Use `figure_description` "
+            "and `figure_caption` to reason about the content without "
+            "fetching it. A chunk whose text reads like a figure but which "
+            "carries `has_figure: false` has no image behind it — its "
+            "document was ingested without figures. Never call `show_figure` "
+            "or `get_figure` on those; offer `show_pdf` instead. "
             "\n\n"
             "Showing figures — decision rule: For every figure chunk found "
             "(has_figure: true), decide: "
@@ -606,7 +665,10 @@ def build_server() -> Any:
         block is what the client renders.
         """
         import base64
-        result = _get_figure_impl(chunk_id)
+        try:
+            result = _get_figure_impl(chunk_id)
+        except FigureUnavailableError as exc:
+            return [TextContent(type="text", text=_figure_unavailable_text(chunk_id, exc))]
         image_bytes, fmt = _compress_for_mcp(result["image_bytes"], result["format"])
         mime = _FIGURE_MIME.get(fmt, "image/png")
         image_b64 = base64.b64encode(image_bytes).decode()
@@ -662,7 +724,10 @@ def build_server() -> Any:
         description if none), page number, and section.
         """
         import base64
-        result = _get_figure_impl(chunk_id)
+        try:
+            result = _get_figure_impl(chunk_id)
+        except FigureUnavailableError as exc:
+            return [TextContent(type="text", text=_figure_unavailable_text(chunk_id, exc))]
         image_bytes, fmt = _compress_for_mcp(result["image_bytes"], result["format"])
         mime = _FIGURE_MIME.get(fmt, "image/png")
         image_b64 = base64.b64encode(image_bytes).decode()
@@ -743,7 +808,9 @@ def build_server() -> Any:
         if (!toolResult) return;
         const imgBlock = toolResult.find(c => c.type === 'image');
         const textBlock = toolResult.find(c => c.type === 'text');
-        if (!imgBlock) { errEl.textContent = 'No image in tool-result.'; loadingEl.style.display = 'none'; sendSize(); return; }
+        // No image block means the chunk has no stored figure — the text
+        // block explains why, so show that rather than a bare 'no image'.
+        if (!imgBlock) { errEl.textContent = textBlock ? textBlock.text : 'No image in tool-result.'; loadingEl.style.display = 'none'; sendSize(); return; }
         figEl.onload = () => { loadingEl.style.display = 'none'; sendSize(); };
         figEl.src = 'data:' + imgBlock.mimeType + ';base64,' + imgBlock.data;
         figEl.style.display = 'block';

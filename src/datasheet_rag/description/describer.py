@@ -418,15 +418,57 @@ def describe_figures_in_store(
     from datasheet_rag.store import list_figure_chunks, update_figure_description
 
     targets = list_figure_chunks(conn, doc_id=doc_id, project_id=project_id)
-    if missing_only:
-        targets = [c for c in targets if not c.figure_description]
-    if limit is not None:
-        targets = targets[:limit]
-    if not targets:
-        return {}
+    # A row can name an image that is not on this host (a store restored
+    # without its figures). Reading it would fail per chunk; skip it instead.
+    targets = [c for c in targets if c.figure_available]
 
-    describer = describer or FigureDescriber()
-    descriptions = describer.describe_chunks(targets, conn)
+    # One image can back more than one chunk — a MESO wrapping a single figure
+    # carries its MICRO's image (see chunking.splitter). Describing each of
+    # them would pay the vision call twice for identical pixels, so group by
+    # image source, describe the finest-grained member once, and copy the
+    # answer to the rest.
+    groups: dict[str, list[Chunk]] = {}
+    for c in targets:
+        key = c.figure_image_path or c.figure_s3_key or c.id
+        groups.setdefault(key, []).append(c)
+
+    reuse: dict[str, str] = {}          # chunk_id → description already on hand
+    to_describe: list[Chunk] = []       # one representative per image
+    fanout: dict[str, list[str]] = {}   # representative id → siblings to copy to
+
+    for members in groups.values():
+        needing = [c for c in members if not c.figure_description] if missing_only else members
+        if not needing:
+            continue
+        # Only a missing_only run may take the shortcut of copying a
+        # description a sibling already has — an explicit --all run is asking
+        # for a fresh one.
+        existing = next((c.figure_description for c in members if c.figure_description), None)
+        if existing and missing_only:
+            for c in needing:
+                reuse[c.id] = existing
+            continue
+        rep = max(members, key=lambda c: int(c.level))
+        to_describe.append(rep)
+        fanout[rep.id] = [c.id for c in members if c.id != rep.id]
+
+    if limit is not None:
+        dropped = {c.id for c in to_describe[limit:]}
+        to_describe = to_describe[:limit]
+        for rep_id in dropped:
+            fanout.pop(rep_id, None)
+
+    descriptions: dict[str, str] = dict(reuse)
+    if to_describe:
+        describer = describer or FigureDescriber()
+        fresh = describer.describe_chunks(to_describe, conn)
+        for rep_id, desc in fresh.items():
+            descriptions[rep_id] = desc
+            for sibling_id in fanout.get(rep_id, []):
+                descriptions[sibling_id] = desc
+
+    if not descriptions:
+        return {}
 
     if not dry_run:
         for chunk_id, desc in descriptions.items():

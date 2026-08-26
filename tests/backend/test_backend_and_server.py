@@ -432,3 +432,84 @@ def test_cors_preflight(conn, monkeypatch) -> None:
         },
     )
     assert "access-control-allow-origin" not in denied.headers
+
+
+# ---- figure sources that cannot be served (GH #41) ------------------------
+
+
+def test_local_ingest_drops_a_figure_path_it_cannot_resolve(
+    backend: LocalBackend, tmp_path, monkeypatch
+) -> None:
+    """A crop the client never uploaded must not be stored as if it had."""
+    from datasheet_rag.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "figures_dir", tmp_path / "figs")
+
+    did = "c" * 64
+    g = _graph_with_figure(did)  # carries /client/only/path/fig.png
+    backend.ingest_chunk_graph(g, embed=False)
+
+    ch = backend.get_chunk(f"{did}:L2:0")
+    assert ch.figure_image_path is None
+    assert ch.figure_available is False
+
+
+def test_get_figure_bytes_raises_the_typed_unavailable_error(
+    backend: LocalBackend, tmp_path, monkeypatch
+) -> None:
+    from datasheet_rag.backend import FigureUnavailableError
+    from datasheet_rag.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "figures_dir", tmp_path / "figs")
+
+    did = "d" * 64
+    backend.ingest_chunk_graph(_graph_with_figure(did), embed=False)
+
+    with pytest.raises(FigureUnavailableError):
+        backend.get_figure_bytes(f"{did}:L2:0")
+
+
+def test_server_reports_an_unavailable_figure_as_404_with_a_code(
+    client, tmp_path, monkeypatch
+) -> None:
+    """RemoteBackend needs the code to re-raise the typed error client-side."""
+    from datasheet_rag.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "figures_dir", tmp_path / "figs")
+
+    did = "e" * 64
+    payload = {
+        "graph": _graph_with_figure(did).model_dump(mode="json"),
+        "embed": False,
+    }
+    r = client.post(
+        "/ingest",
+        files={"payload": ("payload.json", json.dumps(payload), "application/json")},
+    )
+    assert r.status_code == 200, r.text
+
+    r = client.get(f"/figures/{did}:L2:0/bytes")
+    assert r.status_code == 404
+    assert r.json()["code"] == "figure_unavailable"
+
+
+def test_remote_backend_reraises_figure_unavailable(monkeypatch) -> None:
+    from datasheet_rag.backend import FigureUnavailableError
+    from datasheet_rag.backend.remote import RemoteBackend
+
+    be = RemoteBackend.__new__(RemoteBackend)
+
+    class _Resp:
+        status_code = 404
+        text = '{"detail": "…", "code": "figure_unavailable"}'
+
+        def json(self):
+            return {"detail": "chunk x has no usable figure source", "code": "figure_unavailable"}
+
+    class _Client:
+        def request(self, *a, **kw):
+            return _Resp()
+
+    be._client = _Client()
+    with pytest.raises(FigureUnavailableError, match="no usable figure source"):
+        be._request("GET", "/figures/x/bytes")

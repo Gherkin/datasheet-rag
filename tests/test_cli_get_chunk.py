@@ -159,10 +159,14 @@ def test_get_chunk_with_neighbors(db_path: Path) -> None:
 
 
 def test_inspect_figures_chunk_id_round_trips_through_get_chunk(db_path: Path) -> None:
+    # A real file on disk: `inspect figures` lists chunks whose image can
+    # actually be served, so a path pointing at nothing is (correctly) hidden.
+    image = db_path.parent / "fake-figure.png"
+    image.write_bytes(b"\x89PNGFAKE")
     fig = _chunk(
         DOC_A, 4, "See figure for thermal curve.",
         layout_type=LayoutType.FIGURE, figure_caption="Fig 1: Thermal derating curve",
-        figure_image_path="/tmp/fake-figure.png",
+        figure_image_path=str(image),
     )
     conn = connect(db_path, embedding_dim=get_settings().embedding_dimensions)
     insert_chunks(conn, [fig], project_id="proj-a")
@@ -177,3 +181,28 @@ def test_inspect_figures_chunk_id_round_trips_through_get_chunk(db_path: Path) -
     fetched = _run(db_path, "get", "chunk", short_id)
     assert fetched.exit_code == 0, fetched.output
     assert "Fig 1: Thermal derating curve" in fetched.output
+
+
+def test_inspect_figures_flags_chunks_whose_image_is_gone(db_path: Path) -> None:
+    """A figure row whose file vanished must not be advertised (GH #41)."""
+    fig = _chunk(
+        DOC_A, 5, "See figure for the block diagram.",
+        layout_type=LayoutType.FIGURE, figure_caption="Fig 2: Block diagram",
+        figure_image_path=str(db_path.parent / "not-here.png"),
+    )
+    conn = connect(db_path, embedding_dim=get_settings().embedding_dimensions)
+    insert_chunks(conn, [fig], project_id="proj-a")
+    conn.commit()
+    conn.close()
+
+    short_id = f"{DOC_A[:SHORT_DOC_ID_LEN]}:L2:5"
+
+    hidden = _run(db_path, "inspect", "figures", "-g")
+    assert hidden.exit_code == 0, hidden.output
+    assert short_id not in hidden.output
+    assert "no usable image" in hidden.output
+
+    shown = _run(db_path, "inspect", "figures", "-g", "--include-unusable")
+    assert shown.exit_code == 0, shown.output
+    assert short_id in shown.output
+    assert "missing" in shown.output

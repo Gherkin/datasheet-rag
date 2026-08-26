@@ -510,3 +510,75 @@ def test_get_figure_no_source_raises(conn: Any) -> None:
     _seed_figure_chunk(conn, "fig:bare", image_path=None, s3_key=None)
     with pytest.raises(ValueError, match="no usable figure source"):
         _get_figure_impl("fig:bare", conn=conn)
+
+
+# ---------------------------------------------------------------------------
+# The advertise / retrieve contract (GH #41)
+# ---------------------------------------------------------------------------
+
+
+def test_search_does_not_advertise_a_figure_it_cannot_serve(
+    conn: Any, fake_embedder: Any, tmp_path: Any
+) -> None:
+    """A path that resolves to nothing must not come back as has_figure."""
+    _seed_figure_chunk(conn, "fig:gone", image_path=str(tmp_path / "vanished.png"))
+
+    out = _search_impl(
+        "SPI timing diagram", mode="keyword", k=5, project_id="p1", conn=conn,
+    )
+    hit = next(r for r in out if r["chunk_id"] == "fig:gone")
+    assert hit["has_figure"] is False
+    assert "figure_uri" not in hit
+    assert "show_figure" in hit["DISPLAY_INSTRUCTION"]
+    assert "Do NOT" in hit["DISPLAY_INSTRUCTION"]
+    assert "show_pdf('docA', 42)" in hit["DISPLAY_INSTRUCTION"]
+
+
+def test_search_marks_sourceless_figure_chunks_unshowable(
+    conn: Any, fake_embedder: Any
+) -> None:
+    """Figures skipped at ingest leave caption-only chunks — say so."""
+    _seed_figure_chunk(conn, "fig:bare", image_path=None, s3_key=None)
+
+    out = _search_impl(
+        "SPI timing diagram", mode="keyword", k=5, project_id="p1", conn=conn,
+    )
+    hit = next(r for r in out if r["chunk_id"] == "fig:bare")
+    assert hit["has_figure"] is False
+    assert hit["figure_caption"].startswith("Figure 3-2")
+
+
+def test_shape_chunk_falls_back_when_availability_is_unknown() -> None:
+    """An older server does not report availability; keep serving figures."""
+    from datasheet_rag.mcp.server import _shape_chunk
+
+    chunk = _make_chunk("fig:old", layout_type=LayoutType.FIGURE)
+    chunk.figure_image_path = "somewhere/fig.png"
+    assert chunk.figure_available is None
+
+    out = _shape_chunk(chunk)
+    assert out["has_figure"] is True
+    assert out["figure_uri"] == "rag://figure/fig:old"
+
+
+@pytest.mark.parametrize("tool_name", ["show_figure", "get_figure"])
+def test_figure_tools_answer_softly_when_there_is_no_image(
+    monkeypatch: Any, tool_name: str
+) -> None:
+    """The tools must not raise — a hard error reads as retryable (GH #41)."""
+    pytest.importorskip("mcp")
+    from datasheet_rag.backend import FigureUnavailableError
+    from datasheet_rag.mcp import server as mcp_server
+
+    def _boom(chunk_id: str, **kw: Any) -> dict[str, Any]:
+        raise FigureUnavailableError(f"chunk {chunk_id} has no usable figure source")
+
+    monkeypatch.setattr(mcp_server, "_get_figure_impl", _boom)
+
+    tool = mcp_server.build_server()._tool_manager.get_tool(tool_name)
+    out = tool.fn("docA:L2:7")
+
+    assert len(out) == 1  # text only — no image block
+    assert out[0].type == "text"
+    assert "do not retry" in out[0].text
+    assert "show_pdf('docA', <page>)" in out[0].text

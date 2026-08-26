@@ -89,6 +89,12 @@ class Chunk(BaseModel):
     figure_s3_key: str | None = None         # S3 key for the figure image
     figure_caption: str | None = None        # Detected or nearby caption text
     figure_description: str | None = None    # LLM-generated description for text embedding
+    # Whether the image can actually be read *on the host that owns the figure
+    # store*. Set when a chunk is hydrated from the store (see
+    # ``store.sqlite._row_to_chunk``); ``None`` means "not checked" — a chunk
+    # fresh from the parser, or one served by a server too old to report it.
+    # Never persisted: it is a property of the filesystem, not of the row.
+    figure_available: bool | None = None
 
     # Concept links (populated in Phase 3)
     concept_ids: list[str] = Field(default_factory=list)

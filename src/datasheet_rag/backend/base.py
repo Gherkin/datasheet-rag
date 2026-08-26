@@ -222,6 +222,17 @@ class RagBackend(ABC):
         """Release any held resources (HTTP session, sqlite conn)."""
 
 
+class FigureUnavailableError(ValueError):
+    """A figure chunk exists, but its image cannot be served.
+
+    Distinct from "unknown chunk" and from a transient read failure: the row
+    is real, it is a figure, and there is simply no image behind it — a
+    document ingested with figures skipped, or a store restored without its
+    figures directory. Callers are expected to degrade gracefully (say so and
+    move on) rather than retry, which is the whole point of typing it (GH #41).
+    """
+
+
 class RagServerError(RuntimeError):
     """Raised by RemoteBackend when the server returns a non-2xx response."""
 

@@ -70,6 +70,27 @@ def resolve_figure_path(stored: str | None) -> Path | None:
     p = Path(stored)
     return p if p.is_absolute() else get_settings().figures_dir / p
 
+
+def figure_source_available(
+    figure_image_path: str | None, figure_s3_key: str | None
+) -> bool:
+    """Whether a figure's bytes can actually be fetched *on this host*.
+
+    A stored path is only a promise: the row can outlive the file (a store
+    restored without its figures, a path written by another machine). Search
+    advertises figures from this answer rather than from column
+    non-emptiness, so what it promises matches what ``get_figure`` can
+    deliver (GH #41).
+
+    A ``figure_s3_key`` counts as available without a round-trip — the
+    bucket is remote, and a HEAD per search hit is not worth the latency.
+    """
+    path = resolve_figure_path(figure_image_path)
+    if path is not None and path.is_file():
+        return True
+    return bool(figure_s3_key)
+
+
 # Columns inserted in the order below — keeping the SQL and the parameter
 # tuple aligned is the single source of truth for the row shape.
 _INSERT_SQL = """
@@ -112,9 +133,16 @@ ON CONFLICT(id) DO UPDATE SET
     prev_id           = excluded.prev_id,
     next_id           = excluded.next_id,
     chapter_root_id   = excluded.chapter_root_id,
-    figure_s3_key     = excluded.figure_s3_key,
-    figure_caption    = excluded.figure_caption,
-    figure_image_path = excluded.figure_image_path,
+    -- A re-embed from a chunk graph built with figures skipped carries no
+    -- figure source at all; overwriting unconditionally would strip the
+    -- image off every figure chunk in the document and leave rows that
+    -- search can find but `get_figure` cannot serve (GH #41). An empty
+    -- incoming source defers to the stored one, exactly like doc_title
+    -- above and figure_description below. A genuine re-crop still lands:
+    -- it arrives with a path.
+    figure_s3_key     = COALESCE(NULLIF(excluded.figure_s3_key, ''), chunks.figure_s3_key),
+    figure_caption    = COALESCE(NULLIF(excluded.figure_caption, ''), chunks.figure_caption),
+    figure_image_path = COALESCE(NULLIF(excluded.figure_image_path, ''), chunks.figure_image_path),
     figure_description = COALESCE(excluded.figure_description, chunks.figure_description),
     metadata_json     = excluded.metadata_json
 """
@@ -170,7 +198,11 @@ def _chunk_row(
         chunk.chapter_root_id,
         chunk.figure_s3_key,
         chunk.figure_caption,
-        chunk.figure_image_path,
+        # Normalise on the way in: a chunk graph carries the absolute path the
+        # cropper wrote, and storing that makes the row unreadable anywhere
+        # else (a container, a restored backup). Paths outside figures_dir are
+        # left alone by the helper.
+        to_relative_figure_path(chunk.figure_image_path) if chunk.figure_image_path else None,
         chunk.figure_description,
         metadata_json,
     )
@@ -317,6 +349,12 @@ def _row_to_chunk(row: sqlite3.Row) -> Chunk:
         figure_caption=row["figure_caption"],
         figure_image_path=figure_image_path,
         figure_description=figure_description,
+        # Only figure chunks pay for the stat; everything else short-circuits.
+        figure_available=(
+            figure_source_available(figure_image_path, row["figure_s3_key"])
+            if metadata.layout_type == LayoutType.FIGURE
+            else None
+        ),
     )
 
 
@@ -382,11 +420,46 @@ def list_figure_chunks(
         sql += " AND project_id = ?"
         params.append(project_id)
     if only_with_image:
-        sql += " AND (figure_image_path IS NOT NULL OR figure_s3_key IS NOT NULL)"
+        sql += (
+            " AND (COALESCE(figure_image_path, '') <> ''"
+            " OR COALESCE(figure_s3_key, '') <> '')"
+        )
     sql += " ORDER BY doc_id, rowid"
 
     rows = conn.execute(sql, params).fetchall()
     return [_row_to_chunk(row) for row in rows]
+
+
+def set_figure_source(
+    conn: sqlite3.Connection,
+    chunk_id: str,
+    *,
+    image_path: str | Path,
+    caption: str | None = None,
+) -> bool:
+    """Point a figure chunk at a cropped image on disk.
+
+    Used by `rag repair figure-links` to reattach crops to rows that were
+    stored without one (GH #41). The path is normalised relative to
+    ``figures_dir``; ``caption`` is only written when the row has none, so a
+    repair never overwrites a caption someone curated.
+
+    Returns True when a row was updated.
+    """
+    stored = to_relative_figure_path(image_path)
+    if caption:
+        cur = conn.execute(
+            "UPDATE chunks SET figure_image_path = ?, "
+            "figure_caption = COALESCE(NULLIF(figure_caption, ''), ?) "
+            "WHERE id = ?",
+            (stored, caption, chunk_id),
+        )
+    else:
+        cur = conn.execute(
+            "UPDATE chunks SET figure_image_path = ? WHERE id = ?",
+            (stored, chunk_id),
+        )
+    return cur.rowcount > 0
 
 
 def update_figure_description(

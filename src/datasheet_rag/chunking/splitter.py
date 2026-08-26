@@ -242,7 +242,13 @@ def _create_micro_chunks(
             if fig_info:
                 chunk.figure_image_path = fig_info.get("image_path")
                 chunk.figure_s3_key = fig_info.get("s3_key")
-                chunk.figure_caption = fig_info.get("caption", elem.figure_caption)
+            # The caption is the element's regardless of whether a crop was
+            # made: with figures skipped there is no manifest, and folding the
+            # caption into the same `if` left those chunks as a bare
+            # "[Figure]" with nothing to reason about (GH #41).
+            chunk.figure_caption = (
+                (fig_info or {}).get("caption") or elem.figure_caption or ""
+            ) or None
 
             chunks.append(chunk)
             counter += 1
@@ -411,6 +417,19 @@ def _create_meso_chunks(
             layout_type=layout_type,
         )
         meso.metadata.page_numbers = pages
+        # A meso wrapping exactly one figure IS that figure — carry its image
+        # across so the coarser zoom level is showable too. With more than one
+        # there is no single right image to advertise, so it keeps none and
+        # search reports it as unshowable rather than promising an image it
+        # cannot serve (GH #41).
+        if layout_type == LayoutType.FIGURE:
+            figures = [c for c in current_group if c.figure_image_path or c.figure_s3_key]
+            if len(figures) == 1:
+                src = figures[0]
+                meso.figure_image_path = src.figure_image_path
+                meso.figure_s3_key = src.figure_s3_key
+                meso.figure_caption = src.figure_caption
+                meso.figure_description = src.figure_description
         meso.children_ids = [c.id for c in current_group]
         for c in current_group:
             c.parent_id = meso.id

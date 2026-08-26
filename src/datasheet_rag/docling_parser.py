@@ -953,7 +953,9 @@ def _build_figure_regions(doc: Any) -> list[FigureRegion]:
 
     Iterates all items so that CAPTION items immediately following a figure
     can be assigned to it.  IDs use separate per-kind counters that stay in
-    sync with the figure_counter / formula_counter in _build_outline.
+    sync with the figure_counter / formula_counter in _build_outline — the two
+    traversals must count the SAME items, including ones neither can use, or
+    the ids drift and figure chunks link to the wrong crop.
     """
     try:
         from docling_core.types.doc import DocItemLabel
@@ -989,6 +991,17 @@ def _build_figure_regions(doc: Any) -> list[FigureRegion]:
 
         page_no, raw_bbox = _item_prov(item)
         if page_no is None:
+            # No provenance means nothing to crop — but _build_outline still
+            # counts this item, so skipping it *before* the counters would
+            # shift every later id by one and link each figure chunk to the
+            # neighbouring figure's crop (GH #41). Count it, then drop it.
+            if item.label == DocItemLabel.FORMULA:
+                formula_counter += 1
+            else:
+                figure_counter += 1
+            # A caption following this item belongs to it, not to the last
+            # region we kept.
+            pending_region = None
             continue
 
         pw, ph = _page_size(doc, page_no)

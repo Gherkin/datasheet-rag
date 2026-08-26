@@ -745,3 +745,93 @@ def test_schema_v1_database_is_migrated_to_v2() -> None:
             assert version == schema_mod.SCHEMA_VERSION
         finally:
             c2.close()
+
+
+# ---------------------------------------------------------------------------
+# Figure sources: what the store promises must be what it can deliver (GH #41)
+# ---------------------------------------------------------------------------
+
+
+def test_figure_available_reflects_the_file_on_disk(
+    conn: sqlite3.Connection, tmp_path: object
+) -> None:
+    from datasheet_rag.store.sqlite import figure_source_available
+
+    real = tmp_path / "fig.png"  # type: ignore[operator]
+    real.write_bytes(b"\x89PNGFAKE")
+
+    here = _make_figure_chunk("fig:here", image_path=str(real))
+    gone = _make_figure_chunk("fig:gone", image_path=str(tmp_path / "nope.png"))  # type: ignore[operator]
+    gone.figure_s3_key = None
+    bare = _make_figure_chunk("fig:bare", image_path=None)
+    bare.figure_s3_key = None
+    s3_only = _make_figure_chunk("fig:s3", image_path=None)  # keeps its s3 key
+    text = _make_chunk(
+        "doc-fig:2:9", doc_id="doc-fig", level=ChunkLevel.MICRO,
+        text="Plain body text.", layout=LayoutType.TEXT,
+    )
+    insert_chunks(conn, [here, gone, bare, s3_only, text])
+
+    assert get_chunk(conn, "fig:here").figure_available is True
+    assert get_chunk(conn, "fig:gone").figure_available is False
+    assert get_chunk(conn, "fig:bare").figure_available is False
+    # An S3 key counts without a round-trip to the bucket.
+    assert get_chunk(conn, "fig:s3").figure_available is True
+    # Non-figure chunks are not stat'd at all.
+    assert get_chunk(conn, "doc-fig:2:9").figure_available is None
+
+    assert figure_source_available(str(real), None) is True
+    assert figure_source_available(None, None) is False
+
+
+def test_reinsert_without_a_figure_source_keeps_the_stored_one(
+    conn: sqlite3.Connection,
+) -> None:
+    """A re-embed from a figure-less chunk graph must not strip images."""
+    original = _make_figure_chunk("fig:keep", image_path="/tmp/figs/fig-1.png")
+    insert_chunks(conn, [original])
+
+    # Same chunk id, re-chunked with figures skipped: no path, no key, no caption.
+    stripped = _make_figure_chunk("fig:keep", image_path=None, caption="")
+    stripped.figure_s3_key = None
+    insert_chunks(conn, [stripped])
+
+    after = get_chunk(conn, "fig:keep")
+    assert after is not None
+    assert after.figure_image_path == "/tmp/figs/fig-1.png"
+    assert after.figure_s3_key == "figures/doc-fig/page-42-fig-1.png"
+    assert after.figure_caption.startswith("Figure 3-2")
+
+    # A genuine re-crop still lands — it arrives with a path.
+    recropped = _make_figure_chunk("fig:keep", image_path="/tmp/figs/fig-1-v2.png")
+    insert_chunks(conn, [recropped])
+    assert get_chunk(conn, "fig:keep").figure_image_path == "/tmp/figs/fig-1-v2.png"
+
+
+def test_set_figure_source_relinks_and_preserves_a_curated_caption(
+    conn: sqlite3.Connection, tmp_path: object
+) -> None:
+    from datasheet_rag.store import set_figure_source
+
+    img = tmp_path / "relinked.png"  # type: ignore[operator]
+    img.write_bytes(b"\x89PNGFAKE")
+
+    orphan = _make_figure_chunk("fig:orphan", image_path=None, caption="")
+    orphan.figure_s3_key = None
+    curated = _make_figure_chunk("fig:curated", image_path=None, caption="Hand-written")
+    curated.figure_s3_key = None
+    insert_chunks(conn, [orphan, curated])
+
+    assert set_figure_source(
+        conn, "fig:orphan", image_path=img, caption="Figure 9: Power tree"
+    ) is True
+    assert set_figure_source(
+        conn, "fig:curated", image_path=img, caption="Figure 9: Power tree"
+    ) is True
+    assert set_figure_source(conn, "fig:nope", image_path=img) is False
+
+    relinked = get_chunk(conn, "fig:orphan")
+    assert relinked.figure_available is True
+    assert relinked.figure_caption == "Figure 9: Power tree"
+    # An existing caption wins — a repair reattaches images, not prose.
+    assert get_chunk(conn, "fig:curated").figure_caption == "Hand-written"

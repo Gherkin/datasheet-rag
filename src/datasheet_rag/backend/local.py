@@ -9,12 +9,18 @@ clients.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from pathlib import Path
 from threading import Lock
 from typing import Any
 
-from datasheet_rag.backend.base import FigureUploads, RagBackend, SearchMode
+from datasheet_rag.backend.base import (
+    FigureUnavailableError,
+    FigureUploads,
+    RagBackend,
+    SearchMode,
+)
 from datasheet_rag.backend.models import (
     DocSummary,
     FigureBytes,
@@ -35,6 +41,7 @@ from datasheet_rag.store import (
     count_chunks,
     delete_doc,
     delete_metadata,
+    figure_source_available,
     get_chunk,
     get_doc_titles,
     get_ingested_docs,
@@ -52,6 +59,8 @@ from datasheet_rag.store import (
     update_figure_description,
     vector_search,
 )
+
+logger = logging.getLogger("datasheet_rag.backend")
 
 
 class LocalBackend(RagBackend):
@@ -295,12 +304,19 @@ class LocalBackend(RagBackend):
         project_id: str | None = None,
         only_with_image: bool = True,
     ) -> list[Chunk]:
-        return list_figure_chunks(
+        chunks = list_figure_chunks(
             self._get_conn(),
             doc_id=doc_id,
             project_id=project_id,
             only_with_image=only_with_image,
         )
+        if only_with_image:
+            # The SQL filter only proves the column is set; hydration checked
+            # whether the file is really there. Honour the stricter answer so
+            # callers that intend to *read* the bytes (describe, MCP) never
+            # get a chunk that cannot be served.
+            chunks = [c for c in chunks if c.figure_available]
+        return chunks
 
     def _read_figure_image(self, chunk: Chunk) -> tuple[bytes, str, Path | None]:
         """Read a figure's bytes from disk (figure_image_path) or S3."""
@@ -320,7 +336,7 @@ class LocalBackend(RagBackend):
             data = resp["Body"].read()
             ext = Path(chunk.figure_s3_key).suffix.lstrip(".").lower() or "png"
             return data, ext, None
-        raise ValueError(
+        raise FigureUnavailableError(
             f"chunk {chunk.id} has no usable figure source — "
             f"figure_image_path is missing locally and figure_s3_key is unset."
         )
@@ -452,6 +468,30 @@ class LocalBackend(RagBackend):
                 if chunk is not None:
                     # Store relative to figures_dir so the DB stays portable.
                     chunk.figure_image_path = to_relative_figure_path(dest)
+
+        # 1b. Drop any figure path that does not resolve *here*. A remote
+        #     client ships host-local paths for crops it could not upload
+        #     (deleted, or never made); storing one verbatim mints a row that
+        #     search would advertise and `get_figure` could never serve — the
+        #     exact broken contract in GH #41. Blanking it lets the upsert's
+        #     COALESCE keep whatever good source the row already had.
+        dropped = 0
+        for chunk in graph.chunks.values():
+            if chunk.metadata.layout_type != LayoutType.FIGURE:
+                continue
+            if chunk.figure_image_path and not figure_source_available(
+                chunk.figure_image_path, chunk.figure_s3_key
+            ):
+                chunk.figure_image_path = None
+                dropped += 1
+        if dropped:
+            logger.warning(
+                "ingest %s: dropped %d figure path(s) that do not resolve on "
+                "this host — those chunks keep any previously stored image "
+                "and are otherwise served without one",
+                did,
+                dropped,
+            )
 
         with self._write_lock:
             conn = self._get_conn()

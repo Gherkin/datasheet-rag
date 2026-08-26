@@ -44,6 +44,7 @@ from datasheet_rag.store.search import (
 from datasheet_rag.store.sqlite import (
     count_chunks,
     delete_doc,
+    figure_source_available,
     get_chunk,
     get_doc_titles,
     get_ingested_docs,
@@ -53,6 +54,7 @@ from datasheet_rag.store.sqlite import (
     resolve_doc_id,
     resolve_figure_path,
     set_doc_title,
+    set_figure_source,
     to_relative_figure_path,
     update_figure_description,
 )
@@ -69,6 +71,7 @@ __all__ = [
     "create_api_key",
     "delete_doc",
     "delete_metadata",
+    "figure_source_available",
     "get_chunk",
     "get_doc_titles",
     "get_ingested_docs",
@@ -89,6 +92,7 @@ __all__ = [
     "resolve_figure_path",
     "revoke_api_key",
     "set_doc_title",
+    "set_figure_source",
     "set_metadata",
     "to_relative_figure_path",
     "update_figure_description",

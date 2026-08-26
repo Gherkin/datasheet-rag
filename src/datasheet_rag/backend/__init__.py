@@ -14,7 +14,11 @@ from __future__ import annotations
 import sys
 from functools import lru_cache
 
-from datasheet_rag.backend.base import RagBackend, RagServerError
+from datasheet_rag.backend.base import (
+    FigureUnavailableError,
+    RagBackend,
+    RagServerError,
+)
 from datasheet_rag.backend.local import LocalBackend
 from datasheet_rag.backend.models import (
     DocSummary,
@@ -29,6 +33,7 @@ from datasheet_rag.config import get_settings
 __all__ = [
     "DocSummary",
     "FigureBytes",
+    "FigureUnavailableError",
     "IngestResult",
     "IngestedDoc",
     "LocalBackend",

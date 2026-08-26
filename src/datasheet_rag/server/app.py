@@ -25,7 +25,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
-from datasheet_rag.backend.base import RagServerError
+from datasheet_rag.backend.base import FigureUnavailableError, RagServerError
 from datasheet_rag.backend.local import LocalBackend
 from datasheet_rag.backend.models import (
     MetadataPatch,
@@ -137,6 +137,16 @@ def build_app() -> FastAPI:
     async def _rag_err(_: Any, exc: RagServerError) -> JSONResponse:
         return JSONResponse(
             status_code=exc.status_code or 500, content={"detail": exc.detail}
+        )
+
+    @app.exception_handler(FigureUnavailableError)
+    async def _fig_unavailable(_: Any, exc: FigureUnavailableError) -> JSONResponse:
+        # 404, not 400: the request was well-formed, the image simply is not
+        # there. The `code` lets RemoteBackend re-raise the typed error so the
+        # MCP layer can answer softly instead of looking like a bug (GH #41).
+        return JSONResponse(
+            status_code=404,
+            content={"detail": str(exc), "code": "figure_unavailable"},
         )
 
     @app.exception_handler(ValueError)

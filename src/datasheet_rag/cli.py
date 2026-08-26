@@ -164,6 +164,43 @@ def _backend_for(db_path: Path | None = None):
     return get_backend()
 
 
+def _collect_figure_uploads(graph: Any) -> tuple[dict[str, tuple[bytes, str]], list[str]]:
+    """Read every croppable figure in *graph* for upload to a remote server.
+
+    Returns ``(uploads, missing)`` where ``missing`` lists the chunk ids whose
+    recorded crop could not be read here. Paths go through
+    ``resolve_figure_path`` because a stored path may be relative to
+    ``figures_dir`` — treating one as a plain filesystem path resolves it
+    against the CWD, silently loses the crop, and leaves the server holding a
+    path it cannot serve (GH #41).
+    """
+    from datasheet_rag.store import resolve_figure_path
+
+    uploads: dict[str, tuple[bytes, str]] = {}
+    missing: list[str] = []
+    for c in graph.chunks.values():
+        if not c.figure_image_path:
+            continue
+        p = resolve_figure_path(c.figure_image_path)
+        if p is not None and p.is_file():
+            uploads[c.id] = (p.read_bytes(), p.suffix.lstrip(".") or "png")
+        else:
+            missing.append(c.id)
+    return uploads, missing
+
+
+def _warn_missing_figure_crops(missing: list[str], uploaded: int) -> None:
+    """Say out loud that some figures will land in the store without an image."""
+    if not missing:
+        return
+    console.print(
+        f"  [yellow]Warning:[/] {len(missing)} figure crop(s) could not be read "
+        f"on this machine and will not be uploaded ({uploaded} will be). Those "
+        f"chunks are stored without an image — searchable, but `show_figure` "
+        f"cannot serve them. Re-run the ingest with [cyan]--force[/] to re-crop."
+    )
+
+
 def _require_local_db(db_path: Path | None) -> Path:
     """Return a concrete local sqlite path for commands that need raw index
     access (the eval harness: tunable RRF weights, variant-store builds).
@@ -1354,12 +1391,8 @@ def embed(
     # context_text can fold in any server-side descriptions.
     figures_upload: dict[str, tuple[bytes, str]] | None = None
     if backend_mode() == "remote" and db_path is None:
-        figures_upload = {}
-        for c in graph.chunks.values():
-            if c.figure_image_path:
-                p = Path(c.figure_image_path)
-                if p.is_file():
-                    figures_upload[c.id] = (p.read_bytes(), p.suffix.lstrip(".") or "png")
+        figures_upload, missing = _collect_figure_uploads(graph)
+        _warn_missing_figure_crops(missing, len(figures_upload))
 
     console.print("Embedding & writing via the backend…")
     from datasheet_rag.backend import RagServerError
@@ -1612,6 +1645,24 @@ def get_chunk_cmd(
 # ---------------------------------------------------------------------------
 
 
+def _warn_unusable_figures(unusable: list[Any], listed: bool) -> None:
+    """Point at figure chunks that exist but can never be shown."""
+    if not unusable:
+        return
+    docs = {c.doc_id for c in unusable}
+    lead = (
+        f"[yellow]{len(unusable)} figure chunk(s)[/] across {len(docs)} document(s) "
+        f"have no usable image"
+    )
+    if not listed:
+        lead += " (hidden — pass [cyan]--include-unusable[/] to see them)"
+    console.print(
+        f"{lead}. Search will not offer them. Try [cyan]rag repair "
+        f"figure-links[/] if the crops are still on disk, otherwise re-ingest "
+        f"the document without --skip-figures."
+    )
+
+
 @inspect_group.command("figures", short_help="List figure chunks in the store.")
 @click.option("--doc-id", default=None, help="Restrict to a single document.")
 @click.option("--project-id", default=None,
@@ -1621,14 +1672,22 @@ def get_chunk_cmd(
 @_db_option
 @click.option("--missing-description-only", is_flag=True,
               help="Only show figure chunks whose figure_description is empty.")
+@click.option("--include-unusable", is_flag=True,
+              help="Also list figure chunks whose image cannot be served.")
 def list_figures_cmd(
     doc_id: str | None,
     project_id: str | None,
     is_global: bool,
     db_path: Path | None,
     missing_description_only: bool,
+    include_unusable: bool,
 ) -> None:
-    """List figure chunks in the store (those with a usable image)."""
+    """List figure chunks in the store.
+
+    Shows the ones with a usable image by default. Pass --include-unusable to
+    see figure chunks whose image is missing — search will not offer those,
+    and `rag repair figure-links` may be able to reattach their crops.
+    """
     from datasheet_rag.project_config import resolve_cli_project_id
 
     project_id = resolve_cli_project_id(project_id, is_global=is_global)
@@ -1636,12 +1695,18 @@ def list_figures_cmd(
     be = _backend_for(db_path)
     if doc_id:
         doc_id = _backend_resolve(be, doc_id)
-    figs = be.list_figure_chunks(doc_id=doc_id, project_id=project_id)
+    figs = be.list_figure_chunks(
+        doc_id=doc_id, project_id=project_id, only_with_image=False
+    )
+    unusable = [c for c in figs if not c.figure_available]
+    if not include_unusable:
+        figs = [c for c in figs if c.figure_available]
     if missing_description_only:
         figs = [c for c in figs if not c.figure_description]
 
     if not figs:
         console.print("[yellow]No figure chunks match.[/]")
+        _warn_unusable_figures(unusable, include_unusable)
         return
 
     table = Table(title=f"Figure chunks ({len(figs)})")
@@ -1656,7 +1721,10 @@ def list_figures_cmd(
         pages = c.metadata.page_numbers
         page = (str(pages[0]) if len(pages) == 1
                 else f"{pages[0]}-{pages[-1]}" if pages else "")
-        src = "local" if c.figure_image_path else ("s3" if c.figure_s3_key else "—")
+        if c.figure_available:
+            src = "local" if c.figure_image_path else "s3"
+        else:
+            src = "[red]missing[/]" if c.figure_image_path else "[red]none[/]"
         table.add_row(
             _short_chunk_id(c.id, c.doc_id),
             page,
@@ -1666,6 +1734,7 @@ def list_figures_cmd(
             src,
         )
     console.print(table)
+    _warn_unusable_figures(unusable, include_unusable)
 
 
 @get_group.command("fig", short_help="Fetch a figure chunk's image.")
@@ -1795,6 +1864,198 @@ def describe_figures_cmd(
 
 
 # ---------------------------------------------------------------------------
+# repair figure-links (reattach cropped images to figure chunks)
+# ---------------------------------------------------------------------------
+
+
+def _relink_plan(conn, doc_id: str) -> tuple[list[tuple[str, Path, str]], list[str]]:
+    """Match a document's cropped figures on disk to its figure chunks.
+
+    Returns ``(plan, notes)``: ``plan`` is ``(chunk_id, image_path, caption)``
+    for each source-less figure chunk that a crop can be reattached to, and
+    ``notes`` explains every page that was left alone.
+
+    Matching is per page, in reading order: the manifest lists crops in the
+    order they were cut from the page and the chunks were inserted in the same
+    order, so an equal count on a page pairs them off unambiguously. A page
+    whose counts disagree (a crop dropped for being logo-sized, say) is
+    skipped rather than guessed at, and so is any pair whose captions are both
+    present and different.
+    """
+    import json as _json
+
+    from datasheet_rag.models.chunk import ChunkLevel, LayoutType
+    from datasheet_rag.store import resolve_figure_path
+
+    settings = get_settings()
+    orphans = conn.execute(
+        "SELECT COUNT(*) AS n FROM chunks WHERE doc_id = ? AND layout_type = ? "
+        "AND level = ? AND COALESCE(figure_image_path, '') = '' "
+        "AND COALESCE(figure_s3_key, '') = ''",
+        (doc_id, LayoutType.FIGURE.value, int(ChunkLevel.MICRO)),
+    ).fetchone()["n"]
+    if not orphans:
+        # Coarser levels inherit their image from the MICRO chunk they wrap,
+        # which the chunker now does at ingest — a re-chunk carries it up.
+        return [], []
+
+    manifest_path = settings.figures_dir / doc_id / "manifest.json"
+    if not manifest_path.is_file():
+        return [], [f"no manifest at {manifest_path} — re-ingest the PDF to re-crop"]
+
+    manifest = _json.loads(manifest_path.read_text())
+    by_page: dict[int, list[dict]] = {}
+    for fig in manifest.get("figures", []):
+        # Formulas are their own element type and never become figure chunks.
+        if "formula" in (fig.get("block_id") or ""):
+            continue
+        path = resolve_figure_path(fig.get("image_path"))
+        if path is None or not path.is_file():
+            # A manifest written on another machine: fall back to the crop
+            # sitting next to the manifest under this host's figures_dir.
+            if fig.get("image_path"):
+                local = manifest_path.parent / Path(fig["image_path"]).name
+                if local.is_file():
+                    path = local
+                else:
+                    continue
+            else:
+                continue
+        by_page.setdefault(int(fig.get("page") or 1), []).append({**fig, "_path": path})
+
+    chunks_by_page: dict[int, list[Any]] = {}
+    for row in conn.execute(
+        "SELECT * FROM chunks WHERE doc_id = ? AND layout_type = ? AND level = ? "
+        "ORDER BY rowid",
+        (doc_id, LayoutType.FIGURE.value, int(ChunkLevel.MICRO)),
+    ).fetchall():
+        pages = json.loads(row["page_numbers"] or "[]")
+        chunks_by_page.setdefault(pages[0] if pages else 1, []).append(row)
+
+    plan: list[tuple[str, Path, str]] = []
+    notes: list[str] = []
+    for page in sorted(set(by_page) | set(chunks_by_page)):
+        crops = by_page.get(page, [])
+        rows = chunks_by_page.get(page, [])
+        # Only pages that actually need repair are worth reporting on.
+        if not any(not (r["figure_image_path"] or r["figure_s3_key"]) for r in rows):
+            continue
+        if len(crops) != len(rows):
+            notes.append(
+                f"page {page}: {len(crops)} crop(s) vs {len(rows)} figure chunk(s) "
+                f"— skipped, cannot pair them unambiguously"
+            )
+            continue
+        for crop, row in zip(crops, rows):
+            caption = (crop.get("caption") or "").strip()
+            stored_caption = (row["figure_caption"] or "").strip()
+            if caption and stored_caption and caption != stored_caption:
+                notes.append(
+                    f"page {page}: caption mismatch ({stored_caption[:30]!r} vs "
+                    f"{caption[:30]!r}) — skipped"
+                )
+                continue
+            if row["figure_image_path"] or row["figure_s3_key"]:
+                continue  # already has a source; leave it alone
+            plan.append((row["id"], crop["_path"], caption))
+    return plan, notes
+
+
+@repair_group.command("figure-links", short_help="Reattach cropped images to figure chunks.")
+@click.option("--doc-id", default=None, help="Restrict to a single document.")
+@click.option("--apply", "do_apply", is_flag=True,
+              help="Write the links (default: report what would change).")
+@_db_option
+def relink_figures_cmd(doc_id: str | None, do_apply: bool, db_path: Path | None) -> None:
+    """Reattach cropped figure images to figure chunks that lost their link.
+
+    A document ingested with `--skip-figures`, or restored from a backup
+    written before figure links existed, leaves chunks that search can find
+    and `show_figure` cannot serve. When the crops are still on disk under
+    `figures_dir/<doc_id>/` with their manifest, this pairs them back up per
+    page in reading order and writes the link.
+
+    Runs against a local store only — it reads the figures directory and
+    writes chunk rows directly. On a server deployment, run it there (or
+    against the mounted database file with --db).
+
+    \b
+        rag repair figure-links                 # report across every document
+        rag repair figure-links --doc-id ab12 --apply
+
+    Documents with no crops on disk cannot be repaired this way — re-ingest
+    the PDF (without --skip-figures) instead.
+    """
+    from datasheet_rag.models.chunk import LayoutType
+    from datasheet_rag.store import connect, set_figure_source
+
+    path = _require_local_db(db_path)
+    conn = connect(path)
+
+    if doc_id:
+        doc_id = _resolve_doc_id(conn, doc_id)
+        doc_ids = [doc_id]
+    else:
+        doc_ids = [
+            r["doc_id"]
+            for r in conn.execute(
+                "SELECT DISTINCT doc_id FROM chunks WHERE layout_type = ? "
+                "AND COALESCE(figure_image_path, '') = '' "
+                "AND COALESCE(figure_s3_key, '') = '' ORDER BY doc_id",
+                (LayoutType.FIGURE.value,),
+            ).fetchall()
+        ]
+
+    if not doc_ids:
+        console.print("[green]Every figure chunk already has an image source.[/]")
+        return
+
+    total_linked = 0
+    quiet = 0
+    for did in doc_ids:
+        plan, notes = _relink_plan(conn, did)
+        head = f"[cyan]{did[:SHORT_DOC_ID_LEN]}[/]"
+        if not plan and not notes:
+            quiet += 1
+            continue
+        console.print(f"{head}: {len(plan)} figure chunk(s) can be relinked")
+        for note in notes:
+            console.print(f"  [yellow]{note}[/]")
+        if not do_apply:
+            for chunk_id, image_path, caption in plan[:5]:
+                console.print(
+                    f"  [dim]{_short_chunk_id(chunk_id, did)} → {image_path.name}"
+                    + (f" ({caption[:40]})" if caption else "")
+                    + "[/]"
+                )
+            if len(plan) > 5:
+                console.print(f"  [dim]… and {len(plan) - 5} more[/]")
+            continue
+        for chunk_id, image_path, caption in plan:
+            if set_figure_source(conn, chunk_id, image_path=image_path, caption=caption):
+                total_linked += 1
+        conn.commit()
+
+    if quiet:
+        console.print(
+            f"[dim]{quiet} document(s) only lack images on coarser (MESO) "
+            f"figure chunks — re-chunk and re-embed them to carry each "
+            f"figure's image up a level.[/]"
+        )
+
+    if do_apply:
+        console.print(f"[green]Relinked[/] {total_linked} figure chunk(s).")
+        if total_linked:
+            console.print(
+                "  Run [cyan]rag repair figures[/] to describe the newly "
+                "visible images, then [cyan]rag repair embeddings[/] to fold "
+                "those descriptions into search."
+            )
+    else:
+        console.print("[yellow]Dry run — pass --apply to write the links.[/]")
+
+
+# ---------------------------------------------------------------------------
 # Ingest (full pipeline: parse → figures → chunk → embed)
 # ---------------------------------------------------------------------------
 
@@ -1836,7 +2097,10 @@ def _print_cost_table(cost: CostEstimate, heading: str = "Estimated AWS cost") -
                    "`rag metadata <doc-id> --tag ...`; for arbitrary "
                    "key=value tagging use `rag metadata <doc-id> --attr key=value` "
                    "instead.")
-@click.option("--skip-figures", is_flag=True, help="Skip figure extraction and description steps.")
+@click.option("--skip-figures", is_flag=True,
+              help="Skip figure extraction and description. Figures still "
+                   "become (caption-only) chunks that `show_figure` cannot "
+                   "serve — see `rag repair figure-links`.")
 @click.option("--upload-figures/--no-upload-figures", default=False,
               help="Also upload extracted figures to S3. Figures live locally "
                    "under ~/.rag/figures/, which is what MCP reads from; "
@@ -2243,12 +2507,8 @@ def _ingest_one(
     # figure_image_path before inserting.
     figures_upload: dict[str, tuple[bytes, str]] | None = None
     if not skip_figures and backend_mode() == "remote" and db_path is None:
-        figures_upload = {}
-        for c in graph.chunks.values():
-            if c.figure_image_path:
-                p = Path(c.figure_image_path)
-                if p.is_file():
-                    figures_upload[c.id] = (p.read_bytes(), p.suffix.lstrip(".") or "png")
+        figures_upload, missing = _collect_figure_uploads(graph)
+        _warn_missing_figure_crops(missing, len(figures_upload))
 
     meta_patch = MetadataPatch(
         mpn=mpn or None,

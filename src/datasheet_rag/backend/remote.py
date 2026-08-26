@@ -11,7 +11,13 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from datasheet_rag.backend.base import FigureUploads, RagBackend, RagServerError, SearchMode
+from datasheet_rag.backend.base import (
+    FigureUnavailableError,
+    FigureUploads,
+    RagBackend,
+    RagServerError,
+    SearchMode,
+)
 from datasheet_rag.backend.models import (
     DocSummary,
     FigureBytes,
@@ -56,10 +62,17 @@ class RemoteBackend(RagBackend):
             raise RagServerError(0, str(exc)) from exc
         if resp.status_code >= 400:
             detail = resp.text
+            code = ""
             try:
-                detail = resp.json().get("detail", detail)
+                body = resp.json()
+                detail = body.get("detail", detail)
+                code = body.get("code", "")
             except Exception:
                 pass
+            # Preserve the server's typed "there is no image" answer instead
+            # of flattening it into a generic transport error (GH #41).
+            if code == "figure_unavailable":
+                raise FigureUnavailableError(detail)
             raise RagServerError(resp.status_code, detail)
         return resp
 

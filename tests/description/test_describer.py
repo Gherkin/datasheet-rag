@@ -334,12 +334,16 @@ def test_describe_figures_in_store_writes_and_skips_missing_only(
 ) -> None:
     img = tmp_path / "fig.png"
     img.write_bytes(b"\x89PNGFAKE")
+    other = tmp_path / "fig2.png"
+    other.write_bytes(b"\x89PNGFAKE2")
 
     already_described = _figure_chunk(
         "c-done", image_path=str(img),
         description="existing description — do not overwrite",
     )
-    pending = _figure_chunk("c-todo", image_path=str(img))
+    # A different image: chunks that share one are deliberately described
+    # once and copied (see the dedupe test below).
+    pending = _figure_chunk("c-todo", image_path=str(other))
     insert_chunks(conn, [already_described, pending])
 
     client = MagicMock()
@@ -389,9 +393,13 @@ def test_describe_figures_in_store_dry_run_does_not_persist(
 def test_describe_figures_in_store_limit_truncates(
     conn: Any, tmp_path: Any
 ) -> None:
-    img = tmp_path / "fig.png"
-    img.write_bytes(b"\x89PNGFAKE")
-    chunks = [_figure_chunk(f"c-{i}", image_path=str(img)) for i in range(5)]
+    # One file per figure: chunks sharing an image are described once, so a
+    # limit only bites when the images are genuinely distinct.
+    chunks = []
+    for i in range(5):
+        img = tmp_path / f"fig{i}.png"
+        img.write_bytes(b"\x89PNGFAKE" + str(i).encode())
+        chunks.append(_figure_chunk(f"c-{i}", image_path=str(img)))
     insert_chunks(conn, chunks)
 
     client = MagicMock()
@@ -399,3 +407,56 @@ def test_describe_figures_in_store_limit_truncates(
     describer = FigureDescriber(client=client, max_concurrency=1)
     out = describe_figures_in_store(conn, limit=2, describer=describer)
     assert len(out) == 2
+
+
+def test_describe_figures_in_store_describes_shared_image_once(
+    conn: Any, tmp_path: Any
+) -> None:
+    """A MESO wrapping a single figure carries its MICRO's image (GH #41).
+
+    Both rows must end up described, but the vision model is only worth
+    paying once for identical pixels.
+    """
+    img = tmp_path / "fig.png"
+    img.write_bytes(b"\x89PNGFAKE")
+    micro = _figure_chunk("c-micro", image_path=str(img))
+    meso = _figure_chunk("c-meso", image_path=str(img))
+    meso.level = ChunkLevel.MESO
+    insert_chunks(conn, [micro, meso])
+
+    client = MagicMock()
+    client.invoke_model.return_value = _mock_bedrock_response("shared description")
+    describer = FigureDescriber(client=client, max_concurrency=1)
+
+    out = describe_figures_in_store(conn, describer=describer)
+
+    assert out == {"c-micro": "shared description", "c-meso": "shared description"}
+    assert client.invoke_model.call_count == 1
+
+    from datasheet_rag.store import get_chunk
+
+    for cid in ("c-micro", "c-meso"):
+        stored = get_chunk(conn, cid)
+        assert stored is not None
+        assert stored.figure_description == "shared description"
+
+
+def test_describe_figures_in_store_all_regenerates_a_shared_description(
+    conn: Any, tmp_path: Any
+) -> None:
+    """`--all` asks for a fresh description, not a copy of the stale one."""
+    img = tmp_path / "fig.png"
+    img.write_bytes(b"\x89PNGFAKE")
+    micro = _figure_chunk("c-micro", image_path=str(img), description="stale")
+    meso = _figure_chunk("c-meso", image_path=str(img), description="stale")
+    meso.level = ChunkLevel.MESO
+    insert_chunks(conn, [micro, meso])
+
+    client = MagicMock()
+    client.invoke_model.return_value = _mock_bedrock_response("regenerated")
+    describer = FigureDescriber(client=client, max_concurrency=1)
+
+    out = describe_figures_in_store(conn, missing_only=False, describer=describer)
+
+    assert out == {"c-micro": "regenerated", "c-meso": "regenerated"}
+    assert client.invoke_model.call_count == 1
