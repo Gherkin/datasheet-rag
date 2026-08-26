@@ -395,7 +395,8 @@ def _detect_garbled_header(cells: list[dict[str, Any]]) -> str | None:
     ]
     for text, count in Counter(header_texts).most_common(1):
         if count >= _GARBLED_HEADER_MIN_REPEATS:
-            return text
+            repeated: str = text
+            return repeated
     return None
 
 
@@ -474,7 +475,8 @@ def _table_header_row_count(cells: list[dict[str, Any]]) -> int:
     header_origin = [c for c in cells if c.get("is_origin", True) and c.get("is_header")]
     if not header_origin:
         return 0
-    return max(c["row"] for c in header_origin)
+    last_header_row: int = max(c["row"] for c in header_origin)
+    return last_header_row
 
 
 # Header-band repair trusts the data grid's column count as ground truth for

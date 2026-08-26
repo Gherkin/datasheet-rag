@@ -511,7 +511,8 @@ def _find_child_layout_ids(layout_blocks: list[dict[str, Any]]) -> set[str]:
 def _collect_text(block: dict[str, Any], id_map: dict[str, dict[str, Any]]) -> str:
     """Recursively collect text from a block and its children."""
     if "Text" in block:
-        return block["Text"]
+        text: str = block["Text"]
+        return text
 
     child_ids = [rel["Ids"] for rel in block.get("Relationships", []) if rel["Type"] == "CHILD"]
     flat_ids = [cid for ids in child_ids for cid in ids]

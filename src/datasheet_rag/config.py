@@ -476,6 +476,23 @@ class Settings(BaseSettings):
             return None
         return v
 
+    def require_s3_bucket(self) -> str:
+        """Return ``s3_bucket``, or explain that it has to be configured.
+
+        S3 is opt-in (see the field description), so every code path that
+        actually reaches S3 has to establish that a bucket exists. Doing it
+        here gives one actionable message instead of boto3's
+        ``ParamValidationError: Invalid type for parameter Bucket``.
+        """
+        if not self.s3_bucket:
+            raise RuntimeError(
+                "This operation needs S3, but no bucket is configured — set "
+                "RAG_S3_BUCKET. S3 is only required for the Textract backend "
+                "and for explicit --upload flags; the default local workflow "
+                "(Docling, local storage) never touches it."
+            )
+        return self.s3_bucket
+
     def effective_read_token(self) -> str | None:
         """Resolve the shared read token: file mount > read_token > legacy token."""
         if self.server_token_file is not None:
@@ -519,4 +536,4 @@ class Settings(BaseSettings):
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     """Return cached settings singleton."""
-    return Settings()  # type: ignore[call-arg]
+    return Settings()

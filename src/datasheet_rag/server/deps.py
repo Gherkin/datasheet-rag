@@ -33,7 +33,7 @@ def get_backend() -> LocalBackend:
     return LocalBackend()
 
 
-def require_scope(scope: Scope) -> Callable:
+def require_scope(scope: Scope) -> Callable[..., KeyContext]:
     """FastAPI dependency factory enforcing that the caller holds ``scope``.
 
     Stores the resolved :class:`KeyContext` on ``request.state.key`` for the
@@ -55,16 +55,16 @@ def require_scope(scope: Scope) -> Callable:
             request.state.key = ctx
             return ctx
 
-        ctx = resolve_context(conn, settings, token)
-        if ctx is None:
+        resolved = resolve_context(conn, settings, token)
+        if resolved is None:
             raise HTTPException(status_code=401, detail="missing or invalid credentials")
-        if not ctx.allows(scope):
+        if not resolved.allows(scope):
             raise HTTPException(
                 status_code=403,
                 detail=f"this credential lacks the '{scope.name.lower()}' scope",
             )
-        request.state.key = ctx
-        return ctx
+        request.state.key = resolved
+        return resolved
 
     return dep
 

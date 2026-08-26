@@ -84,7 +84,7 @@ def _is_transient_model_error(exc: BaseException) -> bool:
     resp = getattr(exc, "response", None)
     if not isinstance(resp, dict):
         return False
-    return resp.get("Error", {}).get("Code") == "ModelErrorException"
+    return bool(resp.get("Error", {}).get("Code") == "ModelErrorException")
 
 
 class _TransientOllamaError(RuntimeError):
@@ -123,13 +123,11 @@ def _bedrock_runtime_client(
         ) from exc
 
     settings = get_settings()
-    session_kwargs: dict[str, str] = {
-        "region_name": region or settings.aws_region,
-    }
     effective_profile = profile if profile is not None else settings.aws_profile
-    if effective_profile:
-        session_kwargs["profile_name"] = effective_profile
-    session = boto3.Session(**session_kwargs)
+    session = boto3.Session(
+        region_name=region or settings.aws_region,
+        profile_name=effective_profile or None,
+    )
 
     # Adaptive retries handle ThrottlingException with token-bucket
     # backoff. 60s timeouts are generous for what is normally a sub-second
@@ -139,7 +137,7 @@ def _bedrock_runtime_client(
         read_timeout=60,
         retries={"max_attempts": 5, "mode": "adaptive"},
     )
-    return session.client("bedrock-runtime", config=config)  # type: ignore[return-value]
+    return session.client("bedrock-runtime", config=config)
 
 
 # ---------------------------------------------------------------------------

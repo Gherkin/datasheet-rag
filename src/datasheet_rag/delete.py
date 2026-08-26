@@ -11,8 +11,12 @@ and for the FastAPI server (which also wraps a ``LocalBackend``).
 from __future__ import annotations
 
 import shutil
+from typing import TYPE_CHECKING
 
 from datasheet_rag.config import get_settings
+
+if TYPE_CHECKING:
+    from mypy_boto3_s3.type_defs import ObjectIdentifierTypeDef
 
 
 def purge_local_files(doc_id: str) -> list[str]:
@@ -66,7 +70,9 @@ def purge_s3_objects(doc_id: str) -> int:
     for prefix in (f"{settings.s3_pdf_prefix}{doc_id}/", f"figures/{doc_id}/"):
         paginator = client.get_paginator("list_objects_v2")
         for page in paginator.paginate(Bucket=settings.s3_bucket, Prefix=prefix):
-            keys = [{"Key": obj["Key"]} for obj in page.get("Contents", [])]
+            keys: list[ObjectIdentifierTypeDef] = [
+                {"Key": obj["Key"]} for obj in page.get("Contents", [])
+            ]
             if not keys:
                 continue
             client.delete_objects(Bucket=settings.s3_bucket, Delete={"Objects": keys})

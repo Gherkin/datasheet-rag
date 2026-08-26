@@ -329,7 +329,7 @@ class AbstractiveSummarizer:
         latency_ms = (time.perf_counter() - t0) * 1000.0
 
         result = json.loads(response["body"].read())
-        text = result["content"][0]["text"].strip()
+        text: str = result["content"][0]["text"].strip()
 
         self.stats.calls += 1
         self.stats.total_latency_ms += latency_ms

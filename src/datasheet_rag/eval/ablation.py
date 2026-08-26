@@ -240,7 +240,8 @@ def _fetch_vector(conn: sqlite3.Connection, chunk_id: str) -> list[float] | None
     ).fetchone()
     if row is None or row["embedding"] is None:
         return None
-    return np.frombuffer(row["embedding"], dtype=np.float32).tolist()
+    vec: list[float] = np.frombuffer(row["embedding"], dtype=np.float32).tolist()
+    return vec
 
 
 def build_macro_summarizer_variant_store(

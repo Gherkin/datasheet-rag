@@ -67,7 +67,8 @@ def pdf_page_count(pdf_path: Path) -> int:
     import fitz  # pymupdf
 
     with fitz.open(str(pdf_path)) as doc:
-        return doc.page_count
+        pages: int = doc.page_count
+    return pages
 
 
 def estimate_textract_cost(page_count: int) -> CostLineItem:

@@ -9,7 +9,7 @@ this client never loads an embedding model.
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from datasheet_rag.backend.base import (
     FigureUnavailableError,
@@ -28,6 +28,14 @@ from datasheet_rag.backend.models import (
     StatsResult,
 )
 from datasheet_rag.models.chunk import Chunk, ChunkGraph
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+    from pathlib import Path
+
+    import httpx
+
+    from datasheet_rag.ingest_pipeline import ProgressCallback
 from datasheet_rag.store import DocMetadata, SearchFilters, SearchResult
 
 _EXCLUDE_VECS = {"content_embedding", "context_embedding"}
@@ -52,7 +60,7 @@ class RemoteBackend(RagBackend):
         self._client.close()
 
     # -- helpers -------------------------------------------------------
-    def _request(self, method: str, path: str, **kw: Any) -> Any:
+    def _request(self, method: str, path: str, **kw: Any) -> httpx.Response:
         import httpx
 
         try:
@@ -135,14 +143,16 @@ class RemoteBackend(RagBackend):
         return [IngestedDoc.model_validate(d) for d in data["documents"]]
 
     def get_doc_titles(self) -> dict[str, str]:
-        return self._json("GET", "/documents/titles")["titles"]
+        titles: dict[str, str] = self._json("GET", "/documents/titles")["titles"]
+        return titles
 
     def set_doc_title(self, doc_id: str, title: str) -> int:
         data = self._json("PUT", f"/documents/{doc_id}/title", json={"title": title})
         return int(data["updated"])
 
     def resolve_doc_id(self, doc_id: str) -> str:
-        return self._json("GET", f"/documents/resolve/{doc_id}")["doc_id"]
+        resolved: str = self._json("GET", f"/documents/resolve/{doc_id}")["doc_id"]
+        return resolved
 
     # -- metadata ------------------------------------------------------
     def get_metadata(self, doc_id: str) -> DocMetadata | None:
@@ -247,7 +257,8 @@ class RemoteBackend(RagBackend):
             f"/documents/{doc_id}/infer-title",
             json={"model_id": model_id, "dry_run": dry_run, "force": force},
         )
-        return data["title"]
+        title: str | None = data["title"]
+        return title
 
     # -- source PDF ----------------------------------------------------
     def get_pdf_bytes(self, doc_id: str) -> bytes:
@@ -288,23 +299,23 @@ class RemoteBackend(RagBackend):
 
     def ingest_pdf(
         self,
-        pdf_path,
+        pdf_path: Path,
         *,
-        doc_id=None,
-        project_id=None,
-        group_name=None,
-        metadata=None,
-        backend="docling",
-        skip_figures=False,
-        upload_figures=False,
-        skip_describe=False,
-        infer_title=False,
-        dpi=300,
-        micro_tokens=128,
-        meso_tokens=512,
-        accurate_tables=None,
-        force=False,
-        progress=None,
+        doc_id: str | None = None,
+        project_id: str | None = None,
+        group_name: str | None = None,
+        metadata: MetadataPatch | None = None,
+        backend: str = "docling",
+        skip_figures: bool = False,
+        upload_figures: bool = False,
+        skip_describe: bool = False,
+        infer_title: bool = False,
+        dpi: int = 300,
+        micro_tokens: int = 128,
+        meso_tokens: int = 512,
+        accurate_tables: bool | None = None,
+        force: bool = False,
+        progress: ProgressCallback | None = None,
     ) -> IngestResult:
         # Stream the raw PDF up; the server runs parse → figures → chunk →
         # embed → store and pushes progress back as Server-Sent Events. We
@@ -371,7 +382,7 @@ class RemoteBackend(RagBackend):
         return int(self._json("DELETE", f"/documents/{doc_id}")["deleted"])
 
 
-def _iter_sse(lines: Any):
+def _iter_sse(lines: Any) -> Iterator[tuple[str, dict[str, Any]]]:
     """Yield ``(event, data)`` pairs from an SSE line stream.
 
     Minimal parser for the subset the server emits: one ``event:`` and one

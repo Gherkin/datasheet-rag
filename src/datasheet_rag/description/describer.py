@@ -56,7 +56,7 @@ def _is_transient_model_error(exc: BaseException) -> bool:
     resp = getattr(exc, "response", None)
     if not isinstance(resp, dict):
         return False
-    return resp.get("Error", {}).get("Code") == "ModelErrorException"
+    return bool(resp.get("Error", {}).get("Code") == "ModelErrorException")
 
 
 # ---------------------------------------------------------------------------
@@ -139,7 +139,7 @@ def _load_figure_bytes(chunk: Chunk) -> tuple[bytes, str]:
 
     if chunk.figure_s3_key:
         settings = get_settings()
-        resp = s3_client().get_object(Bucket=settings.s3_bucket, Key=chunk.figure_s3_key)
+        resp = s3_client().get_object(Bucket=settings.require_s3_bucket(), Key=chunk.figure_s3_key)
         data = resp["Body"].read()
         fmt = Path(chunk.figure_s3_key).suffix.lstrip(".").lower() or "png"
         return data, fmt

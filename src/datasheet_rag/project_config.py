@@ -107,7 +107,7 @@ def merge_project_configs(configs: Sequence[ProjectConfig]) -> ProjectConfig | N
 
     def _first(field: str) -> str | None:
         for cfg in configs:
-            value = getattr(cfg, field)
+            value: str | None = getattr(cfg, field)
             if value:
                 return value
         return None

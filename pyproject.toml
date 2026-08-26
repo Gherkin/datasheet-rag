@@ -115,6 +115,16 @@ module = [
 ]
 ignore_missing_imports = true
 
+# docling and docling-core re-export these names from their package modules
+# without an __all__, which strict mode reads as "not part of the public API".
+# The names are what their own docs tell you to import.
+[[tool.mypy.overrides]]
+module = [
+    "docling.*",
+    "docling_core.*",
+]
+implicit_reexport = true
+
 [tool.pytest.ini_options]
 # Scope collection to tests/ — a bare `pytest` otherwise walks the repo root
 # and chokes on root-owned dirs like certs/.

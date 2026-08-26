@@ -663,7 +663,7 @@ def resolve_doc_id(conn: sqlite3.Connection, doc_id: str) -> str:
         "SELECT DISTINCT doc_id FROM chunks WHERE doc_id LIKE ? || '%'",
         (doc_id,),
     ).fetchall()
-    matches = [row["doc_id"] for row in rows]
+    matches: list[str] = [row["doc_id"] for row in rows]
 
     if len(matches) == 1:
         return matches[0]

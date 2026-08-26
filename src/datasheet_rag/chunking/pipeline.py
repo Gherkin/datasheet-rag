@@ -105,7 +105,7 @@ def save_chunk_graph(graph: ChunkGraph, path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
 
     # Serialize without embeddings (they'd make the file huge)
-    data = {
+    data: dict[str, Any] = {
         "doc_id": graph.doc_id,
         "stats": graph.stats(),
         "chunks": {},

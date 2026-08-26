@@ -67,6 +67,22 @@ from datasheet_rag.models.chunk import ChunkLevel, LayoutType
 from datasheet_rag.store import DocMetadata, SearchFilters, SearchResult
 
 # ---------------------------------------------------------------------------
+# Return annotations on the content-block tools
+# ---------------------------------------------------------------------------
+# get_figure, show_figure, show_pdf, show_page and show_hello all return
+# ``list[ImageContent | TextContent]`` and are deliberately left unannotated.
+#
+# FastMCP reads the return annotation to decide whether a tool has structured
+# output: annotate one of these and it starts publishing an outputSchema and
+# returning ``structuredContent`` beside the content blocks. Hosts render these
+# blocks directly — the MCP App path especially — so their advertised shape is
+# protocol, not a typing detail. Saying `structured_output=False` alongside the
+# annotation would express the same thing, but that argument is much newer than
+# the ``mcp>=1.2.0`` floor this package declares.
+#
+# Hence the `type: ignore[no-untyped-def]` on each of the five.
+
+# ---------------------------------------------------------------------------
 # Backend access — local sqlite or remote HTTP, chosen from config.
 # ---------------------------------------------------------------------------
 
@@ -457,7 +473,7 @@ def _compress_for_mcp(image_bytes: bytes, fmt: str) -> tuple[bytes, str]:
 
     from PIL import Image
 
-    img = Image.open(io.BytesIO(image_bytes))
+    img: Image.Image = Image.open(io.BytesIO(image_bytes))
     if img.mode in ("RGBA", "LA", "P"):
         bg = Image.new("RGB", img.size, (255, 255, 255))
         bg.paste(img, mask=img.split()[-1] if img.mode in ("RGBA", "LA") else None)
@@ -758,7 +774,7 @@ def build_server(
         return _stats_impl(project_id=project_id, doc_id=doc_id, backend=backend)
 
     @mcp.tool()
-    def get_figure(chunk_id: str):
+    def get_figure(chunk_id: str):  # type: ignore[no-untyped-def]
         """Fetch raw figure bytes for further reasoning (fallback for non-Desktop hosts).
 
         Prefer ``show_figure`` in Claude Desktop — it renders the image inline
@@ -802,7 +818,8 @@ def build_server(
         in-tool-result rendering path.
         """
         result = _get_figure_impl(chunk_id, backend=backend)
-        return result["image_bytes"]
+        image_bytes: bytes = result["image_bytes"]
+        return image_bytes
 
     # ------------------------------------------------------------------
     # MCP Apps experiment — Goose-style inline UI for figures.
@@ -816,7 +833,7 @@ def build_server(
     # tutorial showed _meta on the call result, but Claude Desktop ignores
     # that placement entirely.
     @mcp.tool(meta={"ui": {"resourceUri": "ui://datasheet-rag/figure-app"}})
-    def show_figure(chunk_id: str):
+    def show_figure(chunk_id: str):  # type: ignore[no-untyped-def]
         """Display a figure as an inline rendered image widget (preferred in Claude Desktop).
 
         Calling this is MANDATORY when the figure is clearly relevant to the
@@ -971,7 +988,7 @@ def build_server(
     if local_client:
 
         @mcp.tool()
-        def show_pdf(doc_id: str, page: int = 1):
+        def show_pdf(doc_id: str, page: int = 1):  # type: ignore[no-untyped-def]
             """Open the source PDF in a browser-based interactive viewer.
 
             Starts a local HTTP server (if not already running) and returns a
@@ -1013,7 +1030,7 @@ def build_server(
             ]
 
     @mcp.tool(meta={"ui": {"resourceUri": "ui://datasheet-rag/figure-app"}})
-    def show_page(doc_id: str, page: int = 1):
+    def show_page(doc_id: str, page: int = 1):  # type: ignore[no-untyped-def]
         """Render a single PDF page as an inline image widget in Claude Desktop.
 
         Converts the page to PNG server-side (via poppler/pdf2image) and
@@ -1068,7 +1085,7 @@ def build_server(
     # ------------------------------------------------------------------
 
     @mcp.tool(meta={"ui": {"resourceUri": "ui://datasheet-rag/hello"}})
-    def show_hello():
+    def show_hello():  # type: ignore[no-untyped-def]
         """Diagnostic: render a trivial 'Hello' MCP App with no images or DB access.
 
         ``_meta.ui.resourceUri`` is on the tool definition (the placement
@@ -1159,7 +1176,7 @@ def main() -> None:
     # Honor RAG_DEFAULT_PROJECT_ID set in the .mcp.json env block.
     if "RAG_DEFAULT_PROJECT_ID" in os.environ:
         # Bust the settings cache so the env var is picked up.
-        get_settings.cache_clear()  # type: ignore[attr-defined]
+        get_settings.cache_clear()
 
     server = build_server()
     settings = get_settings()

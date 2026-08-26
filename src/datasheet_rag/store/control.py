@@ -16,6 +16,7 @@ import secrets
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any
 
 
 def hash_token(token: str) -> str:
@@ -107,7 +108,7 @@ def record_audit(
     client_ip: str | None = None,
     doc_id: str | None = None,
     project_id: str | None = None,
-    detail: dict | None = None,
+    detail: dict[str, Any] | None = None,
     error: str | None = None,
 ) -> None:
     """Append one row to the audit log."""
@@ -139,9 +140,10 @@ def list_audit(
     doc_id: str | None = None,
     since: str | None = None,
     limit: int = 200,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     sql = "SELECT * FROM audit_log"
-    clauses, params = [], []
+    clauses: list[str] = []
+    params: list[str | int] = []
     if doc_id:
         clauses.append("doc_id = ?")
         params.append(doc_id)

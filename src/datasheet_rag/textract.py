@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
@@ -33,9 +33,12 @@ def analyze_document_sync(pdf_path: Path) -> dict[str, Any]:
         doc_bytes = f.read()
 
     console.print(f"[blue]Analyzing (sync)[/] {pdf_path.name} …")
-    response: dict[str, Any] = client.analyze_document(
-        Document={"Bytes": doc_bytes},
-        FeatureTypes=settings.textract_features,  # type: ignore[arg-type]
+    response = cast(
+        "dict[str, Any]",
+        client.analyze_document(
+            Document={"Bytes": doc_bytes},
+            FeatureTypes=settings.textract_features,  # type: ignore[arg-type]
+        ),
     )
     console.print(f"[green]Done[/] — {len(response.get('Blocks', []))} blocks extracted")
     return response
@@ -123,7 +126,7 @@ def get_job_results(job_id: str) -> list[dict[str, Any]]:
             kwargs["NextToken"] = next_token
 
         resp = client.get_document_analysis(**kwargs)
-        blocks.extend(resp.get("Blocks", []))
+        blocks.extend(cast("list[dict[str, Any]]", resp.get("Blocks", [])))
         next_token = resp.get("NextToken")
 
         if not next_token:
@@ -145,7 +148,8 @@ def save_blocks(blocks: list[dict[str, Any]], dest: Path) -> Path:
 def load_blocks(path: Path) -> list[dict[str, Any]]:
     """Load Textract blocks from a local JSON file saved by :func:`save_blocks`."""
     with open(path) as f:
-        return json.load(f)
+        blocks: list[dict[str, Any]] = json.load(f)
+    return blocks
 
 
 # ---------------------------------------------------------------------------
@@ -210,7 +214,8 @@ def extract_layout_elements(blocks: list[dict[str, Any]]) -> dict[str, list[dict
 def _collect_text(block: dict[str, Any], id_map: dict[str, dict[str, Any]]) -> str:
     """Recursively collect text from a block and its children."""
     if "Text" in block:
-        return block["Text"]
+        text: str = block["Text"]
+        return text
 
     child_ids = [rel["Ids"] for rel in block.get("Relationships", []) if rel["Type"] == "CHILD"]
     flat_ids = [cid for ids in child_ids for cid in ids]

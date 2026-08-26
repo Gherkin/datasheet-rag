@@ -59,7 +59,7 @@ def _is_transient_model_error(exc: BaseException) -> bool:
     resp = getattr(exc, "response", None)
     if not isinstance(resp, dict):
         return False
-    return resp.get("Error", {}).get("Code") == "ModelErrorException"
+    return bool(resp.get("Error", {}).get("Code") == "ModelErrorException")
 
 
 # ---------------------------------------------------------------------------
@@ -232,13 +232,13 @@ def validate_header_grid(
 
     # Anti-fusion: proposed header text recreating a leaked data row
     data_texts_by_col: dict[int, set[str]] = {}
-    for c in data_cells:
-        if not c.get("is_origin", True):
+    for cell in data_cells:
+        if not cell.get("is_origin", True):
             continue
-        text = c["text"].strip().casefold()
+        text = cell["text"].strip().casefold()
         if len(text) < _FUSED_HEADER_MIN_CHARS:
             continue
-        for col in range(c["col"], c["col"] + c["col_span"]):
+        for col in range(cell["col"], cell["col"] + cell["col_span"]):
             data_texts_by_col.setdefault(col, set()).add(text)
 
     for row in range(1, header_rows + 1):

@@ -13,7 +13,7 @@ import logging
 import sqlite3
 from pathlib import Path
 from threading import Lock
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from datasheet_rag.backend.base import (
     FigureUnavailableError,
@@ -60,6 +60,9 @@ from datasheet_rag.store import (
     update_figure_description,
     vector_search,
 )
+
+if TYPE_CHECKING:
+    from datasheet_rag.ingest_pipeline import ProgressCallback
 
 logger = logging.getLogger("datasheet_rag.backend")
 
@@ -345,7 +348,7 @@ class LocalBackend(RagBackend):
 
             settings = get_settings()
             client = s3_client()
-            resp = client.get_object(Bucket=settings.s3_bucket, Key=chunk.figure_s3_key)
+            resp = client.get_object(Bucket=settings.require_s3_bucket(), Key=chunk.figure_s3_key)
             data = resp["Body"].read()
             ext = Path(chunk.figure_s3_key).suffix.lstrip(".").lower() or "png"
             return data, ext, None
@@ -602,23 +605,23 @@ class LocalBackend(RagBackend):
 
     def ingest_pdf(
         self,
-        pdf_path,
+        pdf_path: Path,
         *,
-        doc_id=None,
-        project_id=None,
-        group_name=None,
-        metadata=None,
-        backend="docling",
-        skip_figures=False,
-        upload_figures=False,
-        skip_describe=False,
-        infer_title=False,
-        dpi=300,
-        micro_tokens=128,
-        meso_tokens=512,
-        accurate_tables=None,
-        force=False,
-        progress=None,
+        doc_id: str | None = None,
+        project_id: str | None = None,
+        group_name: str | None = None,
+        metadata: MetadataPatch | None = None,
+        backend: str = "docling",
+        skip_figures: bool = False,
+        upload_figures: bool = False,
+        skip_describe: bool = False,
+        infer_title: bool = False,
+        dpi: int = 300,
+        micro_tokens: int = 128,
+        meso_tokens: int = 512,
+        accurate_tables: bool | None = None,
+        force: bool = False,
+        progress: ProgressCallback | None = None,
     ) -> IngestResult:
         # Local: run the parse pipeline in-process, then embed + store. The
         # figures are already cropped to disk under figures_dir and the graph

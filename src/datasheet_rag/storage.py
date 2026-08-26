@@ -4,15 +4,11 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from rich.console import Console
 
 from datasheet_rag.aws import s3_client
 from datasheet_rag.config import get_settings
-
-if TYPE_CHECKING:
-    pass
 
 console = Console()
 
@@ -33,6 +29,7 @@ def upload_pdf(pdf_path: Path, *, doc_id: str | None = None) -> tuple[str, str]:
     is never uploaded twice.
     """
     settings = get_settings()
+    bucket = settings.require_s3_bucket()
     client = s3_client()
 
     if not pdf_path.is_file():
@@ -45,16 +42,16 @@ def upload_pdf(pdf_path: Path, *, doc_id: str | None = None) -> tuple[str, str]:
 
     # Check if already uploaded
     try:
-        client.head_object(Bucket=settings.s3_bucket, Key=s3_key)
-        console.print(f"[yellow]Already exists:[/] s3://{settings.s3_bucket}/{s3_key}")
+        client.head_object(Bucket=bucket, Key=s3_key)
+        console.print(f"[yellow]Already exists:[/] s3://{bucket}/{s3_key}")
         return doc_id, s3_key
     except client.exceptions.ClientError:
         pass
 
-    console.print(f"[blue]Uploading[/] {pdf_path.name} → s3://{settings.s3_bucket}/{s3_key}")
+    console.print(f"[blue]Uploading[/] {pdf_path.name} → s3://{bucket}/{s3_key}")
     client.upload_file(
         Filename=str(pdf_path),
-        Bucket=settings.s3_bucket,
+        Bucket=bucket,
         Key=s3_key,
         ExtraArgs={"ContentType": "application/pdf"},
     )
@@ -86,7 +83,7 @@ def download_json(s3_key: str, dest: Path) -> Path:
     settings = get_settings()
     client = s3_client()
     dest.parent.mkdir(parents=True, exist_ok=True)
-    client.download_file(Bucket=settings.s3_bucket, Key=s3_key, Filename=str(dest))
+    client.download_file(Bucket=settings.require_s3_bucket(), Key=s3_key, Filename=str(dest))
     return dest
 
 
@@ -98,7 +95,7 @@ def list_documents() -> list[dict[str, str]]:
     docs: dict[str, str] = {}  # doc_id → s3_key of first object
 
     for page in paginator.paginate(
-        Bucket=settings.s3_bucket,
+        Bucket=settings.require_s3_bucket(),
         Prefix=settings.s3_pdf_prefix,
         Delimiter="/",
     ):

@@ -40,7 +40,7 @@ def audit(
     status: str,
     doc_id: str | None = None,
     project_id: str | None = None,
-    detail: dict | None = None,
+    detail: dict[str, Any] | None = None,
     error: str | None = None,
 ) -> None:
     """Write an audit row + structured log line. Never raises."""

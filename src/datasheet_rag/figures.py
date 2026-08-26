@@ -213,7 +213,8 @@ def find_figure_regions(blocks: list[dict[str, Any]]) -> list[FigureRegion]:
 def _collect_text_from_block(block: dict[str, Any], id_map: dict[str, dict[str, Any]]) -> str:
     """Recursively collect text from a block and its children."""
     if "Text" in block:
-        return block["Text"]
+        text: str = block["Text"]
+        return text
 
     child_ids = [rel["Ids"] for rel in block.get("Relationships", []) if rel["Type"] == "CHILD"]
     flat_ids = [cid for ids in child_ids for cid in ids]
@@ -385,7 +386,7 @@ def render_pdf_pages(
                 doc = fitz.open(pdf_path_str)
                 mat = fitz.Matrix(mat_scale, mat_scale)
                 pix = doc[page_no - 1].get_pixmap(matrix=mat)
-                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
                 doc.close()
             except Exception as exc:
                 raise PageRenderError(
@@ -676,6 +677,7 @@ def upload_figures_to_s3(
     from datasheet_rag.config import get_settings
 
     settings = get_settings()
+    bucket = settings.require_s3_bucket()
     client = s3_client()
 
     for fig in track(manifest.figures, description="Uploading figures to S3…"):
@@ -693,7 +695,7 @@ def upload_figures_to_s3(
 
         client.upload_file(
             Filename=str(fig.image_path),
-            Bucket=settings.s3_bucket,
+            Bucket=bucket,
             Key=s3_key,
             ExtraArgs={"ContentType": content_type},
         )
@@ -701,7 +703,6 @@ def upload_figures_to_s3(
 
     uploaded = sum(1 for f in manifest.figures if f.s3_key)
     console.print(
-        f"[green]Uploaded {uploaded} figures[/] → "
-        f"s3://{settings.s3_bucket}/{s3_prefix}{manifest.doc_id}/"
+        f"[green]Uploaded {uploaded} figures[/] → s3://{bucket}/{s3_prefix}{manifest.doc_id}/"
     )
     return manifest
