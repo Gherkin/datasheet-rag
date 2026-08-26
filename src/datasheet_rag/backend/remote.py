@@ -16,6 +16,7 @@ from datasheet_rag.backend.base import (
     FigureUploads,
     RagBackend,
     RagServerError,
+    RemoteIngestError,
     SearchMode,
 )
 from datasheet_rag.backend.models import (
@@ -372,7 +373,7 @@ class RemoteBackend(RagBackend):
                     elif event == "result":
                         result = IngestResult.model_validate(payload)
                     elif event == "error":
-                        raise RagServerError(500, payload.get("detail", "ingest failed"))
+                        raise RemoteIngestError(payload.get("detail", "ingest failed"))
         except httpx.HTTPError as exc:
             raise RagServerError(0, str(exc)) from exc
 

@@ -18,6 +18,7 @@ from datasheet_rag.backend.base import (
     FigureUnavailableError,
     RagBackend,
     RagServerError,
+    RemoteIngestError,
 )
 from datasheet_rag.backend.local import LocalBackend
 from datasheet_rag.backend.models import (
@@ -40,6 +41,7 @@ __all__ = [
     "MetadataPatch",
     "RagBackend",
     "RagServerError",
+    "RemoteIngestError",
     "StatsResult",
     "backend_mode",
     "get_backend",

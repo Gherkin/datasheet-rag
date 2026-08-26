@@ -240,3 +240,18 @@ class RagServerError(RuntimeError):
         self.status_code = status_code
         self.detail = detail
         super().__init__(f"RAG server error {status_code}: {detail}")
+
+
+class RemoteIngestError(RagServerError):
+    """The server accepted the ingest, then the pipeline failed mid-stream.
+
+    Reported as an SSE ``error`` event rather than an HTTP status, so the
+    base class's "RAG server error 500" framing only buries the detail that
+    matters — which is the server-side exception message itself (GH #40).
+    Subclasses RagServerError so existing ``except`` clauses still catch it.
+    """
+
+    def __init__(self, detail: str):
+        self.status_code = 500
+        self.detail = detail
+        RuntimeError.__init__(self, f"Server-side ingest failed: {detail}")

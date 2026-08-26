@@ -2128,7 +2128,8 @@ def _print_cost_table(cost: CostEstimate, heading: str = "Estimated AWS cost") -
         "can be estimated, since the rest of the pipeline depends on its output."
     ),
 )
-@click.option("--force", is_flag=True, help="Ignore cached blocks/chunks and redo all steps.")
+@click.option("--force", is_flag=True,
+              help="Ignore cached blocks/chunks/rendered pages and redo all steps.")
 @click.option(
     "--local-parse",
     is_flag=True,

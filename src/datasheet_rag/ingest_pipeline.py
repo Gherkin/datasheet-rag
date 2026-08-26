@@ -103,7 +103,9 @@ def parse_pdf_to_graph(
     store: detect backend, Docling/Textract layout analysis, figure cropping,
     and multi-scale chunking. Intermediate artefacts (``{doc_id}_outline.json``,
     ``{doc_id}_blocks.json``, ``{doc_id}_chunks.json``) are cached under
-    ``settings.output_dir`` and reused unless ``force`` is set.
+    ``settings.output_dir`` and reused unless ``force`` is set — which also
+    empties the document's page render cache, so --force redoes every step
+    rather than reusing pages a previous (possibly interrupted) run left.
 
     ``backend`` is ``"docling"`` | ``"textract"`` | ``"auto"``. ``"docling"``
     raises :class:`ScannedPdfError` on a scanned PDF rather than silently
@@ -238,6 +240,7 @@ def parse_pdf_to_graph(
                     dpi=dpi,
                     image_format="png",
                     padding_pct=0.02,
+                    force=force,
                 )
                 if upload_figures and manifest.figures:
                     manifest = upload_figures_to_s3(manifest)
@@ -318,6 +321,7 @@ def parse_pdf_to_graph(
                 dpi=dpi,
                 image_format="png",
                 padding_pct=0.02,
+                force=force,
             )
             if upload_figures and manifest.figures:
                 manifest = upload_figures_to_s3(manifest)

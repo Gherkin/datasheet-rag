@@ -14,6 +14,7 @@ from typing import Any
 
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import get_ident
 
 from PIL import Image
 from rich.console import Console
@@ -29,6 +30,74 @@ from rich.progress import (
 )
 
 console = Console()
+
+
+class PageRenderError(RuntimeError):
+    """A page render, or the re-read of a cached render, failed.
+
+    The underlying Pillow/PyMuPDF messages ("image file is truncated") name
+    neither the file nor the stage that hit them, which made an interrupted
+    ingest surface as a bare ``500: image file is truncated`` (GH #40). This
+    adds both, plus the --force hint.
+    """
+
+    def __init__(self, *, stage: str, path: Path, page: int | None, cause: BaseException):
+        self.stage = stage
+        self.path = Path(path)
+        self.page = page
+        where = f" (page {page})" if page is not None else ""
+        super().__init__(
+            f"{type(cause).__name__}: {cause} — while {stage}{where} in "
+            f"{self.path}. Re-run the ingest with --force to discard cached "
+            "artifacts and redo every step."
+        )
+
+
+def _save_image_atomic(img: Image.Image, path: Path, image_format: str = "png") -> None:
+    """Save *img* to *path* via a uniquely named temp file plus a rename.
+
+    Saving straight to the final name is what leaves half-written images behind
+    when a run is interrupted: the next ingest sees the name, trusts it, and
+    only fails once something tries to decode it. With the rename, a reader
+    sees either the previous file or a complete new one.
+    """
+    tmp = path.with_name(f"{path.name}.{os.getpid()}-{get_ident()}.tmp")
+    try:
+        img.save(str(tmp), format=image_format.upper())
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def _load_cached_page(cache_file: Path) -> Image.Image | None:
+    """Return the cached page render, or None if it is missing or unreadable.
+
+    Existence is not integrity: a truncated PNG left by an interrupted render
+    passes ``is_file()`` and then blows up deep in the crop step. Decoding it
+    here — and deleting it when it fails — turns that hard failure into a
+    re-render of the affected pages.
+    """
+    if not cache_file.is_file():
+        return None
+    try:
+        img = Image.open(cache_file)
+        img.load()  # force decode now, so the file handle can be released
+        return img
+    except Exception:
+        cache_file.unlink(missing_ok=True)
+        return None
+
+
+def _clear_render_cache(cache_dir: Path) -> None:
+    """Drop every cached page render (and stray temp file) under *cache_dir*."""
+    stale = [*cache_dir.glob("*.png"), *cache_dir.glob("*.tmp")]
+    for path in stale:
+        path.unlink(missing_ok=True)
+    if stale:
+        console.print(
+            f"[dim]Page render cache:[/] --force discarded {len(stale)} cached files"
+        )
 
 
 @dataclass
@@ -250,6 +319,7 @@ def render_pdf_pages(
     dpi: int = 300,
     pages: list[int] | None = None,
     cache_dir: Path | None = None,
+    refresh_cache: bool = False,
 ) -> dict[int, Image.Image]:
     """Render PDF pages to PIL Images. Returns {page_number: Image}.
 
@@ -259,9 +329,11 @@ def render_pdf_pages(
 
     1. **Page render cache** — each rendered page is saved as a PNG under
        ``cache_dir / f'p{page:04d}_{dpi}dpi.png'``. On subsequent ingests
-       (e.g. after fixing layout parsing with --force), cached pages are
-       loaded from disk instead of re-rendered, cutting Step 3 to near-zero
-       for pages that haven't changed.
+       cached pages are loaded from disk instead of re-rendered, cutting
+       Step 3 to near-zero for pages that haven't changed. Writes go through
+       a temp file and a rename, and every cached page is decoded before it
+       is trusted, so an interrupted render can't poison later ingests.
+       ``refresh_cache`` (the ingest's --force) empties the cache first.
 
     2. **Parallel rendering** — pages are dispatched to a
        ``ThreadPoolExecutor`` where each worker opens its own
@@ -284,14 +356,25 @@ def render_pdf_pages(
 
     if cache_dir is not None:
         cache_dir.mkdir(parents=True, exist_ok=True)
+        if refresh_cache:
+            _clear_render_cache(cache_dir)
+        damaged = 0
         for page_no in target_pages:
             cache_file = cache_dir / f"p{page_no:04d}_{dpi}dpi.png"
-            if cache_file.is_file():
-                img = Image.open(cache_file)
-                img.load()  # force into memory so the file handle can be released
+            existed = cache_file.is_file()
+            img = _load_cached_page(cache_file)
+            if img is not None:
                 result[page_no] = img
-            else:
-                to_render.append(page_no)
+                continue
+            if existed:
+                damaged += 1  # it was there but wouldn't decode — discarded above
+            to_render.append(page_no)
+        if damaged:
+            console.print(
+                f"[yellow]Page render cache:[/] {damaged} cached page(s) in "
+                f"{cache_dir} were unreadable (likely an interrupted render) "
+                "— discarded, re-rendering."
+            )
         if result:
             console.print(
                 f"[dim]Page render cache:[/] {len(result)} of {len(target_pages)} "
@@ -308,14 +391,27 @@ def render_pdf_pages(
 
         def _render_one(page_no: int) -> tuple[int, Image.Image]:
             # Each worker owns its own fitz.Document — required for thread safety.
-            doc = fitz.open(pdf_path_str)
-            mat = fitz.Matrix(mat_scale, mat_scale)
-            pix = doc[page_no - 1].get_pixmap(matrix=mat)
-            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-            doc.close()
+            try:
+                doc = fitz.open(pdf_path_str)
+                mat = fitz.Matrix(mat_scale, mat_scale)
+                pix = doc[page_no - 1].get_pixmap(matrix=mat)
+                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                doc.close()
+            except Exception as exc:
+                raise PageRenderError(
+                    stage="rendering a page", path=pdf_path, page=page_no, cause=exc
+                ) from exc
             if cache_dir is not None:
                 cache_file = cache_dir / f"p{page_no:04d}_{dpi}dpi.png"
-                img.save(str(cache_file), format="PNG")
+                try:
+                    _save_image_atomic(img, cache_file)
+                except Exception as exc:
+                    raise PageRenderError(
+                        stage="caching a rendered page",
+                        path=cache_file,
+                        page=page_no,
+                        cause=exc,
+                    ) from exc
             return page_no, img
 
         with Progress(
@@ -468,8 +564,14 @@ def extract_figures_from_regions(
     dpi: int = 300,
     image_format: str = "png",
     padding_pct: float = 0.02,
+    force: bool = False,
 ) -> FigureManifest:
-    """Crop and save figure regions to disk. Regions may come from Textract or Docling."""
+    """Crop and save figure regions to disk. Regions may come from Textract or Docling.
+
+    ``force`` is the ingest's --force: it empties this document's page render
+    cache first, so a re-ingest genuinely redoes every step instead of
+    resurrecting whatever the previous run left behind.
+    """
     if output_dir is None:
         from datasheet_rag.config import get_settings
         output_dir = get_settings().figures_dir / doc_id
@@ -490,9 +592,9 @@ def extract_figures_from_regions(
     needed_pages = sorted(set(r.page for r in regions))
 
     # Derive a per-document render cache directory so re-ingests of the same
-    # document (e.g. after layout fixes with --force) skip re-rendering pages
-    # that haven't changed. Falls back to None (no cache) when settings are
-    # unavailable (e.g. in unit tests that don't configure RAG_HOME).
+    # document (e.g. after layout fixes) skip re-rendering pages that haven't
+    # changed. Falls back to None (no cache) when settings are unavailable
+    # (e.g. in unit tests that don't configure RAG_HOME).
     render_cache_dir: Path | None = None
     try:
         from datasheet_rag.config import get_settings
@@ -501,7 +603,8 @@ def extract_figures_from_regions(
         pass
 
     page_images = render_pdf_pages(
-        pdf_path, dpi=dpi, pages=needed_pages, cache_dir=render_cache_dir
+        pdf_path, dpi=dpi, pages=needed_pages,
+        cache_dir=render_cache_dir, refresh_cache=force,
     )
 
     crop_caps = _compute_adjacent_crop_caps(regions, padding_pct)
@@ -525,7 +628,7 @@ def extract_figures_from_regions(
         prefix = "formula" if region.kind == "formula" else "fig"
         filename = f"p{region.page:03d}_{prefix}{i:03d}.{image_format}"
         image_path = output_dir / filename
-        cropped.save(str(image_path), format=image_format.upper())
+        _save_image_atomic(cropped, image_path, image_format)
 
         manifest.figures.append(ExtractedFigure(
             region=region,
@@ -547,6 +650,7 @@ def extract_figures(
     dpi: int = 300,
     image_format: str = "png",
     padding_pct: float = 0.02,
+    force: bool = False,
 ) -> FigureManifest:
     """Extract figures from a PDF using Textract layout blocks (Textract path)."""
     regions = find_figure_regions(blocks)
@@ -554,6 +658,7 @@ def extract_figures(
         pdf_path, regions, doc_id,
         output_dir=output_dir, dpi=dpi,
         image_format=image_format, padding_pct=padding_pct,
+        force=force,
     )
 
 
