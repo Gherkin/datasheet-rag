@@ -114,7 +114,9 @@ class CreateKeyBody(BaseModel):
 def build_app() -> FastAPI:
     # The MCP endpoint is built before the app so its session manager can be
     # folded into the app's lifespan — it must be running before /mcp can
-    # take a request. Bound to the server's own LocalBackend, never the
+    # take a request. It serves /mcp and /mcp/<project_id>, the trailing
+    # segment scoping the tools to a project the way a `.rag.toml` scopes the
+    # stdio server. Bound to the server's own LocalBackend, never the
     # config-resolved one, so the server cannot call itself (GH #39).
     mcp_mount = None
     if get_settings().server_mcp_enabled:
@@ -136,6 +138,11 @@ def build_app() -> FastAPI:
         version="0.1.0",
         lifespan=lifespan,
     )
+
+    # Installed before CORS so CORS ends up the outer layer and covers /mcp
+    # too — middleware added later wraps middleware added earlier.
+    if mcp_mount is not None:
+        mcp_mount.install(app)
 
     origins = get_settings().cors_origins_list()
     if origins:
@@ -610,12 +617,5 @@ def build_app() -> FastAPI:
         be: LocalBackend = Depends(get_backend),
     ) -> dict:
         return {"entries": list_audit(be.conn, doc_id=doc_id, since=since, limit=limit)}
-
-    # -- MCP over HTTP ---------------------------------------------------
-    # Mounted last so it cannot shadow a REST route. Serves both /mcp and
-    # /mcp/<project_id>; the trailing segment scopes the tools to a project
-    # the way a `.rag.toml` scopes the stdio server.
-    if mcp_mount is not None:
-        app.mount("/mcp", mcp_mount.app)
 
     return app
