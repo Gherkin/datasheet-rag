@@ -1,5 +1,7 @@
 # Datasheet-RAG - PDF RAG stack for electronics docs
 
+[![CI](https://github.com/Gherkin/datasheet-rag/actions/workflows/ci.yml/badge.svg)](https://github.com/Gherkin/datasheet-rag/actions/workflows/ci.yml)
+
 - [Overview](#overview)
 - [Installation](#installation)
 - [Configuration](#configuration)
@@ -31,7 +33,7 @@ options are:
 * docling - required if not using Textract for PDF-handling
 * local-hf - required for running models locally using huggingface
 * server - required for serving the backend over HTTP
-* token - used for more accurate token usage counting towards AWS
+* tokens - used for more accurate token usage counting towards AWS
 * dev - test requirements
 
 The recommended setup for running the backend:

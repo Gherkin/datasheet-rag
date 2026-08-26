@@ -1,0 +1,31 @@
+# Keep the pinned Action versions and the Python lock from going stale.
+#
+# Both ecosystems open PRs against main, which CI then runs — so a bump that
+# breaks the build says so before it is merged rather than after.
+
+version: 2
+updates:
+  # The `uses:` pins in .github/workflows/. Grouped, because a week's worth of
+  # action bumps is one review, not five.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # uv.lock. Grouped the same way, with security fixes split out so an
+  # advisory is not queued behind a routine version bump.
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      python-security:
+        applies-to: security-updates
+        patterns: ["*"]
+      python:
+        applies-to: version-updates
+        patterns: ["*"]
