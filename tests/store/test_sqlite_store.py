@@ -807,10 +807,10 @@ def test_update_figure_description_persists_and_folds_into_context(
 def test_schema_v1_database_is_migrated_to_v2() -> None:
     """A database created at schema v1 must gain the new figure columns
     without losing existing rows."""
-    from datasheet_rag.store import schema as schema_mod
-
     # Open a real file-backed DB so we can re-open it. (:memory: dies on close.)
     import tempfile
+
+    from datasheet_rag.store import schema as schema_mod
 
     with tempfile.TemporaryDirectory() as td:
         db_path = f"{td}/v1.sqlite"

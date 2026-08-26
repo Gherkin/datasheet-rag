@@ -31,7 +31,6 @@ from datasheet_rag.models.chunk import (
     LayoutType,
 )
 
-
 # ---------------------------------------------------------------------------
 # Token counting (lightweight approximation, no external dependency needed)
 # ---------------------------------------------------------------------------

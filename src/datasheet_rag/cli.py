@@ -918,7 +918,8 @@ def get_doc_cmd(
                 "(use --no-launch to skip this if you're connecting remotely).[/]"
             )
         console.print(
-            "[dim]Serving from this process — keep it running to keep the link alive. Ctrl+C to stop.[/]"
+            "[dim]Serving from this process — keep it running to keep the link "
+            "alive. Ctrl+C to stop.[/]"
         )
 
         try:

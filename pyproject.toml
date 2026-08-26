@@ -86,8 +86,10 @@ line-length = 100
 select = ["E", "F", "I", "N", "W", "UP"]
 
 [tool.ruff.lint.per-file-ignores]
-# Embedded HTML/JS template lines exceed the line length by nature.
+# Embedded HTML/JS template lines exceed the line length by nature. They live
+# inside triple-quoted strings, so an inline `# noqa` would land in the markup.
 "src/datasheet_rag/eval/review.py" = ["E501"]
+"src/datasheet_rag/mcp/server.py" = ["E501"]
 
 [tool.mypy]
 python_version = "3.11"

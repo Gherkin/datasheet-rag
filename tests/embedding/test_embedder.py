@@ -27,7 +27,6 @@ from datasheet_rag.models.chunk import (
     LayoutType,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -50,7 +49,9 @@ def _build_invoke_side_effect(
     and its return is plugged into the response under ``"embedding"``.
     """
 
-    def _side_effect(*, modelId: str, body: str, **_: Any) -> dict[str, Any]:
+    # modelId mirrors boto3's own kwarg spelling for invoke_model; renaming
+    # it would stop the mock from matching the call.
+    def _side_effect(*, modelId: str, body: str, **_: Any) -> dict[str, Any]:  # noqa: N803
         payload_in = json.loads(body)
         text = payload_in["inputText"]
         vec = vector_fn(text)

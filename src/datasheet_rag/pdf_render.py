@@ -14,7 +14,6 @@ two import graphs independent.
 
 from __future__ import annotations
 
-from pathlib import Path
 from threading import Lock
 
 from datasheet_rag.config import get_settings

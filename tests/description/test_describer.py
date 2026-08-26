@@ -23,7 +23,6 @@ from datasheet_rag.description import FigureDescriber, describe_figures_in_store
 from datasheet_rag.models.chunk import Chunk, ChunkLevel, ChunkMetadata, LayoutType
 from datasheet_rag.store import connect, insert_chunks
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------

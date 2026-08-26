@@ -179,7 +179,7 @@ def test_get_doc_host_serves_pdf_bytes(tmp_path, db_path, monkeypatch) -> None:
     assert f"/viewer/{DOC_ID}#page=1" in result.output
     assert "Stopped." in result.output
     assert len(opened_urls) == 1
-    assert f"127.0.0.1" in opened_urls[0]
+    assert "127.0.0.1" in opened_urls[0]
     assert f"/viewer/{DOC_ID}#page=1" in opened_urls[0]
 
     # Confirm the server actually started and serves the primed PDF bytes —

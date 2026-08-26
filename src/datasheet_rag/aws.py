@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 
 @lru_cache(maxsize=1)
-def _session() -> "Any":
+def _session() -> Any:
     # Imported lazily so modules that merely reference AWS clients can be
     # imported without boto3 installed (the `aws` extra). boto3 is only
     # required once an AWS-backed client is actually built at runtime.
@@ -32,9 +32,9 @@ def _session() -> "Any":
     return boto3.Session(**kwargs)
 
 
-def s3_client() -> "S3Client":
+def s3_client() -> S3Client:
     return _session().client("s3")  # type: ignore[return-value]
 
 
-def textract_client() -> "TextractClient":
+def textract_client() -> TextractClient:
     return _session().client("textract")  # type: ignore[return-value]

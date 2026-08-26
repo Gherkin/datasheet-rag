@@ -104,7 +104,7 @@ def _bedrock_runtime_client(
     *,
     region: str | None = None,
     profile: str | None = None,
-) -> "BedrockRuntimeClient":
+) -> BedrockRuntimeClient:
     """Build a configured ``bedrock-runtime`` client.
 
     Lives here (rather than in :mod:`datasheet_rag.aws`) to keep this track

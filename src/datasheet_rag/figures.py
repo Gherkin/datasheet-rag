@@ -8,13 +8,12 @@ S3 upload, and generates a manifest for downstream multi-modal embedding.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any
-
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
+from pathlib import Path
 from threading import get_ident
+from typing import Any
 
 from PIL import Image
 from rich.console import Console

@@ -19,7 +19,7 @@ This produces two usable fields per chunk:
 
 from __future__ import annotations
 
-from datasheet_rag.models.chunk import Chunk, ChunkGraph, ChunkLevel, LayoutType
+from datasheet_rag.models.chunk import Chunk, ChunkGraph, LayoutType
 
 
 def enrich_context(graph: ChunkGraph) -> ChunkGraph:

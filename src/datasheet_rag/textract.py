@@ -10,7 +10,7 @@ from typing import Any
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
-from datasheet_rag.aws import s3_client, textract_client
+from datasheet_rag.aws import textract_client
 from datasheet_rag.config import get_settings
 
 console = Console()

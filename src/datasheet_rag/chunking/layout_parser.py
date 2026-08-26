@@ -11,13 +11,13 @@ chunk model.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from datasheet_rag.textract import layout_reading_order
 
 
-class ElementType(str, Enum):
+class ElementType(StrEnum):
     """Type of content element within a section."""
 
     TEXT = "text"

@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import http.server
 import socket
-from pathlib import Path
 from threading import Lock, Thread
 from typing import Any
 

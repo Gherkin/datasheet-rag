@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import Enum, StrEnum
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -16,7 +16,7 @@ class ChunkLevel(int, Enum):
     MICRO = 2  # Paragraph / table / figure level — ~128 tokens
 
 
-class LayoutType(str, Enum):
+class LayoutType(StrEnum):
     """Type of layout element the chunk originated from."""
 
     TEXT = "text"

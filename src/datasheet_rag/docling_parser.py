@@ -638,9 +638,9 @@ def _build_outline(
     except ImportError as exc:
         raise ImportError("docling-core is required") from exc
 
-    _SKIP = {DocItemLabel.PAGE_HEADER, DocItemLabel.PAGE_FOOTER}
+    skip_labels = {DocItemLabel.PAGE_HEADER, DocItemLabel.PAGE_FOOTER}
     try:
-        _SKIP.add(DocItemLabel.FOOTNOTE)
+        skip_labels.add(DocItemLabel.FOOTNOTE)
     except AttributeError:
         pass
 
@@ -670,7 +670,7 @@ def _build_outline(
             pending_caption_element = None
             continue  # do not add caption as a content element
 
-        if label in _SKIP:
+        if label in skip_labels:
             if label == DocItemLabel.PAGE_HEADER:
                 text = _clean_text(getattr(item, "text", ""))
                 if text:
@@ -895,8 +895,9 @@ def _dedup_repeating_figures(
     Returns (skipped_block_ids, kept_regions).  skipped_block_ids contains the
     figure_block_ids of dropped regions so _build_outline can omit them too.
     """
-    import fitz
     from collections import defaultdict
+
+    import fitz
 
     if not regions:
         return set(), regions
