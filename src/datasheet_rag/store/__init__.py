@@ -42,6 +42,7 @@ from datasheet_rag.store.search import (
     vector_search,
 )
 from datasheet_rag.store.sqlite import (
+    InsertStats,
     count_chunks,
     delete_doc,
     figure_source_available,
@@ -50,6 +51,7 @@ from datasheet_rag.store.sqlite import (
     get_ingested_docs,
     insert_chunk_graph,
     insert_chunks,
+    insert_chunks_stats,
     list_figure_chunks,
     resolve_doc_id,
     resolve_figure_path,
@@ -79,8 +81,10 @@ __all__ = [
     "hash_token",
     "hybrid_search",
     "init_schema",
+    "InsertStats",
     "insert_chunk_graph",
     "insert_chunks",
+    "insert_chunks_stats",
     "keyword_search",
     "list_api_keys",
     "list_audit",

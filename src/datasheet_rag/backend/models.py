@@ -129,5 +129,8 @@ class IngestResult(BaseModel):
 
     doc_id: str
     inserted: int = 0
+    # Stale chunks deleted because the new graph no longer carries their ids
+    # (GH #44). Worth reporting: nobody asked for those rows to go.
+    pruned: int = 0
     described: int = 0
     title: str | None = None

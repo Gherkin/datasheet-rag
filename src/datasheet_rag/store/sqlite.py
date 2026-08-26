@@ -13,10 +13,11 @@ which is the binary format ``sqlite-vec``'s ``vec0`` table expects.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import numpy as np
 
@@ -32,6 +33,8 @@ from datasheet_rag.store.metadata import (
     set_title_source,
     title_rank,
 )
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Figure path portability
@@ -208,7 +211,52 @@ def _chunk_row(
     )
 
 
-def insert_chunks(
+class InsertStats(NamedTuple):
+    """What one insert changed: rows written, and stale rows pruned.
+
+    Pruning deletes rows a user never asked about by name, so the count is
+    reported rather than only logged — ingest prints it and the server audits
+    it. See :func:`insert_chunks_stats` for what "stale" means.
+    """
+
+    inserted: int
+    pruned: int = 0
+
+
+# SQLite's parameter limit is 999 on older builds; batch well under it.
+_PRUNE_BATCH = 500
+
+
+def _prune_stale_chunks(cur: sqlite3.Cursor, doc_id: str, keep: set[str]) -> int:
+    """Delete rows of ``doc_id`` whose ids the incoming chunk set does not carry.
+
+    Chunk ids are positional (``<doc_id>:L<level>:<index>``), so a re-chunk
+    that changes the count shifts every id after the change and strands the
+    tail of the previous graph — rows the upsert never touches, still in
+    ``chunk_fts`` and ``chunk_vecs``, still returned by search (GH #44).
+    The ``chunks_ad`` AFTER DELETE trigger cascades each delete to both.
+
+    Runs on the caller's cursor so the prune lands in the same transaction as
+    the insert: the document is never momentarily missing, and a failed
+    insert rolls the prune back with it.
+
+    Returns the number of stale rows deleted.
+    """
+    stale = [
+        row[0]
+        for row in cur.execute(
+            "SELECT id FROM chunks WHERE doc_id = ?", (doc_id,)
+        ).fetchall()
+        if row[0] not in keep
+    ]
+    for start in range(0, len(stale), _PRUNE_BATCH):
+        batch = stale[start : start + _PRUNE_BATCH]
+        placeholders = ",".join("?" * len(batch))
+        cur.execute(f"DELETE FROM chunks WHERE id IN ({placeholders})", batch)
+    return len(stale)
+
+
+def insert_chunks_stats(
     conn: sqlite3.Connection,
     chunks: Iterable[Chunk],
     vectors: Mapping[str, Sequence[float]] | None = None,
@@ -217,7 +265,8 @@ def insert_chunks(
     group_name: str | None = None,
     title_source: str = "auto",
     force_title: bool = False,
-) -> int:
+    prune: bool = False,
+) -> InsertStats:
     """Bulk-insert chunks (and optionally their vectors) in one transaction.
 
     Parameters
@@ -238,17 +287,31 @@ def insert_chunks(
         weakest source, which is what stops a re-ingest overwriting a title
         a human or `rag repair titles` chose. ``force_title=True`` takes the
         incoming title regardless.
+    prune:
+        Opt-in whole-document mode: after the upsert, delete any remaining
+        row of every ``doc_id`` covered here whose id is not in ``chunks``
+        (GH #44). Only pass it when ``chunks`` is the *complete* content for
+        those documents — a partial insert with ``prune=True`` would wipe
+        everything it did not ship. Off by default for that reason.
 
     Returns
     -------
-    int
-        Number of chunks inserted (== number of rows the INSERT touched).
+    InsertStats
+        ``inserted`` — chunks written (== rows the INSERT touched);
+        ``pruned`` — stale rows deleted (always 0 without ``prune``).
+
+    See Also
+    --------
+    insert_chunks : same call returning just the inserted count.
     """
     cur = conn.cursor()
     count = 0
+    pruned = 0
     # One provenance lookup per document rather than per chunk — a graph is
     # thousands of chunks over (almost always) a single doc_id.
     keep_title: dict[str, bool] = {}
+    # doc_id -> ids shipped in this call; only collected when pruning needs it.
+    incoming: dict[str, set[str]] = {}
     try:
         for chunk in chunks:
             keep = keep_title.get(chunk.doc_id)
@@ -272,12 +335,53 @@ def insert_chunks(
                     _VEC_INSERT_SQL,
                     (chunk.id, _vector_to_bytes(vectors[chunk.id])),
                 )
+            if prune:
+                incoming.setdefault(chunk.doc_id, set()).add(chunk.id)
             count += 1
+
+        for doc_id, keep_ids in incoming.items():
+            dropped = _prune_stale_chunks(cur, doc_id, keep_ids)
+            if dropped:
+                # INFO, not WARNING: the CLI has no logging config, so a
+                # WARNING would print unformatted on stderr in the middle of
+                # the rich ingest output — which already reports the count
+                # from InsertStats. `rag serve` logs at INFO and keeps it.
+                logger.info(
+                    "insert: pruned %d stale chunk(s) from %s left behind by a "
+                    "previous graph (re-chunk changed the chunk count)",
+                    dropped,
+                    doc_id,
+                )
+            pruned += dropped
         conn.commit()
     except Exception:
         conn.rollback()
         raise
-    return count
+    return InsertStats(inserted=count, pruned=pruned)
+
+
+def insert_chunks(
+    conn: sqlite3.Connection,
+    chunks: Iterable[Chunk],
+    vectors: Mapping[str, Sequence[float]] | None = None,
+    *,
+    project_id: str | None = None,
+    group_name: str | None = None,
+    title_source: str = "auto",
+    force_title: bool = False,
+    prune: bool = False,
+) -> int:
+    """:func:`insert_chunks_stats` for callers that only want the count."""
+    return insert_chunks_stats(
+        conn,
+        chunks,
+        vectors=vectors,
+        project_id=project_id,
+        group_name=group_name,
+        title_source=title_source,
+        force_title=force_title,
+        prune=prune,
+    ).inserted
 
 
 def insert_chunk_graph(
@@ -289,9 +393,17 @@ def insert_chunk_graph(
     group_name: str | None = None,
     title_source: str = "auto",
     force_title: bool = False,
-) -> int:
-    """Convenience wrapper: insert every chunk in a :class:`ChunkGraph`."""
-    return insert_chunks(
+    prune: bool = False,
+) -> InsertStats:
+    """Convenience wrapper: insert every chunk in a :class:`ChunkGraph`.
+
+    ``prune=True`` also drops the rows of ``graph.doc_id`` that this graph
+    does not carry — see :func:`insert_chunks_stats`. A :class:`ChunkGraph`
+    is a whole document by construction, so this is the safe place to ask
+    for it, and the reason this one returns the full
+    :class:`InsertStats`: whoever prunes should be able to report it.
+    """
+    return insert_chunks_stats(
         conn,
         graph.chunks.values(),
         vectors=vectors,
@@ -299,6 +411,7 @@ def insert_chunk_graph(
         group_name=group_name,
         title_source=title_source,
         force_title=force_title,
+        prune=prune,
     )
 
 

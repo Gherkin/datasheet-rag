@@ -1410,6 +1410,7 @@ def embed(
     except RagServerError as e:
         raise _friendly_server_error(e) from e
     console.print(f"[green]Inserted[/] {result.inserted} chunks.")
+    _report_pruned(result.pruned, indent="")
     # Vectors now match the stored text again.
     _set_stale(result.doc_id or doc_id, False)
 
@@ -2417,6 +2418,7 @@ def _ingest_one(
         except RagServerError as e:
             raise _friendly_server_error(e) from e
         console.print(f"  [green]Upserted[/] {result.inserted} chunks")
+        _report_pruned(result.pruned)
         if result.described:
             console.print(f"  [green]{result.described}[/] figure descriptions generated")
         if result.title:
@@ -2537,6 +2539,7 @@ def _ingest_one(
     except RagServerError as e:
         raise _friendly_server_error(e) from e
     console.print(f"  [green]Upserted[/] {result.inserted} chunks")
+    _report_pruned(result.pruned)
     if result.described:
         console.print(f"  [green]{result.described}[/] figure descriptions generated")
     if result.title:
@@ -2546,6 +2549,20 @@ def _ingest_one(
     console.rule(f"[bold green]Done[/] — {elapsed:.0f}s")
     console.print(f"  doc_id = [cyan]{did}[/]")
     return None
+
+
+def _report_pruned(pruned: int, indent: str = "  ") -> None:
+    """Say so when an ingest deleted stale chunks from a previous graph.
+
+    Re-chunking shifts positional ids, so a document that chunks differently
+    leaves rows behind that the upsert never touches; ingest drops them (GH
+    #44). The user did not ask for a delete, so it is never silent.
+    """
+    if pruned:
+        console.print(
+            f"{indent}[yellow]Pruned[/] {pruned} stale chunk(s) left by the "
+            "previous version of this document"
+        )
 
 
 def _parse_page_range(spec: str) -> tuple[int, int]:

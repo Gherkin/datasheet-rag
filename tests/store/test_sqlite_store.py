@@ -21,6 +21,7 @@ import pytest
 
 from datasheet_rag.models.chunk import (
     Chunk,
+    ChunkGraph,
     ChunkLevel,
     ChunkMetadata,
     LayoutType,
@@ -43,6 +44,7 @@ from datasheet_rag.store.sqlite import (
     count_chunks,
     delete_doc,
     get_chunk,
+    insert_chunk_graph,
     insert_chunks,
 )
 
@@ -314,6 +316,93 @@ def test_delete_metadata(conn: sqlite3.Connection) -> None:
 
     # No-op (returns 0) when there's no sidecar row for that doc_id.
     assert delete_metadata(conn, "doc1") == 0
+
+
+# ---------------------------------------------------------------------------
+# 3b. Pruning a re-ingest that re-chunked (GH #44)
+# ---------------------------------------------------------------------------
+
+
+def _shorter_doc1_graph() -> ChunkGraph:
+    """doc1 re-chunked into 3 chunks — the seed's last two ids disappear.
+
+    This is what a real re-ingest does: ids are positional, so dropping a
+    figure or changing --micro-tokens renumbers everything after it and the
+    tail of the previous graph has no counterpart in the new one.
+    """
+    graph = ChunkGraph(doc_id="doc1")
+    for chunk in _seed_chunks():
+        if chunk.doc_id == "doc1" and chunk.id not in ("doc1:2:2", "doc1:2:3"):
+            graph.add(chunk)
+    return graph
+
+
+def test_prune_drops_chunks_the_new_graph_does_not_carry(
+    conn: sqlite3.Connection,
+) -> None:
+    chunks = _seed_chunks()
+    insert_chunks(conn, chunks, vectors=_seed_vectors(chunks))
+    assert count_chunks(conn, doc_id="doc1") == 5
+
+    graph = _shorter_doc1_graph()
+    stats = insert_chunk_graph(conn, graph, prune=True)
+    assert stats.inserted == 3
+    assert stats.pruned == 2
+
+    assert count_chunks(conn, doc_id="doc1") == 3
+    assert get_chunk(conn, "doc1:2:2") is None
+    assert get_chunk(conn, "doc1:2:3") is None
+
+    # The AFTER DELETE trigger has to have carried the prune into both
+    # indexes, or the rows stay searchable — the actual bug in GH #44.
+    vec_rows = conn.execute("SELECT COUNT(*) AS n FROM chunk_vecs").fetchone()["n"]
+    assert vec_rows == 6  # 3 surviving doc1 + 3 doc2
+    assert keyword_search(conn, "quiescent current", k=10) == []
+
+
+def test_prune_leaves_other_documents_alone(conn: sqlite3.Connection) -> None:
+    chunks = _seed_chunks()
+    insert_chunks(conn, chunks, vectors=_seed_vectors(chunks))
+
+    insert_chunk_graph(conn, _shorter_doc1_graph(), prune=True)
+
+    # Only the doc_ids the incoming chunks cover are pruned.
+    assert count_chunks(conn, doc_id="doc2") == 3
+    assert get_chunk(conn, "doc2:2:1") is not None
+
+
+def test_insert_does_not_prune_by_default(conn: sqlite3.Connection) -> None:
+    # The default keeps partial inserts safe: a caller that ships a handful
+    # of chunks must not wipe the rest of the document.
+    chunks = _seed_chunks()
+    insert_chunks(conn, chunks, vectors=_seed_vectors(chunks))
+
+    stats = insert_chunk_graph(conn, _shorter_doc1_graph())
+    assert stats.pruned == 0
+    assert count_chunks(conn, doc_id="doc1") == 5
+
+
+def test_prune_keeps_curated_fields_on_surviving_chunks(
+    conn: sqlite3.Connection,
+) -> None:
+    # Pruning must not become "delete the doc, then re-insert": everything the
+    # upsert deliberately preserves for ids that survive has to still be there.
+    chunks = _seed_chunks()
+    insert_chunks(conn, chunks)
+    conn.execute(
+        "UPDATE chunks SET figure_description = ?, figure_image_path = ? "
+        "WHERE id = 'doc1:2:0'",
+        ("A described figure", "doc1/fig.png"),
+    )
+    conn.commit()
+
+    # The fresh graph carries neither field, exactly like a re-chunk.
+    insert_chunk_graph(conn, _shorter_doc1_graph(), prune=True)
+
+    survivor = get_chunk(conn, "doc1:2:0")
+    assert survivor is not None
+    assert survivor.figure_description == "A described figure"
+    assert survivor.figure_image_path == "doc1/fig.png"
 
 
 # ---------------------------------------------------------------------------

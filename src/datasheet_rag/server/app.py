@@ -420,6 +420,7 @@ def build_app() -> FastAPI:
             doc_id=result.doc_id, project_id=data.get("project_id"),
             detail={
                 "inserted": result.inserted,
+                "pruned": result.pruned,
                 "described": result.described,
                 "embed": data.get("embed", True),
                 "figures": len(fig_uploads),

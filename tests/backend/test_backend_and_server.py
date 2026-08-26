@@ -98,6 +98,39 @@ def test_local_ingest_no_figures_trusts_existing_paths(backend: LocalBackend) ->
     assert hits and hits[0].chunk_id == f"{did}:L2:0"
 
 
+def test_local_reingest_prunes_and_reports_stale_chunks(
+    backend: LocalBackend,
+) -> None:
+    # A re-ingest that re-chunks: positional ids shift, so the tail of the
+    # previous graph has no counterpart and must not stay searchable (GH #44).
+    did = "c" * 64
+
+    def graph(n: int) -> ChunkGraph:
+        g = ChunkGraph(doc_id=did)
+        for i in range(n):
+            g.add(
+                Chunk(
+                    id=f"{did}:L2:{i}",
+                    doc_id=did,
+                    level=ChunkLevel.MICRO,
+                    text=f"Thermal shutdown paragraph {i}",
+                    metadata=ChunkMetadata(doc_id=did, page_numbers=[1]),
+                )
+            )
+        return g
+
+    first = backend.ingest_chunk_graph(graph(3), project_id="p1", embed=False)
+    assert (first.inserted, first.pruned) == (3, 0)
+
+    second = backend.ingest_chunk_graph(graph(2), project_id="p1", embed=False)
+    assert second.inserted == 2
+    assert second.pruned == 1  # surfaced to the CLI, not just logged
+
+    assert backend.stats(project_id="p1").total_chunks == 2
+    hits = backend.search("thermal shutdown paragraph", mode="keyword", k=10)
+    assert {h.chunk_id for h in hits} == {f"{did}:L2:0", f"{did}:L2:1"}
+
+
 def test_local_ingest_rewrites_uploaded_figure_path(
     backend: LocalBackend, tmp_path, monkeypatch
 ) -> None:
@@ -279,7 +312,13 @@ def test_server_ingest_pdf_streams_sse(client, monkeypatch) -> None:
         if "event: result" in block:
             data_line = [ln for ln in block.splitlines() if ln.startswith("data:")][0]
             result = json.loads(data_line[len("data:"):].strip())
-    assert result == {"doc_id": did, "inserted": 10, "described": 0, "title": None}
+    assert result == {
+        "doc_id": did,
+        "inserted": 10,
+        "pruned": 0,
+        "described": 0,
+        "title": None,
+    }
 
 
 def test_server_token_required_when_set(conn, monkeypatch) -> None:

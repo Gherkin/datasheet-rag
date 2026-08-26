@@ -516,6 +516,10 @@ class LocalBackend(RagBackend):
         with self._write_lock:
             conn = self._get_conn()
             described = 0
+            # The provisional insert below prunes too, so the final insert
+            # finds nothing left to drop — count both or the describe path
+            # would always report 0.
+            pruned = 0
 
             # 2. Optional figure descriptions (vision LLM). Needs the chunks
             #    in the store first, so do a provisional embed+insert, run the
@@ -530,13 +534,14 @@ class LocalBackend(RagBackend):
                 vectors_tmp = (
                     embed_chunk_graph(graph, embedder=embedder_tmp) if embed else None
                 )
-                insert_chunk_graph(
+                pruned += insert_chunk_graph(
                     conn,
                     graph,
                     vectors=vectors_tmp,
                     project_id=project_id,
                     group_name=group_name,
-                )
+                    prune=True,
+                ).pruned
                 conn.commit()
                 descriptions = describe_figures_in_store(
                     conn,
@@ -565,13 +570,22 @@ class LocalBackend(RagBackend):
             vectors = None
             if embed:
                 vectors = embed_chunk_graph(graph, embedder=self._get_embedder())
-            inserted = insert_chunk_graph(
+            # prune=True: this graph is the whole document, so rows it does
+            # not carry are leftovers from a previous chunking of the same doc
+            # — a re-chunk that changes the count shifts every positional id
+            # after it and would otherwise strand the tail in search forever
+            # (GH #44). The upsert still preserves what a fresh graph does not
+            # carry (descriptions, a curated title, a relinked figure path) for
+            # every id that survives.
+            stats = insert_chunk_graph(
                 conn,
                 graph,
                 vectors=vectors,
                 project_id=project_id,
                 group_name=group_name,
+                prune=True,
             )
+            pruned += stats.pruned
             conn.commit()
 
             # 4. Metadata sidecar.
@@ -598,7 +612,11 @@ class LocalBackend(RagBackend):
                 title = infer_and_backfill_title(self._get_conn(), did)
 
         return IngestResult(
-            doc_id=did, inserted=inserted, described=described, title=title
+            doc_id=did,
+            inserted=stats.inserted,
+            pruned=pruned,
+            described=described,
+            title=title,
         )
 
     def ingest_pdf(
