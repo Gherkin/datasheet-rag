@@ -9,7 +9,7 @@ import re
 import socket
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar
 
 import click
 from rich.console import Console
@@ -18,8 +18,16 @@ from rich.table import Table
 from datasheet_rag.config import get_settings
 
 if TYPE_CHECKING:
+    import sqlite3
+
+    from datasheet_rag.backend import RagBackend
+    from datasheet_rag.backend.base import RagServerError, SearchMode
     from datasheet_rag.chunking.layout_parser import DocumentOutline
     from datasheet_rag.costs import CostEstimate
+    from datasheet_rag.eval.ablation import IndexVariant
+    from datasheet_rag.eval.harness import RunReport
+    from datasheet_rag.ingest_pipeline import ProgressEvent
+    from datasheet_rag.models.chunk import Chunk
 
 console = Console()
 
@@ -29,7 +37,7 @@ console = Console()
 SHORT_DOC_ID_LEN = 12
 
 
-def _resolve_doc_id(conn, doc_id: str) -> str:
+def _resolve_doc_id(conn: sqlite3.Connection, doc_id: str) -> str:
     """CLI wrapper around the **store-backed** `resolve_doc_id`: turns
     ambiguity/misses into ClickException.
 
@@ -148,7 +156,7 @@ def _doc_input(arg: str, suffix: str) -> tuple[str, Path]:
     return doc_id, _cache_path(doc_id, suffix)
 
 
-def _backend_for(db_path: Path | None = None):
+def _backend_for(db_path: Path | None = None) -> RagBackend:
     """Return the backend a command should use.
 
     ``--db <path>`` always means "this specific local sqlite file" so it
@@ -222,7 +230,7 @@ def _require_local_db(db_path: Path | None) -> Path:
     return get_settings().sqlite_db_path
 
 
-def _friendly_server_error(e) -> click.ClickException:
+def _friendly_server_error(e: RagServerError) -> click.ClickException:
     """Turn a RagServerError into an actionable CLI message (esp. auth)."""
     code = getattr(e, "status_code", None)
     if code == 401:
@@ -238,7 +246,7 @@ def _friendly_server_error(e) -> click.ClickException:
     return click.ClickException(str(e))
 
 
-def _backend_resolve(be, doc_id: str) -> str:
+def _backend_resolve(be: RagBackend, doc_id: str) -> str:
     """Resolve a doc_id prefix via the backend, turning errors into ClickException."""
     from datasheet_rag.backend import RagServerError
 
@@ -259,7 +267,7 @@ def _short_chunk_id(chunk_id: str, doc_id: str) -> str:
     return doc_id[:SHORT_DOC_ID_LEN] + chunk_id[len(doc_id) :]
 
 
-def _resolve_chunk_id(be, chunk_id: str) -> str:
+def _resolve_chunk_id(be: RagBackend, chunk_id: str) -> str:
     """Resolve a chunk_id whose doc_id portion may be abbreviated (as
     printed by `rag search` / `rag inspect figures`) to its full form.
 
@@ -318,7 +326,7 @@ class OrderedGroup(click.Group):
     is actually reached makes `rag --help` readable top-to-bottom.
     """
 
-    def __init__(self, *args, order: list[str] | None = None, **kwargs) -> None:
+    def __init__(self, *args: Any, order: list[str] | None = None, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._order = order or []
 
@@ -590,16 +598,16 @@ def list_docs(
     if show_s3:
         from datasheet_rag.storage import list_documents
 
-        docs = list_documents()
-        if not docs:
+        s3_docs = list_documents()
+        if not s3_docs:
             console.print("[yellow]No documents found in S3.[/]")
             return
 
         table = Table(title="S3 Uploads")
         table.add_column("doc_id", style="cyan")
         table.add_column("S3 Prefix")
-        for doc in docs:
-            table.add_row(doc["doc_id"], doc["prefix"])
+        for s3_doc in s3_docs:
+            table.add_row(s3_doc["doc_id"], s3_doc["prefix"])
         console.print(table)
         return
 
@@ -1193,11 +1201,19 @@ def _load_outline(arg: str) -> tuple[str, DocumentOutline]:
     return doc_id, parse_textract_blocks(data, doc_id=doc_id)
 
 
+class _FlaggedTable(NamedTuple):
+    """One table the header detectors judged untrustworthy, for --list-flagged."""
+
+    page: int
+    caption: str
+    reason: str
+
+
 # Rows of the section/layout listing to show before truncating (unless --full).
 _INSPECT_LAYOUT_PREVIEW = 30
 
 
-def _inspect_textract_layout(blocks: list, full: bool = False) -> None:
+def _inspect_textract_layout(blocks: list[dict[str, Any]], full: bool = False) -> None:
     """Render the block-type summary and layout hierarchy for Textract output."""
     from datasheet_rag.textract import extract_layout_elements
 
@@ -1232,7 +1248,7 @@ def _inspect_textract_layout(blocks: list, full: bool = False) -> None:
             )
 
 
-def _inspect_docling_layout(outline, full: bool = False) -> None:
+def _inspect_docling_layout(outline: DocumentOutline, full: bool = False) -> None:
     """Render the element-type summary and section hierarchy for Docling output."""
     summary = outline.summary()
 
@@ -1550,7 +1566,7 @@ def embed(
 )
 def search(
     query: str,
-    mode: str,
+    mode: SearchMode,
     top_k: int,
     db_path: Path | None,
     project_id: str | None,
@@ -1673,7 +1689,7 @@ def _next_steps(doc_id: str | None, *, rechunk: bool) -> None:
         )
 
 
-def _print_chunk_detail(chunk, *, show_context: bool = False) -> None:
+def _print_chunk_detail(chunk: Chunk, *, show_context: bool = False) -> None:
     """Render one chunk's metadata + text — the CLI counterpart of the MCP
     server's ``_shape_chunk``."""
     from datasheet_rag.models.chunk import LayoutType
@@ -2006,7 +2022,9 @@ def describe_figures_cmd(
 # ---------------------------------------------------------------------------
 
 
-def _relink_plan(conn, doc_id: str) -> tuple[list[tuple[str, Path, str]], list[str]]:
+def _relink_plan(
+    conn: sqlite3.Connection, doc_id: str
+) -> tuple[list[tuple[str, Path, str]], list[str]]:
     """Match a document's cropped figures on disk to its figure chunks.
 
     Returns ``(plan, notes)``: ``plan`` is ``(chunk_id, image_path, caption)``
@@ -2042,7 +2060,7 @@ def _relink_plan(conn, doc_id: str) -> tuple[list[tuple[str, Path, str]], list[s
         return [], [f"no manifest at {manifest_path} — re-ingest the PDF to re-crop"]
 
     manifest = _json.loads(manifest_path.read_text())
-    by_page: dict[int, list[dict]] = {}
+    by_page: dict[int, list[dict[str, Any]]] = {}
     for fig in manifest.get("figures", []):
         # Formulas are their own element type and never become figure chunks.
         if "formula" in (fig.get("block_id") or ""):
@@ -2432,7 +2450,7 @@ def ingest(
     skipped unless --force is given, and --show-cost prints a combined
     estimate across all of them in addition to each document's breakdown.
     """
-    common = dict(
+    common: dict[str, Any] = dict(
         project_id=project_id,
         group_name=group_name,
         mpn=mpn,
@@ -2608,7 +2626,7 @@ def _ingest_one(
     # for the streamed progress of a remote raw-PDF upload.
     step_state = {"n": 0}
 
-    def _progress(ev) -> None:
+    def _progress(ev: ProgressEvent) -> None:
         if ev.kind == "step":
             step_state["n"] = ev.step
             console.rule(f"[bold cyan]Step {ev.step} — {ev.text}[/]")
@@ -2740,7 +2758,7 @@ def _ingest_one(
     if db_path is not None:
         from datasheet_rag.backend import LocalBackend
 
-        backend_obj = LocalBackend(db_path)
+        backend_obj: RagBackend = LocalBackend(db_path)
     else:
         backend_obj = get_backend()
 
@@ -2931,9 +2949,9 @@ def reconvert_tables_cmd(
             f"and retry if that looks wrong)."
         )
 
-    matched = [e for e in report if e["matched"]]
-    fixed_garbled = [e for e in matched if e["old_garbled"] and not e["new_garbled"]]
-    still_garbled = [e for e in matched if e["new_garbled"]]
+    matched_entries = [e for e in report if e["matched"]]
+    fixed_garbled = [e for e in matched_entries if e["old_garbled"] and not e["new_garbled"]]
+    still_garbled = [e for e in matched_entries if e["new_garbled"]]
     if fixed_garbled:
         console.print(f"[green]{len(fixed_garbled)} garbled header(s) fixed by this re-run.[/]")
     if still_garbled:
@@ -3026,7 +3044,7 @@ def table_structure_sweep_cmd(doc_id: str, list_flagged: bool, sample_n: int) ->
         console.print(f"[yellow]No cached tables found for doc_id={did}.[/]")
         return
 
-    flagged: list[dict[str, object]] = []
+    flagged: list[_FlaggedTable] = []
     # Parallel (element, reason | None) record — feeds --sample below without
     # re-running the detectors over the whole corpus a second time.
     judged: list[tuple[ContentElement, str | None]] = []
@@ -3046,7 +3064,7 @@ def table_structure_sweep_cmd(doc_id: str, list_flagged: bool, sample_n: int) ->
         elif fused is not None:
             reason = f"fused ({fused})"
         if reason is not None:
-            flagged.append({"page": el.page, "caption": el.table_title, "reason": reason})
+            flagged.append(_FlaggedTable(el.page, el.table_title, reason))
         judged.append((el, reason))
 
     total = len(tables)
@@ -3073,7 +3091,7 @@ def table_structure_sweep_cmd(doc_id: str, list_flagged: bool, sample_n: int) ->
         detail.add_column("Caption")
         detail.add_column("Reason")
         for entry in flagged:
-            detail.add_row(str(entry["page"]), (entry["caption"][:60] or "—"), entry["reason"])
+            detail.add_row(str(entry.page), entry.caption[:60] or "—", entry.reason)
         console.print(detail)
     elif flagged:
         console.print(
@@ -3688,7 +3706,7 @@ def _render_report_table(report: object) -> None:
     console.print(table)
 
 
-def _render_matrix_table(reports: list, headline_k: int) -> None:
+def _render_matrix_table(reports: list[RunReport], headline_k: int) -> None:
     """Print a comparison across configs: overall + per-category hit@k."""
     from datasheet_rag.eval.dataset import CATEGORIES
 
@@ -4015,7 +4033,7 @@ def eval_ablate(
         return
 
     # Index ablation: baseline (current store) vs variant (re-embedded).
-    variant = "raw_text" if index_ablation == "context-vs-raw" else "no_figure_desc"
+    variant: IndexVariant = "raw_text" if index_ablation == "context-vs-raw" else "no_figure_desc"
     console.print(
         f"[yellow]Index ablation[/] '{index_ablation}': building variant store "
         f"(variant={variant}) — this re-embeds and incurs Bedrock cost."
@@ -4024,7 +4042,7 @@ def eval_ablate(
         conn,
         variant_db,
         variant,
-        embedder,  # type: ignore[arg-type]
+        embedder,
         limit=limit,
         verbose=verbose,
     )
@@ -4044,7 +4062,7 @@ def eval_ablate(
         _dump_reports_json(reports, json_out)
 
 
-def _dump_reports_json(reports: list, path: Path) -> None:
+def _dump_reports_json(reports: list[RunReport], path: Path) -> None:
     import json as _json
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -4087,7 +4105,7 @@ def eval_review(
 # ---------------------------------------------------------------------------
 
 
-def _admin_request(method: str, path: str, *, token: str | None, **kwargs):
+def _admin_request(method: str, path: str, *, token: str | None, **kwargs: Any) -> dict[str, Any]:
     """Call an admin endpoint on the configured remote server.
 
     Admin operates over HTTP against RAG_SERVER_URL (managing the *server's*
@@ -4124,7 +4142,8 @@ def _admin_request(method: str, path: str, *, token: str | None, **kwargs):
         raise click.ClickException(f"404: {resp.json().get('detail', resp.text)}")
     if resp.status_code >= 400:
         raise click.ClickException(f"{resp.status_code}: {resp.text}")
-    return resp.json()
+    body: dict[str, Any] = resp.json()
+    return body
 
 
 @cli.group(short_help="Administer a remote RAG server.")
@@ -4207,7 +4226,7 @@ def key_revoke(key_id: str, token: str | None) -> None:
 @click.option("--token", default=None, help="Admin token (default: RAG_SERVER_TOKEN).")
 def audit_cmd(doc_id: str | None, since: str | None, limit: int, token: str | None) -> None:
     """Show the ingest-path audit trail."""
-    params = {"limit": limit}
+    params: dict[str, Any] = {"limit": limit}
     if doc_id:
         params["doc_id"] = doc_id
     if since:
