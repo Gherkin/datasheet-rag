@@ -50,7 +50,7 @@ from datasheet_rag.backend import (
 )
 from datasheet_rag.config import get_settings
 from datasheet_rag.models.chunk import ChunkLevel, LayoutType
-from datasheet_rag.store import SearchFilters, SearchResult
+from datasheet_rag.store import DocMetadata, SearchFilters, SearchResult
 
 # ---------------------------------------------------------------------------
 # Backend access — local sqlite or remote HTTP, chosen from config.
@@ -342,7 +342,7 @@ def _list_documents_impl(
     backend: RagBackend | None = None,
     conn: Any | None = None,
 ) -> list[dict[str, Any]]:
-    """List documents in the metadata sidecar, optionally filtered."""
+    """List the store's documents, optionally filtered by sidecar metadata."""
     be = _backend(backend, conn)
     docs = be.list_documents(
         project_id=_resolve_project(project_id),
@@ -375,18 +375,20 @@ def _get_document_metadata_impl(
 ) -> dict[str, Any] | None:
     be = _backend(backend, conn)
     meta = be.get_metadata(doc_id)
-    if meta is None:
+    summary = next((d for d in be.list_documents() if d.doc_id == doc_id), None)
+    if meta is None and summary is None:
         return None
-    result = meta.model_dump(exclude_none=False)
-    title, page_count = None, None
-    for d in be.list_documents():
-        if d.doc_id == doc_id:
-            title, page_count = d.doc_title, d.page_count
-            break
-    if title:
-        result["doc_title"] = title
-    if page_count is not None:
-        result["page_count"] = page_count
+
+    # An ingested document need not have a sidecar row. Answering with the
+    # empty row says "this document exists, nothing is tagged on it", which
+    # is the truth; ``None`` reads as "no such document" and sends the caller
+    # hunting for a doc_id that search and stats just handed them.
+    result = (meta or DocMetadata(doc_id=doc_id)).model_dump(exclude_none=False)
+    if summary is not None:
+        if summary.doc_title:
+            result["doc_title"] = summary.doc_title
+        if summary.page_count is not None:
+            result["page_count"] = summary.page_count
     return result
 
 
@@ -634,14 +636,24 @@ def build_server() -> Any:
         mpn: str | None = None,
         manufacturer: str | None = None,
     ) -> list[dict[str, Any]]:
-        """List documents in the current (or specified) project."""
+        """List documents in the current (or specified) project.
+
+        Every ingested document appears, whether or not metadata has been
+        assigned to it; untagged ones come back with null sidecar fields.
+        Filtering by group, mpn or manufacturer narrows this to documents
+        that do have metadata, since that is the only place those live.
+        """
         return _list_documents_impl(
             project_id=project_id, group=group, mpn=mpn, manufacturer=manufacturer,
         )
 
     @mcp.tool()
     def get_document_metadata(doc_id: str) -> dict[str, Any] | None:
-        """Fetch the metadata sidecar row for a document (mpn, manufacturer, tags, …)."""
+        """Fetch the metadata sidecar row for a document (mpn, manufacturer, tags, …).
+
+        An ingested document with no metadata assigned returns a row of null
+        fields. ``None`` means no such document is in the store.
+        """
         return _get_document_metadata_impl(doc_id)
 
     @mcp.tool()

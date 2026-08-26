@@ -220,6 +220,26 @@ class LocalBackend(RagBackend):
                     page_count=page_count,
                 )
             )
+
+        # The sidecar row is optional: it is written by the metadata-tagging
+        # step, which ingestion does not require. A document that skipped it
+        # is still chunked, searchable and reachable by every other read path,
+        # so list it too — with the sidecar fields left null — rather than
+        # reporting an empty catalogue for a store that plainly has documents
+        # in it. Filters on group, mpn or manufacturer suppress the fallback:
+        # those fields live nowhere but the sidecar, so a document without one
+        # cannot match them.
+        if group_name is None and mpn is None and manufacturer is None:
+            listed = {d.doc_id for d in out}
+            for row in get_ingested_docs(self._get_conn(), project_id=project_id):
+                doc_id = row["doc_id"]
+                if doc_id in listed:
+                    continue
+                title, page_count = self._derived_doc_fields(doc_id)
+                out.append(
+                    DocSummary(doc_id=doc_id, doc_title=title, page_count=page_count)
+                )
+            out.sort(key=lambda d: d.doc_id)
         return out
 
     def get_ingested_docs(

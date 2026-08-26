@@ -372,6 +372,34 @@ def test_get_document_metadata_missing_returns_none(conn: Any) -> None:
     assert _get_document_metadata_impl("nope", conn=conn) is None
 
 
+def test_list_documents_includes_docs_without_a_sidecar_row(conn: Any) -> None:
+    # docB is ingested but never tagged; docA is tagged. Both are documents.
+    set_metadata(conn, "docA", mpn="STM32H743")
+
+    out = _list_documents_impl(conn=conn)
+
+    assert [d["doc_id"] for d in out] == ["docA", "docB"]
+    untagged = out[1]
+    assert untagged["mpn"] is None
+    assert untagged["project_id"] is None
+    assert untagged["tags"] == []
+
+
+def test_list_documents_sidecar_filter_excludes_untagged_docs(conn: Any) -> None:
+    set_metadata(conn, "docA", manufacturer="ST")
+    # docB has no sidecar row, so it cannot match a manufacturer filter.
+    out = _list_documents_impl(manufacturer="ST", conn=conn)
+    assert [d["doc_id"] for d in out] == ["docA"]
+
+
+def test_get_document_metadata_returns_empty_row_for_untagged_doc(conn: Any) -> None:
+    out = _get_document_metadata_impl("docB", conn=conn)
+    assert out is not None
+    assert out["doc_id"] == "docB"
+    assert out["mpn"] is None
+    assert out["tags"] == []
+
+
 def test_stats_total_and_by_level(conn: Any) -> None:
     out = _stats_impl(project_id="p1", conn=conn)
     assert out["total_chunks"] == 6  # 1 MACRO + 2 MESO + 3 MICRO
