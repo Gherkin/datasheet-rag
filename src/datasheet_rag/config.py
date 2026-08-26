@@ -115,6 +115,42 @@ class Settings(BaseSettings):
         ),
     )
 
+    # ------------------------------------------------------------------
+    # MCP over HTTP — the server mounts the MCP tool surface at /mcp so
+    # clients can point straight at it, with no local `rag-mcp` process
+    # to install and configure (GH #39).
+    # ------------------------------------------------------------------
+    server_mcp_enabled: bool = Field(
+        default=True,
+        alias="RAG_SERVER_MCP_ENABLED",
+        description=(
+            "Mount the MCP endpoint at /mcp (and /mcp/<project_id>). Set false "
+            "to serve the plain REST API only. The endpoint honours the same "
+            "read token / API keys as every other read route."
+        ),
+    )
+    mcp_allowed_hosts: str | None = Field(
+        default=None,
+        alias="RAG_MCP_ALLOWED_HOSTS",
+        description=(
+            "Comma-separated allowlist of Host header values accepted at /mcp "
+            "(DNS-rebinding protection). Entries are exact ('rag.internal:8080') "
+            "or port-wildcarded ('rag.internal:*'); there is no '*' catch-all. "
+            "Unset = protection disabled, which is the sane default for a server "
+            "reached by many names and through proxies — the bearer token, not "
+            "the Host header, is what actually guards this endpoint."
+        ),
+    )
+    mcp_allowed_origins: str | None = Field(
+        default=None,
+        alias="RAG_MCP_ALLOWED_ORIGINS",
+        description=(
+            "Comma-separated allowlist of browser Origin values accepted at "
+            "/mcp. Only consulted when RAG_MCP_ALLOWED_HOSTS is set. Requests "
+            "with no Origin header (every non-browser MCP client) always pass."
+        ),
+    )
+
     # AWS
     aws_region: str = Field(default="eu-west-1", alias="AWS_REGION")
     aws_profile: str | None = Field(default=None, alias="AWS_PROFILE")
@@ -431,6 +467,18 @@ class Settings(BaseSettings):
         if not self.server_cors_origins:
             return []
         return [o.strip() for o in self.server_cors_origins.split(",") if o.strip()]
+
+    def mcp_allowed_hosts_list(self) -> list[str]:
+        """Parse the /mcp Host allowlist into a list (empty when unset)."""
+        if not self.mcp_allowed_hosts:
+            return []
+        return [h.strip() for h in self.mcp_allowed_hosts.split(",") if h.strip()]
+
+    def mcp_allowed_origins_list(self) -> list[str]:
+        """Parse the /mcp Origin allowlist into a list (empty when unset)."""
+        if not self.mcp_allowed_origins:
+            return []
+        return [o.strip() for o in self.mcp_allowed_origins.split(",") if o.strip()]
 
     # MCP server scoping
     default_project_id: str | None = Field(

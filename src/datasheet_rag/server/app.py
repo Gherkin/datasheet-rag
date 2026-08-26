@@ -8,6 +8,8 @@ existing pydantic models (``Chunk``, ``SearchResult``, ``DocMetadata``,
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -110,10 +112,29 @@ class CreateKeyBody(BaseModel):
 
 
 def build_app() -> FastAPI:
+    # The MCP endpoint is built before the app so its session manager can be
+    # folded into the app's lifespan — it must be running before /mcp can
+    # take a request. Bound to the server's own LocalBackend, never the
+    # config-resolved one, so the server cannot call itself (GH #39).
+    mcp_mount = None
+    if get_settings().server_mcp_enabled:
+        from datasheet_rag.server.mcp_mount import build_mcp_mount
+
+        mcp_mount = build_mcp_mount(get_backend())
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        if mcp_mount is None:
+            yield
+            return
+        async with mcp_mount.lifespan():
+            yield
+
     app = FastAPI(
         title="datasheet-rag server",
         description="HTTP API over the shared RAG store.",
         version="0.1.0",
+        lifespan=lifespan,
     )
 
     origins = get_settings().cors_origins_list()
@@ -589,5 +610,12 @@ def build_app() -> FastAPI:
         be: LocalBackend = Depends(get_backend),
     ) -> dict:
         return {"entries": list_audit(be.conn, doc_id=doc_id, since=since, limit=limit)}
+
+    # -- MCP over HTTP ---------------------------------------------------
+    # Mounted last so it cannot shadow a REST route. Serves both /mcp and
+    # /mcp/<project_id>; the trailing segment scopes the tools to a project
+    # the way a `.rag.toml` scopes the stdio server.
+    if mcp_mount is not None:
+        app.mount("/mcp", mcp_mount.app)
 
     return app
