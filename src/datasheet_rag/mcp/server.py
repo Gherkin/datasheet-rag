@@ -1,4 +1,4 @@
-"""MCP stdio server exposing the local RAG store as tools.
+"""MCP server exposing the RAG store as tools, over stdio or HTTP.
 
 Tools surfaced to the LLM agent:
 
@@ -10,15 +10,28 @@ Tools surfaced to the LLM agent:
 * ``get_document_metadata`` — the sidecar row for a document.
 * ``stats``                 — chunk counts per level / doc, for sanity checking.
 
+Transports
+----------
+``main()`` runs this on stdio, for a ``rag-mcp`` process launched by the
+client. :mod:`datasheet_rag.server.mcp_mount` mounts the same tools inside the
+RAG server's FastAPI app at ``/mcp``, so a client can point at the server
+directly with nothing installed locally (GH #39). ``build_server`` takes the
+two arguments that differ between those worlds: the backend to use, and
+whether the loopback PDF viewer is reachable from the user's browser.
+
 Project scoping
 ---------------
 The default project is resolved per call by ``_resolve_project``: an explicit
-``project_id`` argument wins, then a ``.rag.toml`` discovered by walking up
-from the server's working directory (same discovery as the CLI), then the
+``project_id`` argument wins, then the project carried by the current request
+(the ``/mcp/<project_id>`` path segment or an ``X-RAG-Project`` header, HTTP
+only), then a ``.rag.toml`` discovered by walking up from the server's working
+directory (same discovery as the CLI, stdio only), then the
 ``RAG_DEFAULT_PROJECT_ID`` env var (or ``settings.default_project_id``).
 Running Claude Code inside a checkout with a ``.rag.toml`` therefore scopes
-every tool call to that project automatically, without per-project
-``.mcp.json``/env configuration.
+every stdio tool call to that project automatically, without per-project
+``.mcp.json``/env configuration; over HTTP the URL carries the same
+information, since the server's own working directory means nothing to a
+remote caller.
 
 Connection / embedder caching
 -----------------------------
@@ -37,6 +50,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from contextvars import ContextVar
 from threading import Thread
 from typing import Any, Literal
 
@@ -77,10 +91,40 @@ def _backend(
     return get_backend()
 
 
+# ---------------------------------------------------------------------------
+# Request-scoped call environment.
+#
+# Both of these are per-request rather than process-wide. Over HTTP a single
+# process serves every project and every client, so neither "which project is
+# this" nor "can the caller open a loopback URL" is a property of the process.
+# The HTTP mount sets them per request; stdio leaves them at their defaults,
+# which describe a client sharing this machine.
+# ---------------------------------------------------------------------------
+
+#: The project a call is scoped to, from the ``/mcp/<project_id>`` path
+#: segment or the ``X-RAG-Project`` header. Unset over stdio.
+request_project: ContextVar[str | None] = ContextVar("rag_request_project", default=None)
+
+#: Whether the MCP client shares this machine with the server — true for
+#: stdio, false for the HTTP mount. See ``build_server``'s ``local_client``.
+request_local_client: ContextVar[bool] = ContextVar("rag_request_local_client", default=True)
+
+
+def _source_page_tool() -> str:
+    """The tool to point users at for a page they cannot otherwise see.
+
+    ``show_pdf`` hands back a loopback URL, which only means something when
+    the client and the server share a machine; ``show_page`` renders inline
+    and works anywhere.
+    """
+    return "show_pdf" if request_local_client.get() else "show_page"
+
+
 def _resolve_project(project_id: str | None) -> str | None:
     """Resolve the effective project_id for a tool call.
 
-    Priority: explicit arg → ``.rag.toml`` discovered from the server's cwd →
+    Priority: explicit arg → the current request's project (HTTP only) →
+    ``.rag.toml`` discovered from the server's cwd (stdio only) →
     settings.default_project_id (RAG_DEFAULT_PROJECT_ID env). Returns None if
     none are set, meaning "search globally". The ``.rag.toml`` lookup mirrors
     ``resolve_cli_project_id`` so the MCP server scopes itself the same way
@@ -89,11 +133,16 @@ def _resolve_project(project_id: str | None) -> str | None:
     if project_id:
         return project_id
 
-    from datasheet_rag.project_config import get_project_config
+    scoped = request_project.get()
+    if scoped:
+        return scoped
 
-    config = get_project_config()
-    if config is not None and config.project_id:
-        return config.project_id
+    if request_local_client.get():
+        from datasheet_rag.project_config import get_project_config
+
+        config = get_project_config()
+        if config is not None and config.project_id:
+            return config.project_id
 
     return get_settings().default_project_id or None
 
@@ -198,7 +247,7 @@ def _shape_chunk(result_or_chunk: Any, *, score: float | None = None) -> dict[st
         out["DISPLAY_INSTRUCTION"] = (
             "This chunk describes a figure but no image is stored for it. "
             "Do NOT call show_figure or get_figure on it — they will fail. "
-            f"To let the user see it, call show_pdf('{chunk.doc_id}'"
+            f"To let the user see it, call {_source_page_tool()}('{chunk.doc_id}'"
             + (f", {pages[0]})" if pages else ")")
             + " instead."
         )
@@ -437,8 +486,8 @@ def _figure_unavailable_text(chunk_id: str, exc: Exception) -> str:
         f"this chunk, and do not try other figure chunks from the same "
         f"document expecting a different result. The chunk's own text and "
         f"caption are all there is. If the user needs to see the figure, call "
-        f"show_pdf('{doc_id}', <page>) with the chunk's page and let them read "
-        f"it in the source document."
+        f"{_source_page_tool()}('{doc_id}', <page>) with the chunk's page and let "
+        f"them read it in the source document."
     )
 
 
@@ -503,19 +552,49 @@ _FIGURE_MIME = {
 }
 
 
-def build_server() -> Any:
+def build_server(
+    backend: RagBackend | None = None,
+    *,
+    local_client: bool = True,
+    **fastmcp_kwargs: Any,
+) -> Any:
     """Construct and return the FastMCP server with all tools registered.
 
     Imported lazily so the module is testable without the ``mcp`` SDK
     installed in the sandbox.
+
+    Args:
+        backend: the backend every tool call goes through. ``None`` means
+            "resolve from config" (stdio's behaviour). The HTTP mount passes
+            its own ``LocalBackend`` so the server cannot recurse into a
+            ``RemoteBackend`` pointing at itself.
+        local_client: whether the MCP client runs on this machine — true for
+            stdio, false for the HTTP mount. Two things hang off it. The
+            loopback PDF viewer behind ``show_pdf`` is only reachable when
+            client and server share a host, so over HTTP that tool is not
+            registered at all and the agent is pointed at ``show_page``
+            instead (GH #45 tracks serving PDFs from the server properly).
+            And ``.rag.toml`` discovery from the working directory only makes
+            sense when the client chose that directory; a remote caller scopes
+            itself through the URL instead.
+
+            This decides which tools get registered and how the instructions
+            read — both fixed at build time. The same fact reaches the
+            per-call text through ``request_local_client``, which the HTTP
+            mount sets on every request.
+        **fastmcp_kwargs: passed through to ``FastMCP`` (transport settings
+            for the HTTP mount).
     """
     from mcp.server.fastmcp import FastMCP
     from mcp.types import ImageContent, TextContent
+
+    source_page_tool = "show_pdf" if local_client else "show_page"
 
     settings = get_settings()
     project_hint = settings.default_project_id or "(unscoped)"
     mcp = FastMCP(
         name=f"datasheet-rag[{project_hint}]",
+        **fastmcp_kwargs,
         instructions=(
             "Tools for searching and navigating a project-scoped RAG database "
             "of electronics datasheets and reference manuals. Prefer "
@@ -535,7 +614,7 @@ def build_server() -> Any:
             "fetching it. A chunk whose text reads like a figure but which "
             "carries `has_figure: false` has no image behind it — its "
             "document was ingested without figures. Never call `show_figure` "
-            "or `get_figure` on those; offer `show_pdf` instead. "
+            f"or `get_figure` on those; offer `{source_page_tool}` instead. "
             "\n\n"
             "Showing figures — decision rule: For every figure chunk found "
             "(has_figure: true), decide: "
@@ -571,8 +650,13 @@ def build_server() -> Any:
             "Source pages: Every chunk result includes a `doc_id` and a "
             "`page` field. When the user wants to see the original document "
             "— to read surrounding text, check the exact layout, or browse "
-            "adjacent pages — call `show_pdf(doc_id, page)`. This opens a "
-            "full interactive PDF viewer inline. Good triggers: the user "
+            f"adjacent pages — call `{source_page_tool}(doc_id, page)`. "
+            + (
+                "This opens a full interactive PDF viewer in the browser. "
+                if local_client
+                else "This renders the page inline. "
+            )
+            + "Good triggers: the user "
             "asks 'can I see the datasheet?', 'show me that page', or asks "
             "a detailed question about layout/formatting/context not captured "
             "in the chunk text. After an in-depth answer drawn from a "
@@ -607,27 +691,30 @@ def build_server() -> Any:
         return _search_impl(
             query, mode=mode, k=k, project_id=project_id,
             doc_id=doc_id, level=level, layout_types=layout_types,
+            backend=backend,
         )
 
     @mcp.tool()
     def get_chunk(chunk_id: str, include_neighbors: bool = False) -> dict[str, Any] | None:
         """Fetch a chunk by ID. If include_neighbors, also returns parent/prev/next."""
-        return _get_chunk_impl(chunk_id, include_neighbors=include_neighbors)
+        return _get_chunk_impl(
+            chunk_id, include_neighbors=include_neighbors, backend=backend
+        )
 
     @mcp.tool()
     def navigate(chunk_id: str, direction: Direction) -> list[dict[str, Any]]:
         """Step through the chunk graph: parent | children | prev | next | chapter_root."""
-        return _navigate_impl(chunk_id, direction)
+        return _navigate_impl(chunk_id, direction, backend=backend)
 
     @mcp.tool()
     def zoom_in(chunk_id: str) -> list[dict[str, Any]]:
         """Get finer-grained child chunks (e.g. macro -> meso, meso -> micro)."""
-        return _navigate_impl(chunk_id, "children")
+        return _navigate_impl(chunk_id, "children", backend=backend)
 
     @mcp.tool()
     def zoom_out(chunk_id: str) -> list[dict[str, Any]]:
         """Get the parent chunk (broader context, e.g. micro -> meso, meso -> macro)."""
-        return _navigate_impl(chunk_id, "parent")
+        return _navigate_impl(chunk_id, "parent", backend=backend)
 
     @mcp.tool()
     def list_documents(
@@ -645,6 +732,7 @@ def build_server() -> Any:
         """
         return _list_documents_impl(
             project_id=project_id, group=group, mpn=mpn, manufacturer=manufacturer,
+            backend=backend,
         )
 
     @mcp.tool()
@@ -654,7 +742,7 @@ def build_server() -> Any:
         An ingested document with no metadata assigned returns a row of null
         fields. ``None`` means no such document is in the store.
         """
-        return _get_document_metadata_impl(doc_id)
+        return _get_document_metadata_impl(doc_id, backend=backend)
 
     @mcp.tool()
     def stats(
@@ -662,7 +750,7 @@ def build_server() -> Any:
         doc_id: str | None = None,
     ) -> dict[str, Any]:
         """Return chunk counts (total + by level) for the current scope."""
-        return _stats_impl(project_id=project_id, doc_id=doc_id)
+        return _stats_impl(project_id=project_id, doc_id=doc_id, backend=backend)
 
     @mcp.tool()
     def get_figure(chunk_id: str):
@@ -678,7 +766,7 @@ def build_server() -> Any:
         """
         import base64
         try:
-            result = _get_figure_impl(chunk_id)
+            result = _get_figure_impl(chunk_id, backend=backend)
         except FigureUnavailableError as exc:
             return [TextContent(type="text", text=_figure_unavailable_text(chunk_id, exc))]
         image_bytes, fmt = _compress_for_mcp(result["image_bytes"], result["format"])
@@ -707,7 +795,7 @@ def build_server() -> Any:
         from the resource registration. See ``get_figure`` for the
         in-tool-result rendering path.
         """
-        result = _get_figure_impl(chunk_id)
+        result = _get_figure_impl(chunk_id, backend=backend)
         return result["image_bytes"]
 
     # ------------------------------------------------------------------
@@ -737,7 +825,7 @@ def build_server() -> Any:
         """
         import base64
         try:
-            result = _get_figure_impl(chunk_id)
+            result = _get_figure_impl(chunk_id, backend=backend)
         except FigureUnavailableError as exc:
             return [TextContent(type="text", text=_figure_unavailable_text(chunk_id, exc))]
         image_bytes, fmt = _compress_for_mcp(result["image_bytes"], result["format"])
@@ -868,42 +956,51 @@ def build_server() -> Any:
     # PDF viewer — loopback browser viewer + show_page inline rendering
     # ------------------------------------------------------------------
 
-    @mcp.tool()
-    def show_pdf(doc_id: str, page: int = 1):
-        """Open the source PDF in a browser-based interactive viewer.
+    # show_pdf hands back a 127.0.0.1 URL served by this process, which is
+    # only openable when the client shares the machine. Over HTTP the tool
+    # is therefore left unregistered rather than offered and then
+    # disappointing; show_page covers the remote case by rendering inline.
+    # GH #45 tracks serving PDFs from the server so this can come back.
+    if local_client:
+        @mcp.tool()
+        def show_pdf(doc_id: str, page: int = 1):
+            """Open the source PDF in a browser-based interactive viewer.
 
-        Starts a local HTTP server (if not already running) and returns a
-        URL the user can open in their browser for a full scrollable, zoomable
-        PDF.js viewer.  Use show_page to render a single page inline without
-        leaving the chat.
+            Starts a local HTTP server (if not already running) and returns a
+            URL the user can open in their browser for a full scrollable, zoomable
+            PDF.js viewer.  Use show_page to render a single page inline without
+            leaving the chat.
 
-        Use when:
-        - The user asks to see the full datasheet / original document.
-        - They want to browse pages freely beyond a single screenshot.
+            Use when:
+            - The user asks to see the full datasheet / original document.
+            - They want to browse pages freely beyond a single screenshot.
 
-        Args:
-            doc_id: From chunk.doc_id or list_documents results.
-            page:   1-based starting page number (passed as URL hash).
-        """
-        try:
-            # Fetch via the backend (HTTP in remote mode) and prime the
-            # viewer cache so the loopback server can serve it locally.
-            pdf_viewer.prime_pdf_cache(doc_id, get_backend().get_pdf_bytes(doc_id))
-            url = pdf_viewer.viewer_url(doc_id, page=page)
-        except FileNotFoundError as exc:
-            return [TextContent(type="text", text=f"Error: {exc}")]
-        except Exception as exc:
-            return [TextContent(type="text", text=f"Failed to load PDF: {exc}")]
-        meta = _get_document_metadata_impl(doc_id)
-        label = ""
-        if meta:
-            parts = [meta.get("mpn") or "", meta.get("manufacturer") or ""]
-            label = " — ".join(p for p in parts if p)
-        desc = f" ({label})" if label else ""
-        return [TextContent(
-            type="text",
-            text=f"PDF viewer{desc}: {url}\n\nOpen this URL in your browser to view the full document.",
-        )]
+            Args:
+                doc_id: From chunk.doc_id or list_documents results.
+                page:   1-based starting page number (passed as URL hash).
+            """
+            try:
+                # Fetch via the backend (HTTP in remote mode) and prime the
+                # viewer cache so the loopback server can serve it locally.
+                pdf_viewer.prime_pdf_cache(doc_id, _backend(backend).get_pdf_bytes(doc_id))
+                url = pdf_viewer.viewer_url(doc_id, page=page)
+            except FileNotFoundError as exc:
+                return [TextContent(type="text", text=f"Error: {exc}")]
+            except Exception as exc:
+                return [TextContent(type="text", text=f"Failed to load PDF: {exc}")]
+            meta = _get_document_metadata_impl(doc_id, backend=backend)
+            label = ""
+            if meta:
+                parts = [meta.get("mpn") or "", meta.get("manufacturer") or ""]
+                label = " — ".join(p for p in parts if p)
+            desc = f" ({label})" if label else ""
+            return [TextContent(
+                type="text",
+                text=(
+                    f"PDF viewer{desc}: {url}\n\n"
+                    "Open this URL in your browser to view the full document."
+                ),
+            )]
 
     @mcp.tool(meta={"ui": {"resourceUri": "ui://datasheet-rag/figure-app"}})
     def show_page(doc_id: str, page: int = 1):
@@ -928,7 +1025,7 @@ def build_server() -> Any:
         from pdf2image import convert_from_bytes
 
         try:
-            pdf_bytes = get_backend().get_pdf_bytes(doc_id)
+            pdf_bytes = _backend(backend).get_pdf_bytes(doc_id)
         except FileNotFoundError as exc:
             return [TextContent(type="text", text=f"Error: {exc}")]
         except Exception as exc:
@@ -942,7 +1039,7 @@ def build_server() -> Any:
         buf = io.BytesIO()
         images[0].save(buf, format="PNG")
         img_b64 = base64.b64encode(buf.getvalue()).decode()
-        meta = _get_document_metadata_impl(doc_id)
+        meta = _get_document_metadata_impl(doc_id, backend=backend)
         label = ""
         if meta:
             parts = [meta.get("mpn") or "", meta.get("manufacturer") or ""]
