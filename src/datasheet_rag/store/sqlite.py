@@ -393,19 +393,18 @@ def insert_chunk_graph(
     group_name: str | None = None,
     title_source: str = "auto",
     force_title: bool = False,
-    prune: bool = True,
 ) -> InsertStats:
     """Convenience wrapper: insert every chunk in a :class:`ChunkGraph`.
 
-    Pruning is on here, unlike :func:`insert_chunks_stats`: a
-    :class:`ChunkGraph` *is* a whole document (see its docstring, and every
-    site that builds one), so rows of ``graph.doc_id`` this graph does not
-    carry are leftovers from a previous chunking — and forgetting to ask
-    for the cleanup is how GH #44 happened in the first place. Pass
-    ``prune=False`` for a graph that is deliberately partial.
+    Always prunes, and offers no way not to: a :class:`ChunkGraph` *is* a
+    whole document (see its docstring, and every site that builds one), so
+    rows of ``graph.doc_id`` this graph does not carry are leftovers from a
+    previous chunking — stale text that keeps competing in search, which
+    nobody wants kept (GH #44). Partial inserts go through
+    :func:`insert_chunks_stats`, which does not prune.
 
-    Returns the full :class:`InsertStats` for the same reason: whoever
-    prunes should be able to report it.
+    Returns the full :class:`InsertStats` so the caller can report the
+    deletions: ingest prints the count and the server audits it.
     """
     return insert_chunks_stats(
         conn,
@@ -415,7 +414,7 @@ def insert_chunk_graph(
         group_name=group_name,
         title_source=title_source,
         force_title=force_title,
-        prune=prune,
+        prune=True,
     )
 
 

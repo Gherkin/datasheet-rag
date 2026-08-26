@@ -540,7 +540,6 @@ class LocalBackend(RagBackend):
                     vectors=vectors_tmp,
                     project_id=project_id,
                     group_name=group_name,
-                    prune=True,
                 ).pruned
                 conn.commit()
                 descriptions = describe_figures_in_store(
@@ -570,20 +569,20 @@ class LocalBackend(RagBackend):
             vectors = None
             if embed:
                 vectors = embed_chunk_graph(graph, embedder=self._get_embedder())
-            # prune=True: this graph is the whole document, so rows it does
-            # not carry are leftovers from a previous chunking of the same doc
-            # — a re-chunk that changes the count shifts every positional id
-            # after it and would otherwise strand the tail in search forever
-            # (GH #44). The upsert still preserves what a fresh graph does not
-            # carry (descriptions, a curated title, a relinked figure path) for
-            # every id that survives.
+            # insert_chunk_graph prunes: this graph is the whole document,
+            # so rows it does not carry are leftovers from a previous chunking
+            # of the same doc — a re-chunk that changes the count shifts every
+            # positional id after it and would otherwise strand the tail in
+            # search forever (GH #44). The upsert still preserves what a fresh
+            # graph does not carry (descriptions, a curated title, a relinked
+            # figure path) for every id that survives, which is why this is not
+            # a delete-then-insert.
             stats = insert_chunk_graph(
                 conn,
                 graph,
                 vectors=vectors,
                 project_id=project_id,
                 group_name=group_name,
-                prune=True,
             )
             pruned += stats.pruned
             conn.commit()

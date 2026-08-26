@@ -346,7 +346,7 @@ def test_prune_drops_chunks_the_new_graph_does_not_carry(
     assert count_chunks(conn, doc_id="doc1") == 5
 
     graph = _shorter_doc1_graph()
-    stats = insert_chunk_graph(conn, graph, prune=True)
+    stats = insert_chunk_graph(conn, graph)
     assert stats.inserted == 3
     assert stats.pruned == 2
 
@@ -365,7 +365,7 @@ def test_prune_leaves_other_documents_alone(conn: sqlite3.Connection) -> None:
     chunks = _seed_chunks()
     insert_chunks(conn, chunks, vectors=_seed_vectors(chunks))
 
-    insert_chunk_graph(conn, _shorter_doc1_graph(), prune=True)
+    insert_chunk_graph(conn, _shorter_doc1_graph())
 
     # Only the doc_ids the incoming chunks cover are pruned.
     assert count_chunks(conn, doc_id="doc2") == 3
@@ -387,20 +387,14 @@ def test_insert_chunks_does_not_prune_by_default(conn: sqlite3.Connection) -> No
 def test_insert_chunk_graph_prunes_without_being_asked(
     conn: sqlite3.Connection,
 ) -> None:
-    # A ChunkGraph is a whole document, so the cleanup is the default —
-    # a caller that forgets to ask for it would re-open GH #44.
+    # A ChunkGraph is a whole document, so the cleanup is unconditional —
+    # there is no opt-out, because nobody wants stale leftovers kept.
     chunks = _seed_chunks()
     insert_chunks(conn, chunks, vectors=_seed_vectors(chunks))
 
     stats = insert_chunk_graph(conn, _shorter_doc1_graph())
     assert stats.pruned == 2
     assert count_chunks(conn, doc_id="doc1") == 3
-
-    # ...and a deliberately partial graph can still opt out.
-    insert_chunks(conn, chunks, vectors=_seed_vectors(chunks))
-    stats = insert_chunk_graph(conn, _shorter_doc1_graph(), prune=False)
-    assert stats.pruned == 0
-    assert count_chunks(conn, doc_id="doc1") == 5
 
 
 def test_prune_keeps_curated_fields_on_surviving_chunks(
@@ -418,7 +412,7 @@ def test_prune_keeps_curated_fields_on_surviving_chunks(
     conn.commit()
 
     # The fresh graph carries neither field, exactly like a re-chunk.
-    insert_chunk_graph(conn, _shorter_doc1_graph(), prune=True)
+    insert_chunk_graph(conn, _shorter_doc1_graph())
 
     survivor = get_chunk(conn, "doc1:2:0")
     assert survivor is not None
