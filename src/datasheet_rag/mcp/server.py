@@ -13,11 +13,11 @@ Tools surfaced to the LLM agent:
 Transports
 ----------
 ``main()`` runs this on stdio, for a ``rag-mcp`` process launched by the
-client. :mod:`datasheet_rag.server.mcp_mount` mounts the same tools inside the
+client. :mod:`datasheet_rag.server.mcp_mount` serves the same tools from the
 RAG server's FastAPI app at ``/mcp``, so a client can point at the server
 directly with nothing installed locally (GH #39). ``build_server`` takes the
-two arguments that differ between those worlds: the backend to use, and
-whether the loopback PDF viewer is reachable from the user's browser.
+two arguments that separate those worlds: the backend every call goes through,
+and whether the client shares this machine.
 
 Project scoping
 ---------------
