@@ -107,10 +107,12 @@ def test_initialize_over_http(client: TestClient) -> None:
     assert r.json()["result"]["serverInfo"]["name"].startswith("datasheet-rag")
 
 
-def test_mcp_without_trailing_slash_reaches_the_endpoint(client: TestClient) -> None:
-    # Mounting strips "/mcp" to "", which matches no route until the gate
-    # rewrites it — a bare /mcp is what most clients are configured with.
-    r = _rpc(client, "tools/list", path="/mcp")
+@pytest.mark.parametrize("path", ["/mcp", "/mcp/", "/mcp/proj-a"])
+def test_every_url_form_answers_without_a_redirect(client: TestClient, path: str) -> None:
+    # A bare /mcp is what most clients are configured with, and a redirect on
+    # it would cost every request a 307 and a re-POST of its body — which is
+    # exactly what a Starlette mount would do here.
+    r = _rpc(client, "tools/list", path=path, follow_redirects=False)
     assert r.status_code == 200, r.text
 
 
