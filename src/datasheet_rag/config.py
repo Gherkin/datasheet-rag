@@ -123,6 +123,16 @@ class Settings(BaseSettings):
             "default because ingest requests embed server-side and can be slow."
         ),
     )
+    server_max_upload_mb: int = Field(
+        default=512,
+        alias="RAG_SERVER_MAX_UPLOAD_MB",
+        description=(
+            "Largest source PDF the server accepts on an upload route, in MiB. "
+            "Uploads are read into memory, so this is the bound on what one "
+            "request can cost the process; a datasheet that trips it is far "
+            "more likely to be a mistake than a real document."
+        ),
+    )
     compute: Literal["server", "client"] = Field(
         default="server",
         description=(

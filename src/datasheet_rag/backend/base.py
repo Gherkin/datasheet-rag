@@ -206,6 +206,7 @@ class RagBackend(ABC):
         title_hints: dict[str, str] | None = None,
         vectors: Mapping[str, Sequence[float]] | None = None,
         inferred_title: str | None = None,
+        source_pdf: Path | None = None,
     ) -> IngestResult:
         """Store a parsed graph, embedding / describing / titling as asked.
 
@@ -214,6 +215,13 @@ class RagBackend(ABC):
         so the store never has to load an embedding model. ``inferred_title``
         does the same for the title LLM: the caller supplies the answer and the
         store just records it, provenance checks included.
+
+        ``source_pdf`` is the file the graph was parsed from, for a caller that
+        parsed it somewhere other than where the store lives. A store that
+        already holds the PDF ignores it; a remote one uploads it, so the
+        document it now has chunks for is one it can also serve the source of
+        (GH #43). Whether the parse ran here is not the backend's caller's
+        business to encode — passing the path it parsed is.
         """
 
     @abstractmethod

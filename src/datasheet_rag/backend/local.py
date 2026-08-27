@@ -519,7 +519,12 @@ class LocalBackend(RagBackend):
         title_hints: dict[str, str] | None = None,
         vectors: Mapping[str, Sequence[float]] | None = None,
         inferred_title: str | None = None,
+        source_pdf: Path | None = None,
     ) -> IngestResult:
+        # source_pdf is accepted and ignored: this store is on the same
+        # machine that parsed, and save_pdf_locally already put the file in
+        # pdf_dir on the way through. Only RemoteBackend has a copy to make.
+        del source_pdf
         from datasheet_rag.embedding import embed_chunk_graph
 
         # Vectors handed in were computed by the caller (RAG_COMPUTE=client,

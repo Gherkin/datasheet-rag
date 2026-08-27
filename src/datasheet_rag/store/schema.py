@@ -153,11 +153,15 @@ def stored_embedding_dim(conn: sqlite3.Connection) -> int | None:
     so than ``settings.embedding_dimensions``, which is only what *this*
     process is configured for. Callers validating a vector handed in from
     elsewhere (a client that embeds its own — GH #43) should ask the store.
+
+    A store that cannot answer raises rather than returning None: ``None``
+    means "no row recorded", which ``_check_embedding_dim`` reads as a fresh
+    database and lets through unchecked — so swallowing the error here would
+    silently disable the dimension guard. Callers that would rather degrade
+    than fail (``/health``, a liveness probe before it is anything else)
+    catch it themselves, where the tolerance is visible.
     """
-    try:
-        row = conn.execute("SELECT embedding_dim FROM schema_version WHERE id = 1").fetchone()
-    except sqlite3.Error:
-        return None
+    row = conn.execute("SELECT embedding_dim FROM schema_version WHERE id = 1").fetchone()
     return int(row["embedding_dim"]) if row is not None else None
 
 

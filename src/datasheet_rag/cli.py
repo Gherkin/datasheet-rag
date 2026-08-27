@@ -1640,6 +1640,7 @@ def embed(
     )
 
     be = _backend_for(db_path)
+    local_pdf = get_settings().pdf_dir / f"{graph.doc_id}.pdf"
 
     # Remote: ship figure images so the server stores them and the embedded
     # context_text can fold in any server-side descriptions.
@@ -1663,6 +1664,11 @@ def embed(
             metadata=MetadataPatch(),
             embed=True,
             describe_figures=False,
+            # The parse that produced this cached graph ran here, so the PDF
+            # is in this machine's pdf_dir and a remote store has never seen
+            # it. Only offered if it is actually there — a graph can outlive
+            # the file it came from (GH #43).
+            source_pdf=local_pdf if local_pdf.is_file() else None,
         )
     except RagServerError as e:
         raise _friendly_server_error(e) from e
@@ -2954,6 +2960,11 @@ def _ingest_one(
             describe_figures=do_describe,
             infer_title=infer_title,
             title_hints=title_hints or None,
+            # This path parsed the PDF here — that is what --local-parse and
+            # RAG_COMPUTE=client both mean. A remote backend has therefore
+            # never seen the file and uploads it; a local one already has it
+            # from the parse and ignores this (GH #43).
+            source_pdf=pdf_path,
         )
     except RagServerError as e:
         raise _friendly_server_error(e) from e

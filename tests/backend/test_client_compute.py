@@ -61,11 +61,12 @@ class _StubEmbedder:
 def _client_backend(handler: Any, *, embedder: Any = None) -> RemoteBackend:
     rb = RemoteBackend("http://test", compute="client")
     rb._client = httpx.Client(base_url="http://test", transport=httpx.MockTransport(handler))
-    # Pre-seed the embedder so the /health compatibility probe is not needed
-    # for tests that are not about it.
+    # Pre-seed the embedder and a matching /health so neither compatibility
+    # probe needs the transport in tests that are not about them.
     if embedder is not None:
         rb._embedder = embedder
         rb._embedding_checked = True
+        rb._health = {"status": "ok", "embedding_dimensions": EMBED_DIM}
     return rb
 
 
@@ -663,27 +664,110 @@ def test_unreachable_health_does_not_count_as_checked() -> None:
     assert rb._embedding_checked is False
 
 
-def test_supplied_vectors_still_trigger_the_compatibility_check(monkeypatch) -> None:
+def _health_handler(dims: int, *, on_ingest: Any = None) -> Any:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "ok", "embedding_dimensions": dims})
+        if on_ingest is not None:
+            return on_ingest(request)
+        raise AssertionError(f"unexpected request to {request.url.path}")
+
+    return handler
+
+
+def test_supplied_vectors_are_checked_against_the_stores_width(monkeypatch) -> None:
     """`vectors=` bypasses _get_embedder(), so the guard has to live elsewhere."""
     from datasheet_rag.backend.base import RagServerError
 
     did = "8" * 64
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/health":
-            return httpx.Response(200, json={"status": "ok", "embedding_dimensions": 1024})
-        raise AssertionError("the ingest went out despite a dimension mismatch")
-
+    # Deliberately *matching* local config: the vectors are what is wrong, and
+    # checking settings.embedding_dimensions would wave them through.
     monkeypatch.setenv("RAG_EMBEDDING_DIMENSIONS", "768")
     from datasheet_rag.config import get_settings
 
     get_settings.cache_clear()
     try:
-        rb = _client_backend(handler)
-        with pytest.raises(RagServerError, match="768 dimensions"):
+        rb = _client_backend(_health_handler(1024))
+        with pytest.raises(RagServerError, match="768-dimensional"):
             rb.ingest_chunk_graph(_graph(did), vectors={f"{did}:L2:0": [0.0] * 768})
     finally:
         get_settings.cache_clear()
+
+
+def test_correct_vectors_pass_even_when_this_machine_is_configured_otherwise(
+    monkeypatch,
+) -> None:
+    """A relay is not an embedder: its own RAG_EMBEDDING_DIMENSIONS is irrelevant."""
+    did = "9" * 64
+    sent: dict[str, Any] = {}
+
+    def on_ingest(request: httpx.Request) -> httpx.Response:
+        raw = request.content
+        sent.update(json.loads(raw[raw.index(b"{") : raw.rindex(b"}") + 1]))
+        return httpx.Response(200, json={"doc_id": did, "inserted": 1})
+
+    monkeypatch.setenv("RAG_EMBEDDING_DIMENSIONS", "1024")
+    from datasheet_rag.config import get_settings
+
+    get_settings.cache_clear()
+    try:
+        rb = RemoteBackend("http://test")  # compute=server: a pure relay
+        rb._client = httpx.Client(
+            base_url="http://test",
+            transport=httpx.MockTransport(_health_handler(EMBED_DIM, on_ingest=on_ingest)),
+        )
+        rb.ingest_chunk_graph(_graph(did), vectors={f"{did}:L2:0": [0.0] * EMBED_DIM})
+    finally:
+        get_settings.cache_clear()
+
+    # It went out rather than being refused — that is the whole point.
+    vectors = ChunkVectors.model_validate(sent["vectors"]).to_mapping()
+    assert len(vectors[f"{did}:L2:0"]) == EMBED_DIM
+
+
+def test_remote_rejects_vectors_with_describe_figures_like_local_does() -> None:
+    """The same call must not be an error on one backend and a silent write on the other."""
+    did = "7" * 64
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("the ingest went out despite mutually exclusive arguments")
+
+    rb = _client_backend(handler, embedder=_StubEmbedder())
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        rb.ingest_chunk_graph(
+            _graph(did),
+            vectors={f"{did}:L2:0": [0.0] * EMBED_DIM},
+            describe_figures=True,
+        )
+
+
+def test_an_unreachable_health_probe_is_retried_on_the_next_embed(monkeypatch) -> None:
+    """Caching the embedder must not cache the fact that the check never ran."""
+    from datasheet_rag.backend.base import RagServerError
+
+    probes: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        probes.append(request.url.path)
+        if len(probes) == 1:
+            raise httpx.ConnectError("server restarting")
+        return httpx.Response(200, json={"status": "ok", "embedding_dimensions": 1024})
+
+    import datasheet_rag.embedding as embedding
+    from datasheet_rag.config import get_settings
+
+    monkeypatch.setenv("RAG_EMBEDDING_DIMENSIONS", "768")
+    monkeypatch.setattr(embedding, "get_embedder", lambda **kw: _StubEmbedder())
+    get_settings.cache_clear()
+    try:
+        rb = _client_backend(handler)
+        rb._get_embedder()  # probe unreachable — nothing proven, nothing raised
+        with pytest.raises(RagServerError, match="768 dimensions"):
+            rb._get_embedder()  # second call reaches /health and catches it
+    finally:
+        get_settings.cache_clear()
+
+    assert probes == ["/health", "/health"]
 
 
 def test_a_supplied_title_turns_off_server_side_inference() -> None:
@@ -786,6 +870,68 @@ def test_client_compute_uploads_the_source_pdf(monkeypatch, tmp_path) -> None:
     assert b"%PDF-1.7" in uploaded["body"]
 
 
+def test_ingest_chunk_graph_uploads_the_source_pdf(tmp_path) -> None:
+    """The CLI reaches this, not ingest_pdf, for --local-parse and RAG_COMPUTE=client."""
+    did = "d" * 64
+    pdf = tmp_path / "tps62840.pdf"
+    pdf.write_bytes(b"%PDF-1.7\nnot really\n")
+    uploaded: dict[str, bytes] = {}
+    order: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        order.append(request.url.path)
+        if request.url.path == f"/documents/{did}/pdf":
+            uploaded["body"] = request.content
+            return httpx.Response(200, json={"stored": True, "doc_id": did})
+        return httpx.Response(200, json={"doc_id": did, "inserted": 1})
+
+    rb = _client_backend(handler, embedder=_StubEmbedder())
+    rb.ingest_chunk_graph(_graph(did), embed=True, source_pdf=pdf)
+
+    assert b"%PDF-1.7" in uploaded["body"]
+    # Chunks first: a PDF for a document that failed to ingest references nothing.
+    assert order == ["/ingest", f"/documents/{did}/pdf"]
+
+
+def test_a_failed_pdf_upload_warns_but_keeps_the_ingest(tmp_path, capsys) -> None:
+    """The chunks are already committed by then — reporting a failure invites a rerun."""
+    did = "c" * 64
+    pdf = tmp_path / "tps62840.pdf"
+    pdf.write_bytes(b"%PDF-1.7\nnot really\n")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == f"/documents/{did}/pdf":
+            # A server older than this route.
+            return httpx.Response(405, json={"detail": "Method Not Allowed"})
+        return httpx.Response(200, json={"doc_id": did, "inserted": 1})
+
+    rb = _client_backend(handler, embedder=_StubEmbedder())
+    result = rb.ingest_chunk_graph(_graph(did), embed=True, source_pdf=pdf)
+
+    assert result.inserted == 1
+    assert "source PDF failed" in capsys.readouterr().err
+
+
+def test_local_backend_ignores_source_pdf(conn, tmp_path) -> None:
+    """It parsed here, so save_pdf_locally already did this on the way through."""
+    did = "b" * 64
+    be = LocalBackend(conn=conn)
+    result = be.ingest_chunk_graph(
+        _graph(did), embed=False, source_pdf=tmp_path / "nonexistent.pdf"
+    )
+    assert result.inserted == 1
+
+
+def _ingest_doc(server, did: str) -> None:
+    """Put a real document in the store, so the PDF route has something to attach to."""
+    payload = {"graph": _graph(did).model_dump(mode="json"), "embed": False}
+    r = server.post(
+        "/ingest",
+        files={"payload": ("payload.json", json.dumps(payload).encode(), "application/json")},
+    )
+    assert r.status_code == 200, r.text
+
+
 def test_server_stores_an_uploaded_pdf(server, tmp_path, monkeypatch) -> None:
     from datasheet_rag.config import get_settings
 
@@ -793,12 +939,60 @@ def test_server_stores_an_uploaded_pdf(server, tmp_path, monkeypatch) -> None:
     get_settings.cache_clear()
     try:
         did = "0" * 64
+        _ingest_doc(server, did)
         r = server.put(
             f"/documents/{did}/pdf",
             files={"payload": ("x.pdf", b"%PDF-1.7\nbytes\n", "application/pdf")},
         )
         assert r.status_code == 200, r.text
         assert server.get(f"/documents/{did}/pdf").content == b"%PDF-1.7\nbytes\n"
+    finally:
+        get_settings.cache_clear()
+
+
+def test_pdf_upload_refuses_a_document_the_store_does_not_have(server) -> None:
+    """Otherwise pdf_dir accumulates orphans that delete.py will never find."""
+    r = server.put(
+        f"/documents/{'0' * 64}/pdf",
+        files={"payload": ("x.pdf", b"%PDF-1.7\n", "application/pdf")},
+    )
+    assert r.status_code == 404
+
+
+def test_pdf_upload_refuses_bytes_that_are_not_a_pdf(server, tmp_path, monkeypatch) -> None:
+    """Whatever lands here is served back to every reader as application/pdf."""
+    from datasheet_rag.config import get_settings
+
+    monkeypatch.setenv("RAG_DATA_DIR", str(tmp_path))
+    get_settings.cache_clear()
+    try:
+        did = "0" * 64
+        _ingest_doc(server, did)
+        r = server.put(
+            f"/documents/{did}/pdf",
+            files={"payload": ("x.pdf", b"<html>gotcha</html>", "application/pdf")},
+        )
+        assert r.status_code == 400
+        assert "%PDF-" in r.json()["detail"]
+    finally:
+        get_settings.cache_clear()
+
+
+def test_pdf_upload_refuses_an_oversized_body(server, tmp_path, monkeypatch) -> None:
+    from datasheet_rag.config import get_settings
+
+    monkeypatch.setenv("RAG_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("RAG_SERVER_MAX_UPLOAD_MB", "1")
+    get_settings.cache_clear()
+    try:
+        did = "0" * 64
+        _ingest_doc(server, did)
+        body = b"%PDF-1.7\n" + b"x" * (1024 * 1024 + 1)
+        r = server.put(
+            f"/documents/{did}/pdf",
+            files={"payload": ("x.pdf", body, "application/pdf")},
+        )
+        assert r.status_code == 413
     finally:
         get_settings.cache_clear()
 

@@ -285,6 +285,7 @@ def build_app() -> FastAPI:
     async def document_put_pdf(
         doc_id: str,
         payload: UploadFile = File(...),
+        be: LocalBackend = Depends(get_backend),
     ) -> dict[str, Any]:
         """Store a source PDF for a document ingested elsewhere (GH #43).
 
@@ -293,13 +294,38 @@ def build_app() -> FastAPI:
         hold chunks whose source document nothing else on the network can
         fetch, and ``rag show`` / ``show_pdf`` would 404 for every other user.
 
-        Takes no backend: the PDF store is a directory, not a table. The scope
-        dependency has already opened the database to check the caller's key.
+        Three guards, because what lands here is served straight back to every
+        reader as ``application/pdf``: the document has to exist (so the route
+        cannot be used to fill ``pdf_dir`` with orphans that ``delete.py``
+        will never clean up, and so an id is a document rather than a
+        filename), the bytes have to start with ``%PDF-``, and the upload has
+        to fit ``server_max_upload_mb`` — it is read into memory whole.
         """
         from datasheet_rag.storage import save_pdf_bytes
 
-        save_pdf_bytes(await payload.read(), doc_id)
-        return {"stored": True, "doc_id": doc_id}
+        try:
+            resolved = be.resolve_doc_id(doc_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+        limit = get_settings().server_max_upload_mb * 1024 * 1024
+        data = await payload.read(limit + 1)
+        if len(data) > limit:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"PDF exceeds the {get_settings().server_max_upload_mb} MiB "
+                    f"upload limit (RAG_SERVER_MAX_UPLOAD_MB)."
+                ),
+            )
+        if not data.startswith(b"%PDF-"):
+            raise HTTPException(
+                status_code=400,
+                detail="upload is not a PDF (no %PDF- header).",
+            )
+
+        save_pdf_bytes(data, resolved)
+        return {"stored": True, "doc_id": resolved}
 
     @app.get("/documents/{doc_id}/metadata", dependencies=dep)
     def document_metadata(doc_id: str, be: LocalBackend = Depends(get_backend)) -> Response:

@@ -74,6 +74,7 @@ class RemoteBackend(RagBackend):
         self._compute = compute
         self._embedder: Any | None = None
         self._embedding_checked = False
+        self._health: dict[str, Any] | None = None
 
     def close(self) -> None:
         self._client.close()
@@ -93,8 +94,12 @@ class RemoteBackend(RagBackend):
         searches with a query the index cannot answer. ``/health`` reports what
         the store expects, and a mismatch stops the run here.
         """
+        # Outside the `is None` guard: the check keeps its own flag, and only
+        # sets it once it has *passed*. Gating it on the cached embedder would
+        # mean a process whose first probe was unreachable (server restarting)
+        # never re-ran the check, because the embedder is cached either way.
+        self._assert_embedding_compatible()
         if self._embedder is None:
-            self._assert_embedding_compatible()
             from datasheet_rag.embedding import get_embedder
 
             self._embedder = get_embedder()
@@ -142,14 +147,54 @@ class RemoteBackend(RagBackend):
             if target is not None and not target.figure_description and chunk.figure_description:
                 apply_description_to_chunk(target, chunk.figure_description)
 
+    def _remote_health(self) -> dict[str, Any] | None:
+        """The server's ``/health``, fetched once per process. None if unreachable.
+
+        Cached only on success, so an unreachable probe is retried rather than
+        remembered as an answer.
+        """
+        if self._health is None:
+            try:
+                self._health = self._json("GET", "/health")
+            except RagServerError:
+                return None
+        return self._health
+
+    def _assert_vector_width(self, vectors: Mapping[str, Sequence[float]]) -> None:
+        """Check the supplied vectors against the width the store actually holds.
+
+        Distinct from :meth:`_assert_embedding_compatible`, which asks whether
+        *this process is configured* to produce compatible vectors. That is the
+        right question when we are about to embed, and the wrong one when
+        ``vectors=`` arrives from a caller: those vectors may have been made
+        somewhere else entirely, so the honest check is their own width against
+        the store's — which both catches a mismatch this machine's config would
+        have hidden, and stops us refusing correct vectors just because
+        RAG_EMBEDDING_DIMENSIONS here happens to differ.
+        """
+        sample = next(iter(vectors.values()), None)
+        if sample is None:
+            return
+        remote_dims = (self._remote_health() or {}).get("embedding_dimensions")
+        if remote_dims is None:
+            return  # unreachable or too old to say; the server checks too
+        if len(sample) != int(remote_dims):
+            raise RagServerError(
+                0,
+                f"These vectors are {len(sample)}-dimensional but the server's "
+                f"store holds {remote_dims}-dimensional ones. Vectors from "
+                f"different embedding models are not comparable — embed with "
+                f"the model the store was built with, or let the server embed "
+                f"(RAG_COMPUTE=server).",
+            )
+
     def _assert_embedding_compatible(self) -> None:
         from datasheet_rag.config import get_settings
 
         if self._embedding_checked:
             return
-        try:
-            health = self._json("GET", "/health")
-        except RagServerError:
+        health = self._remote_health()
+        if health is None:
             # Health is unauthenticated and cheap; a failure here says nothing
             # about compatibility, so leave the flag alone and ask again next
             # time. Marking it checked would turn one unreachable probe into a
@@ -162,9 +207,9 @@ class RemoteBackend(RagBackend):
         # keep raising, not pass silently on the second call in the process.
         remote_dims = health.get("embedding_dimensions")
         if remote_dims is not None and int(remote_dims) != settings.embedding_dimensions:
-            # Reached from the ingest path too, where vectors can be supplied
-            # by a caller that never set RAG_COMPUTE — so lead with the fact,
-            # not the setting.
+            # Reached whenever this process is about to embed — a search query
+            # or a client-compute ingest — so state the mismatch rather than
+            # assuming which of the two the caller is doing.
             raise RagServerError(
                 0,
                 f"This machine embeds to {settings.embedding_dimensions} dimensions "
@@ -474,7 +519,21 @@ class RemoteBackend(RagBackend):
         title_hints: dict[str, str] | None = None,
         vectors: Mapping[str, Sequence[float]] | None = None,
         inferred_title: str | None = None,
+        source_pdf: Path | None = None,
     ) -> IngestResult:
+        if vectors is not None and describe_figures:
+            # The same guard LocalBackend raises (local.py) — and for the same
+            # reason. Describing here would fold the description into
+            # context_text, which is the text the supplied vectors were
+            # computed from, so what lands would be vectors that no longer
+            # match what they index. Rejecting it in only one backend would
+            # make the two disagree about an identical call.
+            raise ValueError(
+                "vectors= and describe_figures= are mutually exclusive: a "
+                "description written here would change the text the "
+                "supplied vectors were computed from. Describe first, then "
+                "embed, then send both."
+            )
         described_here = 0
         if self.client_compute:
             # Run every model here, in the order the text depends on: a figure
@@ -510,10 +569,10 @@ class RemoteBackend(RagBackend):
         if vectors is not None:
             # Outside the client_compute branch on purpose: `vectors=` is a
             # public argument, so vectors can arrive from a caller that never
-            # went through _get_embedder() and therefore never ran this check.
+            # went through _get_embedder() and therefore never ran a check.
             # Uploading vectors from the wrong model is the one failure that
             # corrupts a corpus silently, so it is checked wherever it enters.
-            self._assert_embedding_compatible()
+            self._assert_vector_width(vectors)
 
         payload = {
             "graph": graph.model_dump(mode="json", exclude=_chunk_excludes(graph)),
@@ -545,7 +604,32 @@ class RemoteBackend(RagBackend):
             # The server described nothing — it only stored what arrived — so
             # report what this process actually did.
             result.described = described_here
+        if source_pdf is not None:
+            self._put_source_pdf(result.doc_id, source_pdf)
         return result
+
+    def _put_source_pdf(self, doc_id: str, pdf_path: Path) -> None:
+        """Upload the parsed-here PDF, after the chunks and never instead of them.
+
+        Ordered last on purpose: a PDF on the server for a document that failed
+        to ingest is a file nothing references. Warns rather than raises for the
+        same reason — by the time we get here the chunks are committed, so
+        turning a failed upload into a failed ingest would report a complete
+        write as an error and invite the user to run the whole thing again. The
+        common case is a server older than this route (405), where every other
+        part of the ingest is exactly right.
+        """
+        try:
+            self.put_pdf_bytes(doc_id, pdf_path)
+        except RagServerError as exc:
+            print(
+                f"rag: warning — chunks for {doc_id[:12]} were stored, but "
+                f"uploading the source PDF failed ({exc}). The document is "
+                f"searchable; `rag show` will not find its PDF on the server "
+                f"until it is re-ingested against a server that accepts "
+                f"PUT /documents/{{doc_id}}/pdf.",
+                file=sys.stderr,
+            )
 
     def ingest_pdf(
         self,
@@ -613,11 +697,13 @@ class RemoteBackend(RagBackend):
                 describe_figures=not skip_figures and not skip_describe,
                 infer_title=infer_title,
                 title_hints=parsed.title_hints or None,
+                # Parsed here, so the server has never seen the file. One
+                # argument rather than a call of our own: the CLI reaches
+                # ingest_chunk_graph directly for --local-parse and for
+                # RAG_COMPUTE=client, and an upload that lived here would be
+                # skipped on exactly those paths.
+                source_pdf=pdf_path,
             )
-            # After the chunks, not before: a PDF on the server for a document
-            # that failed to ingest is a file nothing references. The store is
-            # the record of what exists; this just makes its source fetchable.
-            self.put_pdf_bytes(ingested.doc_id, pdf_path)
             return ingested
 
         options = {
