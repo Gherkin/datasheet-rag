@@ -584,7 +584,6 @@ nvtx = [
 
 [[package]]
 name = "datasheet-rag"
-version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "click" },
@@ -636,7 +635,7 @@ requires-dist = [
     { name = "accelerate", marker = "extra == 'local-hf'", specifier = ">=0.30" },
     { name = "bitsandbytes", marker = "extra == 'local-hf'", specifier = ">=0.43" },
     { name = "boto3", marker = "extra == 'aws'", specifier = ">=1.35.0" },
-    { name = "boto3-stubs", extras = ["s3", "textract", "bedrock-runtime"], marker = "extra == 'dev'", specifier = ">=1.35.0" },
+    { name = "boto3-stubs", extras = ["bedrock-runtime", "s3", "textract"], marker = "extra == 'dev'", specifier = ">=1.35.0" },
     { name = "botocore", extras = ["crt"], marker = "extra == 'aws'", specifier = ">=1.35.0" },
     { name = "click", specifier = ">=8.1.0" },
     { name = "docling", marker = "extra == 'docling'", specifier = ">=2.0.0" },
