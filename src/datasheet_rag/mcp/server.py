@@ -581,13 +581,24 @@ _FIGURE_MIME = {
 
 
 def _package_version() -> str:
-    """This package's version, for the ``initialize`` handshake."""
+    """This package's version, for the ``initialize`` handshake.
+
+    Prefers installed distribution metadata, which is what a ``pip install``
+    or an editable checkout has. The ``.mcpb`` bundle has neither: ``pack.sh``
+    copies the source tree in and ``main.py`` puts it on ``sys.path``, so
+    nothing named "datasheet-rag" is ever installed and the lookup raises.
+    Falling back to ``__version__`` keeps the handshake honest on that path
+    too — ``pyproject.toml`` reads its version from the same attribute, so the
+    two cannot drift.
+    """
     from importlib.metadata import PackageNotFoundError, version
+
+    from datasheet_rag import __version__
 
     try:
         return version("datasheet-rag")
-    except PackageNotFoundError:  # pragma: no cover - source checkout
-        return "0+unknown"
+    except PackageNotFoundError:  # pragma: no cover - vendored, not installed
+        return __version__
 
 
 def build_server(

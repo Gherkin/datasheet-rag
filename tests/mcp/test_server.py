@@ -8,7 +8,11 @@ SDK dependency.
 
 from __future__ import annotations
 
+import importlib.metadata
+import tomllib
+from pathlib import Path
 from typing import Any
+from unittest import mock
 from unittest.mock import MagicMock
 
 import pytest
@@ -743,3 +747,43 @@ def test_mcp_app_tools_declare_their_widget_resource() -> None:
 
     served = {str(r.uri) for r in asyncio.run(server.list_resources())}
     assert set(_APP_TOOLS.values()) <= served
+
+
+def test_handshake_version_survives_a_missing_distribution() -> None:
+    """The bundle has no installed metadata, and must still report a version.
+
+    ``pack.sh`` vendors the source onto ``sys.path`` instead of installing it,
+    so ``version("datasheet-rag")`` raises for every ``.mcpb`` install. The
+    fallback has to be the real version, not a placeholder, or the handshake
+    advertises nothing useful on that path (GH #48).
+    """
+    from importlib.metadata import PackageNotFoundError
+
+    import datasheet_rag
+    from datasheet_rag.mcp import server as mcp_server
+
+    def _raise(_name: str) -> str:
+        raise PackageNotFoundError(_name)
+
+    with mock.patch("importlib.metadata.version", _raise):
+        assert mcp_server._package_version() == datasheet_rag.__version__
+
+    assert datasheet_rag.__version__ != "0+unknown"
+
+
+def test_declared_version_matches_the_packaging_metadata() -> None:
+    """``pyproject.toml`` reads its version from ``__version__``; pin that.
+
+    If the dynamic wiring is ever replaced by a literal, the two can drift and
+    the bundle silently starts advertising a different version from the wheel.
+    """
+    import datasheet_rag
+
+    pyproject = tomllib.loads((Path(__file__).resolve().parents[2] / "pyproject.toml").read_text())
+    assert "version" in pyproject["project"].get("dynamic", [])
+    assert pyproject["tool"]["setuptools"]["dynamic"]["version"] == {
+        "attr": "datasheet_rag.__version__"
+    }
+
+    installed = importlib.metadata.version("datasheet-rag")
+    assert installed == datasheet_rag.__version__
