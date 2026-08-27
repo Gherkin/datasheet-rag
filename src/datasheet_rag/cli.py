@@ -22,12 +22,14 @@ if TYPE_CHECKING:
 
     from datasheet_rag.backend import RagBackend
     from datasheet_rag.backend.base import RagServerError, SearchMode
+    from datasheet_rag.backend.models import IngestedDoc
     from datasheet_rag.chunking.layout_parser import DocumentOutline
     from datasheet_rag.costs import CostEstimate
     from datasheet_rag.eval.ablation import IndexVariant
     from datasheet_rag.eval.harness import RunReport
     from datasheet_rag.ingest_pipeline import ProgressEvent
     from datasheet_rag.models.chunk import Chunk
+    from datasheet_rag.store.metadata import DocMetadata
 
 console = Console()
 
@@ -527,6 +529,93 @@ def repair_group() -> None:
 # List documents
 # ---------------------------------------------------------------------------
 
+# The column vocabulary `rag list --columns` understands. Split by where the
+# value lives: the store's own row (`IngestedDoc`) or the metadata sidecar
+# (`DocMetadata`). Anything *not* named here is looked up as a key in the
+# sidecar's free-form `attributes` dict — those keys are arbitrary by design,
+# so they can't be enumerated, and reaching them is the point of the flag.
+_DOC_COLUMNS: dict[str, Callable[[IngestedDoc], Any]] = {
+    "doc_id": lambda d: d.doc_id[:SHORT_DOC_ID_LEN],
+    "title": lambda d: d.doc_title,
+    "chunks": lambda d: d.chunk_count,
+    "pages": lambda d: d.page_count,
+    "ingested": lambda d: d.ingested_at,
+}
+
+_META_COLUMNS: dict[str, Callable[[DocMetadata], Any]] = {
+    "project": lambda m: m.project_id,
+    "group": lambda m: m.group_name,
+    "mpn": lambda m: m.mpn,
+    "manufacturer": lambda m: m.manufacturer,
+    "subsystem": lambda m: m.subsystem,
+    "doc_type": lambda m: m.doc_type,
+    "tags": lambda m: m.tags,
+    "updated": lambda m: m.updated_at,
+    "stale": lambda m: "[yellow]re-embed[/]" if m.attributes.get(_STALE_ATTR) else "",
+}
+
+# Field names that would otherwise fall through to an (always empty)
+# attribute column. Anyone who knows the model or the JSON `rag metadata`
+# prints reaches for these spellings, so map them rather than silently
+# printing a column of em-dashes.
+_LIST_COLUMN_ALIASES = {
+    "id": "doc_id",
+    "doc_title": "title",
+    "chunk_count": "chunks",
+    "page_count": "pages",
+    "ingested_at": "ingested",
+    "project_id": "project",
+    "group_name": "group",
+    "updated_at": "updated",
+}
+
+_LIST_RIGHT_ALIGNED = {"chunks", "pages"}
+
+# The two built-in views. They answer different questions — ingest health vs.
+# cataloguing — so --wide swaps the store-stat columns for the sidecar ones
+# rather than appending them. Showing all eleven at once is unreadable on an
+# 80-column terminal, where Rich squeezes every cell down to nothing.
+_LIST_DEFAULT_COLUMNS = ("title", "chunks", "pages", "ingested")
+_LIST_WIDE_COLUMNS = ("project", "group", "mpn", "manufacturer", "subsystem", "tags")
+
+
+def _parse_list_columns(columns: tuple[str, ...]) -> list[str]:
+    """Flatten repeated/comma-separated --columns into a spec list."""
+    parsed = [name.strip() for spec in columns for name in spec.split(",") if name.strip()]
+    if not parsed:
+        raise click.BadParameter("expects at least one column name", param_hint="--columns")
+    return [_LIST_COLUMN_ALIASES.get(name, name) for name in parsed]
+
+
+def _list_cell(name: str, doc: IngestedDoc, meta: DocMetadata | None) -> Any:
+    """Value of column *name* for one row, or None when it has none.
+
+    An ``attr:`` prefix forces the attribute reading, which is the only way to
+    reach an attribute whose key collides with a built-in column name.
+    """
+    if name.startswith("attr:"):
+        return meta.attributes.get(name[len("attr:") :]) if meta is not None else None
+    if (doc_getter := _DOC_COLUMNS.get(name)) is not None:
+        return doc_getter(doc)
+    if meta is None:
+        return None
+    if (meta_getter := _META_COLUMNS.get(name)) is not None:
+        return meta_getter(meta)
+    return meta.attributes.get(name)
+
+
+def _fmt_list_cell(value: Any) -> str:
+    """Render one cell, collapsing every flavour of "nothing" to an em-dash."""
+    if value is None or value == "" or value == [] or value == {}:
+        return "—"
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    if isinstance(value, list):
+        return ", ".join(str(v) for v in value)
+    if isinstance(value, dict):
+        return json.dumps(value, sort_keys=True)
+    return str(value)
+
 
 @cli.command("list", short_help="List ingested documents.")
 @_db_option
@@ -560,6 +649,18 @@ def repair_group() -> None:
     "key=value pair (repeatable, all must match).",
 )
 @click.option(
+    "--columns",
+    "-c",
+    "columns",
+    multiple=True,
+    metavar="COL,COL,...",
+    help="Choose the columns to show (comma-separated, repeatable). "
+    "Built-ins: title, chunks, pages, ingested, project, group, mpn, "
+    "manufacturer, subsystem, doc_type, tags, updated, stale. Any other "
+    "name is read as an attribute key set by `rag metadata --attr` "
+    "(prefix with `attr:` to force that reading). doc_id is always shown.",
+)
+@click.option(
     "--wide",
     "-w",
     is_flag=True,
@@ -581,6 +682,7 @@ def list_docs(
     mpn: str | None,
     tags: tuple[str, ...],
     attrs: tuple[str, ...],
+    columns: tuple[str, ...],
     wide: bool,
     show_s3: bool,
 ) -> None:
@@ -590,10 +692,32 @@ def list_docs(
     Pass --wide, or any sidecar filter, to swap those for the metadata columns
     (project, group, mpn, manufacturer, subsystem, tags) instead; filters
     narrow the listing to documents whose sidecar row matches.
+
+    --columns replaces both views with exactly the columns you name, and is
+    the only way to see free-form attributes:
+
+      rag list --columns mpn,revision,reviewed_by
+
+    Names that aren't built-in columns are read as attribute keys, so that
+    prints `revision` and `reviewed_by` as set by
+    `rag metadata <doc> --attr revision=B`. An attribute whose name collides
+    with a built-in column needs the `attr:` prefix (`--columns attr:tags`).
     """
     from datasheet_rag.project_config import resolve_cli_project_id
 
     project_id = resolve_cli_project_id(project_id, is_global=is_global)
+
+    if columns and wide:
+        raise click.BadParameter(
+            "--columns already says which columns to show; drop --wide",
+            param_hint="--columns",
+        )
+    if columns and show_s3:
+        raise click.BadParameter(
+            "--s3 lists raw uploads, which have no metadata to choose columns from",
+            param_hint="--columns",
+        )
+    chosen = _parse_list_columns(columns) if columns else None
 
     if show_s3:
         from datasheet_rag.storage import list_documents
@@ -653,53 +777,56 @@ def list_docs(
             )
         return
 
-    # The two views answer different questions — ingest health vs. cataloguing
-    # — so --wide swaps the store-stat columns for the sidecar ones rather than
-    # appending them. Showing all eleven at once is unreadable on an 80-column
-    # terminal, where Rich squeezes every cell down to nothing.
-    show_meta = wide or filtering
     stale_ids = {
         d.doc_id
         for d in docs
         if (m := meta_by_id.get(d.doc_id)) is not None and m.attributes.get(_STALE_ATTR)
     }
 
-    table = Table(title="Ingested Documents")
-    table.add_column("doc_id", style="cyan")
-    table.add_column("title")
-    if stale_ids:
-        table.add_column("stale")
-    if show_meta:
-        for col in ("project", "group", "mpn", "manufacturer", "subsystem", "tags"):
-            table.add_column(col)
+    if chosen is not None:
+        shown = list(chosen)
     else:
-        table.add_column("chunks", justify="right")
-        table.add_column("pages", justify="right")
-        table.add_column("ingested")
+        shown = list(_LIST_WIDE_COLUMNS if (wide or filtering) else _LIST_DEFAULT_COLUMNS)
+    # doc_id is the handle every other `rag` command takes, so a listing
+    # without it is a dead end; the stale marker is a health flag rather than
+    # metadata, and is worth showing whatever view was asked for.
+    if "doc_id" not in shown:
+        shown.insert(0, "doc_id")
+    if stale_ids and "stale" not in shown:
+        shown.insert(shown.index("doc_id") + 1, "stale")
 
+    table = Table(title="Ingested Documents")
+    for name in shown:
+        label = name[len("attr:") :] if name.startswith("attr:") else name
+        table.add_column(
+            label,
+            style="cyan" if name == "doc_id" else None,
+            justify="right" if name in _LIST_RIGHT_ALIGNED else "left",
+        )
+
+    # An attribute column that is empty on every row is usually a typo or a
+    # case mismatch, not a fleet of documents that all happen to lack it.
+    empty_attr_cols = {
+        name for name in shown if name not in _DOC_COLUMNS and name not in _META_COLUMNS
+    }
     for doc in docs:
-        row = [doc.doc_id[:SHORT_DOC_ID_LEN], doc.doc_title or "—"]
-        if stale_ids:
-            row.append("[yellow]re-embed[/]" if doc.doc_id in stale_ids else "")
-        if show_meta:
-            m = meta_by_id.get(doc.doc_id)
-            row += [
-                (m.project_id if m else None) or "—",
-                (m.group_name if m else None) or "—",
-                (m.mpn if m else None) or "—",
-                (m.manufacturer if m else None) or "—",
-                (m.subsystem if m else None) or "—",
-                (", ".join(m.tags) if m and m.tags else "—"),
-            ]
-        else:
-            row += [
-                str(doc.chunk_count),
-                str(doc.page_count) if doc.page_count is not None else "—",
-                doc.ingested_at or "—",
-            ]
+        meta = meta_by_id.get(doc.doc_id)
+        row: list[str] = []
+        for name in shown:
+            value = _list_cell(name, doc, meta)
+            if value not in (None, "", [], {}):
+                empty_attr_cols.discard(name)
+            row.append(_fmt_list_cell(value))
         table.add_row(*row)
 
     console.print(table)
+    if empty_attr_cols:
+        names = ", ".join(sorted(empty_attr_cols))
+        console.print(
+            f"  [yellow]No listed document has the attribute(s):[/] {names}. "
+            "Attribute names are case-sensitive — check one document's with "
+            "[cyan]rag metadata <doc-id>[/]."
+        )
     if stale_ids:
         console.print(
             f"  [yellow]{len(stale_ids)} document(s) were repaired since they were "
