@@ -52,7 +52,7 @@ import os
 import sys
 from contextvars import ContextVar
 from threading import Thread
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from datasheet_rag import pdf_viewer
 from datasheet_rag.backend import (
@@ -70,17 +70,30 @@ from datasheet_rag.store import DocMetadata, SearchFilters, SearchResult
 # Return annotations on the content-block tools
 # ---------------------------------------------------------------------------
 # get_figure, show_figure, show_pdf, show_page and show_hello all return
-# ``list[ImageContent | TextContent]`` and are deliberately left unannotated.
+# ``list[ImageContent | TextContent]``.
 #
-# FastMCP reads the return annotation to decide whether a tool has structured
-# output: annotate one of these and it starts publishing an outputSchema and
-# returning ``structuredContent`` beside the content blocks. Hosts render these
-# blocks directly — the MCP App path especially — so their advertised shape is
-# protocol, not a typing detail. Saying `structured_output=False` alongside the
-# annotation would express the same thing, but that argument is much newer than
-# the ``mcp>=1.2.0`` floor this package declares.
+# None of them may publish an ``outputSchema``. Structured output would put a
+# verbatim JSON copy of the blocks beside them, base64 image included — 267 kB
+# of figure measured as 267 kB again — and the host renders the blocks anyway.
+# So all five say ``structured_output=False``, which states that outright
+# instead of leaving it to be inferred.
 #
-# Hence the `type: ignore[no-untyped-def]` on each of the five.
+# mcp 2.x does infer it correctly (it recognises content-block return types and
+# skips structured output), and under mcp 1.x an annotation here would have
+# turned it on — which is why these five went unannotated back then, GH #48.
+# The flag makes the outcome ours either way.
+#
+# The alias exists because the SDK evaluates return annotations with
+# ``eval_str=True`` when the tool is registered, so the name has to resolve in
+# this module's namespace — while the ``mcp`` import stays inside
+# :func:`build_server` (see its docstring). Bare ``list`` is all the runtime
+# needs; ``structured_output=False`` is what settles the wire format.
+if TYPE_CHECKING:
+    from mcp.types import ImageContent, TextContent
+
+    ContentBlocks = list[ImageContent | TextContent]
+else:
+    ContentBlocks = list
 
 # ---------------------------------------------------------------------------
 # Backend access — local sqlite or remote HTTP, chosen from config.
@@ -567,16 +580,40 @@ _FIGURE_MIME = {
 }
 
 
+def _package_version() -> str:
+    """This package's version, for the ``initialize`` handshake.
+
+    Prefers installed distribution metadata, which is what a ``pip install``
+    or an editable checkout has. The ``.mcpb`` bundle has neither: ``pack.sh``
+    copies the source tree in and ``main.py`` puts it on ``sys.path``, so
+    nothing named "datasheet-rag" is ever installed and the lookup raises.
+    Falling back to ``__version__`` keeps the handshake honest on that path
+    too — ``pyproject.toml`` reads its version from the same attribute, so the
+    two cannot drift.
+    """
+    from importlib.metadata import PackageNotFoundError, version
+
+    from datasheet_rag import __version__
+
+    try:
+        return version("datasheet-rag")
+    except PackageNotFoundError:  # pragma: no cover - vendored, not installed
+        return __version__
+
+
 def build_server(
     backend: RagBackend | None = None,
     *,
     local_client: bool = True,
-    **fastmcp_kwargs: Any,
 ) -> Any:
-    """Construct and return the FastMCP server with all tools registered.
+    """Construct and return the ``MCPServer`` with all tools registered.
 
     Imported lazily so the module is testable without the ``mcp`` SDK
     installed in the sandbox.
+
+    Transport settings are not arguments here: the SDK takes them on
+    ``run()`` and ``streamable_http_app()`` instead, so the HTTP mount
+    configures its own app from the server this returns.
 
     Args:
         backend: the backend every tool call goes through. ``None`` means
@@ -597,19 +634,21 @@ def build_server(
             read — both fixed at build time. The same fact reaches the
             per-call text through ``request_local_client``, which the HTTP
             mount sets on every request.
-        **fastmcp_kwargs: passed through to ``FastMCP`` (transport settings
-            for the HTTP mount).
     """
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.mcpserver import MCPServer
     from mcp.types import ImageContent, TextContent
 
     source_page_tool = "show_pdf" if local_client else "show_page"
 
     settings = get_settings()
     project_hint = settings.default_project_id or "(unscoped)"
-    mcp = FastMCP(
+    mcp = MCPServer(
         name=f"datasheet-rag[{project_hint}]",
-        **fastmcp_kwargs,
+        # v2 asks the server for its own version rather than reporting the
+        # SDK's; without it the initialize handshake advertises an empty
+        # string. Not installed as a distribution (a source checkout run in
+        # place) is not worth failing over.
+        version=_package_version(),
         instructions=(
             "Tools for searching and navigating a project-scoped RAG database "
             "of electronics datasheets and reference manuals. Prefer "
@@ -773,8 +812,8 @@ def build_server(
         """Return chunk counts (total + by level) for the current scope."""
         return _stats_impl(project_id=project_id, doc_id=doc_id, backend=backend)
 
-    @mcp.tool()
-    def get_figure(chunk_id: str):  # type: ignore[no-untyped-def]
+    @mcp.tool(structured_output=False)
+    def get_figure(chunk_id: str) -> ContentBlocks:
         """Fetch raw figure bytes for further reasoning (fallback for non-Desktop hosts).
 
         Prefer ``show_figure`` in Claude Desktop — it renders the image inline
@@ -805,7 +844,7 @@ def build_server(
             f"page {citation['page']} · section {citation['section']!r}"
         )
         return [
-            ImageContent(type="image", data=image_b64, mimeType=mime),
+            ImageContent(type="image", data=image_b64, mime_type=mime),
             TextContent(type="text", text=text_summary),
         ]
 
@@ -832,8 +871,11 @@ def build_server(
     # ``_meta: {ui: {resourceUri: csA}}`` on the tool itself. Goose's
     # tutorial showed _meta on the call result, but Claude Desktop ignores
     # that placement entirely.
-    @mcp.tool(meta={"ui": {"resourceUri": "ui://datasheet-rag/figure-app"}})
-    def show_figure(chunk_id: str):  # type: ignore[no-untyped-def]
+    @mcp.tool(
+        meta={"ui": {"resourceUri": "ui://datasheet-rag/figure-app"}},
+        structured_output=False,
+    )
+    def show_figure(chunk_id: str) -> ContentBlocks:
         """Display a figure as an inline rendered image widget (preferred in Claude Desktop).
 
         Calling this is MANDATORY when the figure is clearly relevant to the
@@ -858,7 +900,7 @@ def build_server(
         caption = result["caption"]
         citation = result["citation"]
         return [
-            ImageContent(type="image", data=image_b64, mimeType=mime),
+            ImageContent(type="image", data=image_b64, mime_type=mime),
             TextContent(
                 type="text",
                 text=(
@@ -987,8 +1029,8 @@ def build_server(
     # GH #45 tracks serving PDFs from the server so this can come back.
     if local_client:
 
-        @mcp.tool()
-        def show_pdf(doc_id: str, page: int = 1):  # type: ignore[no-untyped-def]
+        @mcp.tool(structured_output=False)
+        def show_pdf(doc_id: str, page: int = 1) -> ContentBlocks:
             """Open the source PDF in a browser-based interactive viewer.
 
             Starts a local HTTP server (if not already running) and returns a
@@ -1029,8 +1071,11 @@ def build_server(
                 )
             ]
 
-    @mcp.tool(meta={"ui": {"resourceUri": "ui://datasheet-rag/figure-app"}})
-    def show_page(doc_id: str, page: int = 1):  # type: ignore[no-untyped-def]
+    @mcp.tool(
+        meta={"ui": {"resourceUri": "ui://datasheet-rag/figure-app"}},
+        structured_output=False,
+    )
+    def show_page(doc_id: str, page: int = 1) -> ContentBlocks:
         """Render a single PDF page as an inline image widget in Claude Desktop.
 
         Converts the page to PNG server-side (via poppler/pdf2image) and
@@ -1073,7 +1118,7 @@ def build_server(
             label = " — ".join(p for p in parts if p)
         caption = f"page {page}" + (f" · {label}" if label else "")
         return [
-            ImageContent(type="image", data=img_b64, mimeType="image/png"),
+            ImageContent(type="image", data=img_b64, mime_type="image/png"),
             TextContent(type="text", text=caption),
         ]
 
@@ -1084,8 +1129,11 @@ def build_server(
     # isn't honoring _meta.ui.resourceUri at all.
     # ------------------------------------------------------------------
 
-    @mcp.tool(meta={"ui": {"resourceUri": "ui://datasheet-rag/hello"}})
-    def show_hello():  # type: ignore[no-untyped-def]
+    @mcp.tool(
+        meta={"ui": {"resourceUri": "ui://datasheet-rag/hello"}},
+        structured_output=False,
+    )
+    def show_hello() -> ContentBlocks:
         """Diagnostic: render a trivial 'Hello' MCP App with no images or DB access.
 
         ``_meta.ui.resourceUri`` is on the tool definition (the placement

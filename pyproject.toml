@@ -1,6 +1,6 @@
 [project]
 name = "datasheet-rag"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Multi-scale context-aware RAG pipeline for electronics datasheets"
 readme = "README.md"
 license = "MIT"
@@ -8,7 +8,7 @@ license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
     "click>=8.1.0",
-    "mcp>=1.2.0",
+    "mcp>=2.1,<3",
     "numpy>=1.26.0",
     "pdf2image>=1.16.0",
     "Pillow>=10.0.0",
@@ -74,6 +74,12 @@ rag-server = "datasheet_rag.server.main:run"
 [build-system]
 requires = ["setuptools>=77.0.0", "wheel"]
 build-backend = "setuptools.build_meta"
+
+# Version lives in `datasheet_rag.__version__` so the package can report it
+# without installed metadata (the `.mcpb` bundle vendors the source instead
+# of installing it).
+[tool.setuptools.dynamic]
+version = { attr = "datasheet_rag.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["src"]

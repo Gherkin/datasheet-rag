@@ -6,7 +6,7 @@ that id back into PDF bytes — trying the in-process cache, then the local
 PDF store, then S3 — and renders individual pages to PNG via
 poppler/pdf2image.
 
-It is intentionally standalone (no MCP / FastMCP imports) so the eval
+It is intentionally standalone (no MCP SDK imports) so the eval
 review tool can depend on it without dragging in the server. The MCP
 server keeps its own equivalent; the duplication is small and keeps the
 two import graphs independent.

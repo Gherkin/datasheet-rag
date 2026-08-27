@@ -7,7 +7,7 @@ HTTP round trip to the server. Serving the same tools at ``/mcp`` removes that
 hop and the install that goes with it: a client configures a URL and a token
 and is done (GH #39).
 
-Three things have to be arranged around ``FastMCP`` for this to work:
+Three things have to be arranged around ``MCPServer`` for this to work:
 
 * **Routing.** ``streamable_http_app()`` serves at its own
   ``streamable_http_path``, so it is built with that set to ``/`` and reached
@@ -194,16 +194,17 @@ def build_mcp_mount(backend: RagBackend) -> McpMount:
         allowed_origins=settings.mcp_allowed_origins_list(),
     )
 
-    server = mcp_server.build_server(
-        backend,
-        local_client=False,
-        # Stateless: no session state survives a call, so any worker can serve
-        # any request and a dropped client leaves nothing behind. json_response
-        # skips the SSE framing for the same reason — there is nothing to
-        # stream back.
-        stateless_http=True,
-        json_response=True,
+    server = mcp_server.build_server(backend, local_client=False)
+    # Transport settings belong to the app, not the server — building the app
+    # is also what creates the session manager ``lifespan`` then runs.
+    #
+    # Stateless: no session state survives a call, so any worker can serve any
+    # request and a dropped client leaves nothing behind. json_response skips
+    # the SSE framing for the same reason — there is nothing to stream back.
+    asgi = server.streamable_http_app(
         streamable_http_path="/",
+        json_response=True,
+        stateless_http=True,
         transport_security=security,
     )
-    return McpMount(server=server, asgi=server.streamable_http_app(), backend=backend)
+    return McpMount(server=server, asgi=asgi, backend=backend)
