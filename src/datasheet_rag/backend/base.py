@@ -31,7 +31,7 @@ from datasheet_rag.backend.models import (
 )
 from datasheet_rag.ingest_pipeline import ProgressCallback
 from datasheet_rag.models.chunk import Chunk, ChunkGraph
-from datasheet_rag.store import DocMetadata, SearchFilters, SearchResult
+from datasheet_rag.store import DocMetadata, SearchFilters, SearchResult, TitleSource
 
 SearchMode = Literal["hybrid", "vector", "keyword"]
 
@@ -91,7 +91,7 @@ class RagBackend(ABC):
 
     @abstractmethod
     def set_doc_title(
-        self, doc_id: str, title: str, *, source: str = "manual", force: bool = False
+        self, doc_id: str, title: str, *, source: TitleSource = "manual", force: bool = False
     ) -> int:
         """Set a document's title, recording where it came from.
 

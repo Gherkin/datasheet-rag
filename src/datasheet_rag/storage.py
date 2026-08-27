@@ -78,6 +78,28 @@ def save_pdf_locally(pdf_path: Path, doc_id: str) -> Path:
     return dest
 
 
+def save_pdf_bytes(data: bytes, doc_id: str) -> Path:
+    """Write raw PDF *data* into the local PDF store as ``<pdf_dir>/<doc_id>.pdf``.
+
+    The bytes-in counterpart to :func:`save_pdf_locally`, for a server that
+    receives a PDF over the wire rather than reading one off its own disk.
+    Overwrites: unlike the copy path there is no cheap way to tell "already
+    there" from "there but truncated", and the content hash makes a rewrite a
+    no-op in practice.
+    """
+    settings = get_settings()
+    # doc_id lands in a filename, and it is caller-supplied on the ingest
+    # routes. Anything that could climb out of pdf_dir is rejected outright
+    # rather than sanitised, so a mangled id fails loudly instead of writing
+    # to a surprising path.
+    if not doc_id or "/" in doc_id or "\\" in doc_id or doc_id.startswith("."):
+        raise ValueError(f"invalid doc_id for PDF storage: {doc_id!r}")
+    dest = settings.pdf_dir / f"{doc_id}.pdf"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(data)
+    return dest
+
+
 def download_json(s3_key: str, dest: Path) -> Path:
     """Download a Textract JSON result from S3 to a local file."""
     settings = get_settings()

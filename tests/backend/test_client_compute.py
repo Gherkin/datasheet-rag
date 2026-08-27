@@ -261,6 +261,9 @@ def test_client_compute_describes_figures_before_embedding(monkeypatch, tmp_path
     sent: dict[str, Any] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
+        # Nothing described yet in the store, so every figure is still a target.
+        if request.url.path == "/figures":
+            return httpx.Response(200, json={"chunks": []})
         raw = request.content
         sent.update(json.loads(raw[raw.index(b"{") : raw.rindex(b"}") + 1]))
         return httpx.Response(200, json={"doc_id": did, "inserted": 2})
@@ -569,3 +572,239 @@ def test_dimension_mismatch_keeps_raising_on_a_retry(monkeypatch) -> None:
                 rb.search("anything")
     finally:
         get_settings.cache_clear()
+
+
+# ---- review fixes --------------------------------------------------------
+
+
+def test_server_rejects_an_unknown_title_source(server, conn) -> None:
+    """An unvalidated source ranks like "auto" and would land a partial write."""
+    did = "4" * 64
+    payload = {"graph": _graph(did).model_dump(mode="json"), "embed": False}
+    server.post(
+        "/ingest",
+        files=[("payload", ("payload.json", json.dumps(payload).encode(), "application/json"))],
+    )
+
+    r = server.put(f"/documents/{did}/title", json={"title": "Bogus", "source": "typo"})
+    assert r.status_code == 422
+
+    # Nothing was written and nothing is left pending on the shared connection:
+    # the title guard used to fire only after the UPDATE had already run.
+    assert conn.in_transaction is False
+    assert server.get("/documents/titles").json()["titles"].get(did) in (None, "", "—")
+
+
+def test_set_doc_title_validates_before_touching_the_title(conn) -> None:
+    did = "5" * 64
+    be = LocalBackend(conn=conn)
+    be.ingest_chunk_graph(_graph(did), embed=False, vectors={f"{did}:L2:0": [0.0] * EMBED_DIM})
+    be.set_doc_title(did, "Real Title", source="manual")
+
+    with pytest.raises(ValueError, match="unknown title source"):
+        be.set_doc_title(did, "Overwritten", source="nonsense")  # type: ignore[arg-type]
+
+    assert be.get_doc_titles()[did] == "Real Title"
+    assert conn.in_transaction is False
+
+
+def test_server_rejects_wrong_width_ingest_vectors(server) -> None:
+    """The write side of the check `search` has always done on query vectors."""
+    did = "6" * 64
+    payload = {
+        "graph": _graph(did).model_dump(mode="json"),
+        "embed": False,
+        "vectors": ChunkVectors.from_mapping({f"{did}:L2:0": [1.0, 2.0]}).model_dump(mode="json"),
+    }
+    r = server.post(
+        "/ingest",
+        files=[("payload", ("payload.json", json.dumps(payload).encode(), "application/json"))],
+    )
+    assert r.status_code == 400
+    assert "different embedding models" in r.json()["detail"]
+    assert server.get(f"/documents/{did}/title-context").json()["first_page_text"] == ""
+
+
+def test_health_survives_an_unreadable_store(conn) -> None:
+    """/health is a liveness probe first — a broken DB must not 500 it."""
+    from fastapi.testclient import TestClient
+
+    from datasheet_rag.server import deps
+    from datasheet_rag.server.app import build_app
+
+    class _BrokenBackend(LocalBackend):
+        @property
+        def conn(self) -> sqlite3.Connection:
+            raise sqlite3.OperationalError("database is locked")
+
+    deps.get_backend.cache_clear()
+    app = build_app()
+    app.dependency_overrides[deps.get_backend] = lambda: _BrokenBackend(conn=conn)
+    body = TestClient(app).get("/health").json()
+    assert body["status"] == "ok"
+    assert body["embedding_dimensions"]
+
+
+def test_unreachable_health_does_not_count_as_checked() -> None:
+    """A failed probe must not disable the compatibility check for the process."""
+    probes = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal probes
+        if request.url.path == "/health":
+            probes += 1
+            return httpx.Response(503, json={"detail": "down"})
+        return httpx.Response(200, json={"doc_id": "7" * 64, "inserted": 1})
+
+    rb = _client_backend(handler)
+    rb._assert_embedding_compatible()
+    rb._assert_embedding_compatible()
+    assert probes == 2
+    assert rb._embedding_checked is False
+
+
+def test_supplied_vectors_still_trigger_the_compatibility_check(monkeypatch) -> None:
+    """`vectors=` bypasses _get_embedder(), so the guard has to live elsewhere."""
+    from datasheet_rag.backend.base import RagServerError
+
+    did = "8" * 64
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "ok", "embedding_dimensions": 1024})
+        raise AssertionError("the ingest went out despite a dimension mismatch")
+
+    monkeypatch.setenv("RAG_EMBEDDING_DIMENSIONS", "768")
+    from datasheet_rag.config import get_settings
+
+    get_settings.cache_clear()
+    try:
+        rb = _client_backend(handler)
+        with pytest.raises(RagServerError, match="768 dimensions"):
+            rb.ingest_chunk_graph(_graph(did), vectors={f"{did}:L2:0": [0.0] * 768})
+    finally:
+        get_settings.cache_clear()
+
+
+def test_a_supplied_title_turns_off_server_side_inference() -> None:
+    did = "a" * 64
+    sent: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raw = request.content
+        sent.update(json.loads(raw[raw.index(b"{") : raw.rindex(b"}") + 1]))
+        return httpx.Response(200, json={"doc_id": did, "inserted": 1})
+
+    rb = _client_backend(handler, embedder=_StubEmbedder())
+    rb.ingest_chunk_graph(_graph(did), infer_title=True, inferred_title="TPS62840")
+
+    # Both fields set would have the server infer a title on top of the one we
+    # are already sending — the model call client compute exists to avoid.
+    assert sent["inferred_title"] == "TPS62840"
+    assert sent["infer_title"] is False
+
+
+def test_client_compute_keeps_the_empty_query_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("an empty query should never reach the server")
+
+    embedder = _StubEmbedder()
+    rb = _client_backend(handler, embedder=embedder)
+    with pytest.raises(ValueError, match="query must not be empty"):
+        rb.search("   ")
+    assert embedder.calls == []
+
+
+def test_reingest_does_not_redescribe_stored_figures(monkeypatch, tmp_path) -> None:
+    """A freshly parsed graph has no descriptions; the store's still count."""
+    did = "d" * 64
+    graph = _graph(did, figure=True)
+    crop = tmp_path / "fig.png"
+    crop.write_bytes(b"\x89PNG\r\n\x1a\nXY")
+    graph.chunks[f"{did}:L2:1"].figure_image_path = str(crop)
+
+    import datasheet_rag.description.describer as dd
+
+    class _ExplodingDescriber:
+        def __init__(self, *a: Any, **kw: Any) -> None: ...
+
+        def describe_chunks(self, chunks: Any, source: Any) -> dict[str, str]:
+            raise AssertionError("re-described a figure the store already had")
+
+        def stats(self) -> dict[str, int]:
+            return {}
+
+    monkeypatch.setattr(dd, "FigureDescriber", _ExplodingDescriber)
+
+    stored = graph.chunks[f"{did}:L2:1"].model_copy(deep=True)
+    stored.figure_description = "A buck regulator block diagram."
+    sent: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/figures":
+            return httpx.Response(200, json={"chunks": [stored.model_dump(mode="json")]})
+        raw = request.content
+        sent.update(json.loads(raw[raw.index(b"{") : raw.rindex(b"}") + 1]))
+        return httpx.Response(200, json={"doc_id": did, "inserted": 2})
+
+    rb = _client_backend(handler, embedder=_StubEmbedder())
+    result = rb.ingest_chunk_graph(graph, embed=True, describe_figures=True)
+
+    assert result.described == 0
+    figure_json = sent["graph"]["chunks"][f"{did}:L2:1"]
+    assert figure_json["figure_description"] == "A buck regulator block diagram."
+    assert "Description: A buck regulator" in figure_json["context_text"]
+
+
+def test_client_compute_uploads_the_source_pdf(monkeypatch, tmp_path) -> None:
+    """Client-side parse still owes the server the PDF (rag show, show_pdf)."""
+    did = "e" * 64
+    pdf = tmp_path / "tps62840.pdf"
+    pdf.write_bytes(b"%PDF-1.7\nnot really\n")
+
+    import datasheet_rag.ingest_pipeline as ip
+
+    class _Parsed:
+        graph = _graph(did)
+        title_hints: dict[str, str] = {}
+
+    monkeypatch.setattr(ip, "parse_pdf_to_graph", lambda *a, **kw: _Parsed())
+    monkeypatch.setattr(ip, "collect_figure_uploads", lambda g: ({}, []))
+
+    uploaded: dict[str, bytes] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == f"/documents/{did}/pdf":
+            uploaded["body"] = request.content
+            return httpx.Response(200, json={"stored": True, "doc_id": did})
+        return httpx.Response(200, json={"doc_id": did, "inserted": 1})
+
+    rb = _client_backend(handler, embedder=_StubEmbedder())
+    result = rb.ingest_pdf(pdf, doc_id=did)
+
+    assert result.doc_id == did
+    assert b"%PDF-1.7" in uploaded["body"]
+
+
+def test_server_stores_an_uploaded_pdf(server, tmp_path, monkeypatch) -> None:
+    from datasheet_rag.config import get_settings
+
+    monkeypatch.setenv("RAG_DATA_DIR", str(tmp_path))
+    get_settings.cache_clear()
+    try:
+        did = "0" * 64
+        r = server.put(
+            f"/documents/{did}/pdf",
+            files={"payload": ("x.pdf", b"%PDF-1.7\nbytes\n", "application/pdf")},
+        )
+        assert r.status_code == 200, r.text
+        assert server.get(f"/documents/{did}/pdf").content == b"%PDF-1.7\nbytes\n"
+    finally:
+        get_settings.cache_clear()
+
+
+def test_pdf_upload_refuses_a_doc_id_that_escapes_the_store() -> None:
+    from datasheet_rag.storage import save_pdf_bytes
+
+    with pytest.raises(ValueError, match="invalid doc_id"):
+        save_pdf_bytes(b"%PDF", "../../etc/passwd")

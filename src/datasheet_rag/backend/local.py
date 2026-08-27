@@ -38,6 +38,7 @@ from datasheet_rag.store import (
     DocMetadata,
     SearchFilters,
     SearchResult,
+    TitleSource,
     apply_metadata_to_chunks,
     connect,
     count_chunks,
@@ -268,7 +269,7 @@ class LocalBackend(RagBackend):
         return get_doc_titles(self._get_conn())
 
     def set_doc_title(
-        self, doc_id: str, title: str, *, source: str = "manual", force: bool = False
+        self, doc_id: str, title: str, *, source: TitleSource = "manual", force: bool = False
     ) -> int:
         with self._write_lock:
             conn = self._get_conn()
@@ -484,6 +485,25 @@ class LocalBackend(RagBackend):
 
         return pdf_viewer.load_pdf_bytes(doc_id)
 
+    def _assert_vector_dims(self, vectors: Mapping[str, Sequence[float]]) -> None:
+        """Reject caller-supplied vectors whose width is not the store's.
+
+        The same check ``search`` runs on ``query_vector``, on the write side:
+        without it a mismatched vector reaches ``vec0`` and surfaces as an
+        unhandled 500 with the real reason buried in the audit row, when the
+        cause is a config difference the client can act on.
+        """
+        expected = stored_embedding_dim(self._get_conn())
+        if expected is None:
+            return
+        for chunk_id, vec in vectors.items():
+            if len(vec) != expected:
+                raise ValueError(
+                    f"vector for chunk {chunk_id} has {len(vec)} dimensions, but "
+                    f"this store's vectors are {expected}-dimensional — the client "
+                    f"and server are configured with different embedding models."
+                )
+
     # -- ingestion -----------------------------------------------------
     def ingest_chunk_graph(
         self,
@@ -513,6 +533,7 @@ class LocalBackend(RagBackend):
                     "supplied vectors were computed from. Describe first, then "
                     "embed, then send both."
                 )
+            self._assert_vector_dims(vectors)
             embed = False
 
         did = graph.doc_id

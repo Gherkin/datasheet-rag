@@ -51,7 +51,7 @@ if TYPE_CHECKING:
     import httpx
 
     from datasheet_rag.ingest_pipeline import ProgressCallback
-from datasheet_rag.store import DocMetadata, SearchFilters, SearchResult
+from datasheet_rag.store import DocMetadata, SearchFilters, SearchResult, TitleSource
 
 _EXCLUDE_VECS = {"content_embedding", "context_embedding"}
 
@@ -115,6 +115,33 @@ class RemoteBackend(RagBackend):
         except RagServerError:
             return False
 
+    def _restore_stored_descriptions(self, graph: ChunkGraph) -> None:
+        """Copy descriptions the store already holds onto a freshly parsed graph.
+
+        ``describe_figures_in_graph(missing_only=True)`` skips a chunk that
+        already has a description — but a graph straight from the parser has
+        none, so every re-ingest would describe every figure again. The
+        server-side path does not have this problem: its provisional insert
+        restores descriptions through the upsert's COALESCE before the
+        describer runs. This is that step, done over the wire.
+
+        Best effort: a store that cannot answer just means the descriptions
+        get recomputed, which is what would have happened anyway.
+        """
+        from datasheet_rag.description import apply_description_to_chunk
+        from datasheet_rag.models.chunk import LayoutType
+
+        if not any(c.metadata.layout_type == LayoutType.FIGURE for c in graph.chunks.values()):
+            return  # nothing to restore, so no round trip
+        try:
+            stored = self.list_figure_chunks(doc_id=graph.doc_id, only_with_image=False)
+        except RagServerError:
+            return
+        for chunk in stored:
+            target = graph.chunks.get(chunk.id)
+            if target is not None and not target.figure_description and chunk.figure_description:
+                apply_description_to_chunk(target, chunk.figure_description)
+
     def _assert_embedding_compatible(self) -> None:
         from datasheet_rag.config import get_settings
 
@@ -123,21 +150,25 @@ class RemoteBackend(RagBackend):
         try:
             health = self._json("GET", "/health")
         except RagServerError:
-            # Health is unauthenticated and cheap; if it cannot be reached the
-            # real call is about to fail with a better message anyway. Counts
-            # as checked: there is nothing more to learn by asking again.
-            self._embedding_checked = True
+            # Health is unauthenticated and cheap; a failure here says nothing
+            # about compatibility, so leave the flag alone and ask again next
+            # time. Marking it checked would turn one unreachable probe into a
+            # permanently skipped check for the rest of the process — and an
+            # ingest would then upload its vectors unchallenged, because
+            # /ingest is a different route that does not fail in sympathy.
             return
         settings = get_settings()
         # Note the flag is set only once the check *passes* — a mismatch has to
         # keep raising, not pass silently on the second call in the process.
         remote_dims = health.get("embedding_dimensions")
         if remote_dims is not None and int(remote_dims) != settings.embedding_dimensions:
+            # Reached from the ingest path too, where vectors can be supplied
+            # by a caller that never set RAG_COMPUTE — so lead with the fact,
+            # not the setting.
             raise RagServerError(
                 0,
-                f"RAG_COMPUTE=client, but this machine embeds to "
-                f"{settings.embedding_dimensions} dimensions and the server's store "
-                f"holds {remote_dims}-dimensional vectors. Set "
+                f"This machine embeds to {settings.embedding_dimensions} dimensions "
+                f"and the server's store holds {remote_dims}-dimensional vectors. Set "
                 f"RAG_EMBEDDING_DIMENSIONS (and the matching model) to the "
                 f"server's, or set RAG_COMPUTE=server to let it embed.",
             )
@@ -196,6 +227,12 @@ class RemoteBackend(RagBackend):
         filters: SearchFilters | None = None,
         query_vector: Sequence[float] | None = None,
     ) -> list[SearchResult]:
+        # Mirror LocalBackend's guard rather than letting the embedder raise:
+        # embedding first would replace the store's own 400 with an opaque
+        # local error, and would spend a real embed on a whitespace-only query
+        # the server is about to reject anyway.
+        if not query or not query.strip():
+            raise ValueError("query must not be empty")
         # Keyword search needs no vector at all; the other two modes get one
         # from here rather than from the server when compute is client-side.
         if query_vector is None and self.client_compute and mode != "keyword":
@@ -253,7 +290,7 @@ class RemoteBackend(RagBackend):
         return titles
 
     def set_doc_title(
-        self, doc_id: str, title: str, *, source: str = "manual", force: bool = False
+        self, doc_id: str, title: str, *, source: TitleSource = "manual", force: bool = False
     ) -> int:
         data = self._json(
             "PUT",
@@ -408,6 +445,20 @@ class RemoteBackend(RagBackend):
     def get_pdf_bytes(self, doc_id: str) -> bytes:
         return self._request("GET", f"/documents/{doc_id}/pdf").content
 
+    def put_pdf_bytes(self, doc_id: str, pdf_path: Path) -> None:
+        """Upload a source PDF the server never saw (RAG_COMPUTE=client, GH #43).
+
+        Under client compute the parse runs here, so ``save_pdf_locally``
+        writes to *this* machine's ``pdf_dir`` and the server would otherwise
+        hold a document it cannot serve the source of.
+        """
+        self._request(
+            "PUT",
+            f"/documents/{doc_id}/pdf",
+            files={"payload": (pdf_path.name, pdf_path.read_bytes(), "application/pdf")},
+            timeout=None,
+        )
+
     # -- ingestion -----------------------------------------------------
     def ingest_chunk_graph(
         self,
@@ -432,16 +483,22 @@ class RemoteBackend(RagBackend):
             if describe_figures:
                 from datasheet_rag.description import describe_figures_in_graph
 
+                self._restore_stored_descriptions(graph)
                 described_here = len(describe_figures_in_graph(graph))
                 describe_figures = False
-            if infer_title and inferred_title is None:
-                from datasheet_rag.titling import infer_title_from_graph
+            if infer_title:
+                if inferred_title is None:
+                    from datasheet_rag.titling import infer_title_from_graph
 
-                # Match the server's own guard before spending the call: it
-                # only infers for a document that has no usable title, and the
-                # answer would be discarded on arrival otherwise.
-                if not self._has_usable_title(graph):
-                    inferred_title = infer_title_from_graph(graph, title_hints=title_hints)
+                    # Match the server's own guard before spending the call: it
+                    # only infers for a document that has no usable title, and
+                    # the answer would be discarded on arrival otherwise.
+                    if not self._has_usable_title(graph):
+                        inferred_title = infer_title_from_graph(graph, title_hints=title_hints)
+                # Cleared even when the caller handed us a title: leaving it set
+                # would have the server run its own inference on top of the one
+                # we are already sending, which is the server-side model call
+                # client compute exists to avoid.
                 infer_title = False
             if embed and vectors is None:
                 from datasheet_rag.embedding import embed_chunk_graph
@@ -449,6 +506,14 @@ class RemoteBackend(RagBackend):
                 vectors = embed_chunk_graph(graph, embedder=self._get_embedder())
             if vectors is not None:
                 embed = False
+
+        if vectors is not None:
+            # Outside the client_compute branch on purpose: `vectors=` is a
+            # public argument, so vectors can arrive from a caller that never
+            # went through _get_embedder() and therefore never ran this check.
+            # Uploading vectors from the wrong model is the one failure that
+            # corrupts a corpus silently, so it is checked wherever it enters.
+            self._assert_embedding_compatible()
 
         payload = {
             "graph": graph.model_dump(mode="json", exclude=_chunk_excludes(graph)),
@@ -538,7 +603,7 @@ class RemoteBackend(RagBackend):
                 progress=progress,
             )
             uploads, _missing = ({}, []) if skip_figures else collect_figure_uploads(parsed.graph)
-            return self.ingest_chunk_graph(
+            ingested = self.ingest_chunk_graph(
                 parsed.graph,
                 figures=uploads or None,
                 project_id=project_id,
@@ -549,6 +614,11 @@ class RemoteBackend(RagBackend):
                 infer_title=infer_title,
                 title_hints=parsed.title_hints or None,
             )
+            # After the chunks, not before: a PDF on the server for a document
+            # that failed to ingest is a file nothing references. The store is
+            # the record of what exists; this just makes its source fetchable.
+            self.put_pdf_bytes(ingested.doc_id, pdf_path)
+            return ingested
 
         options = {
             "doc_id": doc_id,

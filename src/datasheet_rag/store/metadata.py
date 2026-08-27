@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from typing import Any
+from typing import Any, Literal, get_args
 
 from pydantic import BaseModel, Field
 
@@ -58,14 +58,30 @@ class DocMetadata(BaseModel):
 # across every row and could go inconsistent between them.
 # ---------------------------------------------------------------------------
 
-TITLE_SOURCES = ("auto", "inferred", "manual")
+#: Where a document's title came from, weakest first. The order *is* the
+#: precedence: a later source overwrites an earlier one, never the reverse.
+TitleSource = Literal["auto", "inferred", "manual"]
 
-_TITLE_RANK = {source: rank for rank, source in enumerate(TITLE_SOURCES)}
+TITLE_SOURCES: tuple[TitleSource, ...] = get_args(TitleSource)
+
+_TITLE_RANK: dict[str, int] = {source: rank for rank, source in enumerate(TITLE_SOURCES)}
 
 
 def title_rank(source: str) -> int:
     """Return the precedence rank of *source* (unknown values rank lowest)."""
     return _TITLE_RANK.get(source, 0)
+
+
+def validate_title_source(source: str) -> None:
+    """Raise ``ValueError`` unless *source* is a known provenance.
+
+    Callers that are about to *write* a title must check first: an unknown
+    source ranks 0, the same as ``"auto"``, so it slips past the precedence
+    guard and would otherwise be caught only after the title itself had
+    already been overwritten.
+    """
+    if source not in _TITLE_RANK:
+        raise ValueError(f"unknown title source {source!r} (expected one of {TITLE_SOURCES})")
 
 
 def title_source_of(attributes: dict[str, Any]) -> str:
@@ -100,8 +116,7 @@ def get_title_source(conn: sqlite3.Connection, doc_id: str) -> str:
 
 def set_title_source(conn: sqlite3.Connection, doc_id: str, source: str) -> None:
     """Record ``doc_id``'s title provenance, retiring the legacy boolean."""
-    if source not in _TITLE_RANK:
-        raise ValueError(f"unknown title source {source!r} (expected one of {TITLE_SOURCES})")
+    validate_title_source(source)
     set_metadata(
         conn,
         doc_id,

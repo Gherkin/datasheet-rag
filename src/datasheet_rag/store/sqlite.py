@@ -32,6 +32,7 @@ from datasheet_rag.store.metadata import (
     get_title_source,
     set_title_source,
     title_rank,
+    validate_title_source,
 )
 
 logger = logging.getLogger(__name__)
@@ -641,6 +642,12 @@ def set_doc_title(
     Commits, since the title and its provenance live in two tables and must
     land together. Returns the number of chunk rows updated.
     """
+    # Before anything is written: an unknown source ranks 0, so it would pass
+    # the guard below against the common "auto" case, overwrite doc_title, and
+    # only then be rejected by set_title_source — leaving the title changed and
+    # uncommitted on a connection someone else is about to commit.
+    validate_title_source(source)
+
     stored = get_title_source(conn, doc_id)
     if not force and title_rank(source) < title_rank(stored):
         return 0

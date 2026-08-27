@@ -45,6 +45,7 @@ from datasheet_rag.server.deps import (
 from datasheet_rag.store import (
     SearchFilters,
     SearchResult,
+    TitleSource,
     create_api_key,
     list_api_keys,
     list_audit,
@@ -94,8 +95,11 @@ class SearchRequest(BaseModel):
 
 
 class TitleBody(BaseModel):
+    # Validated at the boundary rather than left to the store: an unknown
+    # source ranks the same as "auto" and would clear the precedence guard,
+    # so the write only fails after the title has already been overwritten.
     title: str
-    source: str = "manual"
+    source: TitleSource = "manual"
     force: bool = False
 
 
@@ -200,8 +204,14 @@ def build_app() -> FastAPI:
         s = get_settings()
         # The store's own width, not this process's config: that is what a
         # client-supplied vector actually has to match (GH #43). Falls back to
-        # the setting for a database too old to record one.
-        dims = stored_embedding_dim(be.conn) or s.embedding_dimensions
+        # the setting for a database too old to record one — or for a store
+        # this process cannot read right now. /health is a liveness probe
+        # before it is anything else: a locked or missing database must not
+        # turn it into a 500 and take the container down with it.
+        try:
+            dims = stored_embedding_dim(be.conn) or s.embedding_dimensions
+        except Exception:
+            dims = s.embedding_dimensions
         return {
             "status": "ok",
             "embedding_backend": s.embedding_backend,
@@ -270,6 +280,24 @@ def build_app() -> FastAPI:
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         return Response(content=data, media_type="application/pdf")
+
+    @app.put("/documents/{doc_id}/pdf", dependencies=ingest_dep)
+    async def document_put_pdf(
+        doc_id: str,
+        payload: UploadFile = File(...),
+        be: LocalBackend = Depends(get_backend),
+    ) -> dict[str, Any]:
+        """Store a source PDF for a document ingested elsewhere (GH #43).
+
+        Under ``RAG_COMPUTE=client`` the parse happens on the client, so the
+        PDF never passes through ``/ingest-pdf``. Without this the store would
+        hold chunks whose source document nothing else on the network can
+        fetch, and ``rag show`` / ``show_pdf`` would 404 for every other user.
+        """
+        from datasheet_rag.storage import save_pdf_bytes
+
+        save_pdf_bytes(await payload.read(), doc_id)
+        return {"stored": True, "doc_id": doc_id}
 
     @app.get("/documents/{doc_id}/metadata", dependencies=dep)
     def document_metadata(doc_id: str, be: LocalBackend = Depends(get_backend)) -> Response:

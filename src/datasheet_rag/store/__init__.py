@@ -27,6 +27,7 @@ from datasheet_rag.store.control import (
 )
 from datasheet_rag.store.metadata import (
     DocMetadata,
+    TitleSource,
     apply_metadata_to_chunks,
     delete_metadata,
     get_metadata,
@@ -73,6 +74,7 @@ __all__ = [
     "DocMetadata",
     "SearchFilters",
     "SearchResult",
+    "TitleSource",
     "apply_metadata_to_chunks",
     "connect",
     "count_api_keys",
