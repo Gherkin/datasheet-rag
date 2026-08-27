@@ -317,7 +317,7 @@ def test_get_chunk_missing_returns_none(conn: Any) -> None:
     assert _get_chunk_impl("does-not-exist", conn=conn) is None
 
 
-def test_table_chunk_without_warning_gets_visual_check_nudge(conn: Any) -> None:
+def test_table_chunk_without_warning_is_marked_unverified(conn: Any) -> None:
     chunk = _make_chunk(
         "t1",
         doc_id="docA",
@@ -331,8 +331,8 @@ def test_table_chunk_without_warning_gets_visual_check_nudge(conn: Any) -> None:
 
     out = _get_chunk_impl("t1", conn=conn)
     assert out is not None
+    assert out["table_structure"] == "unverified"
     assert "table_structure_warning" not in out
-    assert "show_page('docA', 53)" in out["DISPLAY_INSTRUCTION"]
 
 
 def test_table_chunk_with_warning_flags_it(conn: Any) -> None:
@@ -350,15 +350,14 @@ def test_table_chunk_with_warning_flags_it(conn: Any) -> None:
 
     out = _get_chunk_impl("t2", conn=conn)
     assert out is not None
+    assert out["table_structure"] == "suspect"
     assert out["table_structure_warning"] == "garbled header"
-    assert "show_page('docA', 53)" in out["DISPLAY_INSTRUCTION"]
-    assert "garbled header" in out["DISPLAY_INSTRUCTION"]
 
 
-def test_non_table_chunk_has_no_table_instruction(conn: Any) -> None:
+def test_non_table_chunk_has_no_table_fields(conn: Any) -> None:
     out = _get_chunk_impl("c1", conn=conn)
     assert out is not None
-    assert "DISPLAY_INSTRUCTION" not in out
+    assert "table_structure" not in out
     assert "table_structure_warning" not in out
 
 
@@ -636,10 +635,8 @@ def test_search_does_not_advertise_a_figure_it_cannot_serve(
     )
     hit = next(r for r in out if r["chunk_id"] == "fig:gone")
     assert hit["has_figure"] is False
+    assert hit["figure_status"] == "image_not_stored"
     assert "figure_uri" not in hit
-    assert "show_figure" in hit["DISPLAY_INSTRUCTION"]
-    assert "Do NOT" in hit["DISPLAY_INSTRUCTION"]
-    assert "show_pdf('docA', 42)" in hit["DISPLAY_INSTRUCTION"]
 
 
 def test_search_marks_sourceless_figure_chunks_unshowable(conn: Any, fake_embedder: Any) -> None:
@@ -655,6 +652,7 @@ def test_search_marks_sourceless_figure_chunks_unshowable(conn: Any, fake_embedd
     )
     hit = next(r for r in out if r["chunk_id"] == "fig:bare")
     assert hit["has_figure"] is False
+    assert hit["figure_status"] == "image_not_stored"
     assert hit["figure_caption"].startswith("Figure 3-2")
 
 
@@ -690,7 +688,7 @@ def test_figure_tools_answer_softly_when_there_is_no_image(
 
     assert len(out) == 1  # text only — no image block
     assert out[0].type == "text"
-    assert "do not retry" in out[0].text
+    assert "permanent" in out[0].text
     assert "show_pdf('docA', <page>)" in out[0].text
 
 
@@ -787,3 +785,88 @@ def test_declared_version_matches_the_packaging_metadata() -> None:
 
     installed = importlib.metadata.version("datasheet-rag")
     assert installed == datasheet_rag.__version__
+
+# ---------------------------------------------------------------------------
+# Guidance lives in tool descriptions, not in results (GH #30)
+# ---------------------------------------------------------------------------
+
+#: Phrasing that turns a result field into an order aimed at the model. Read
+#: back out of a tool result, this is the shape of a prompt injection, and
+#: agents treat it as one.
+_DIRECTIVE_MARKERS = (
+    "you must",
+    "do not",
+    "don't",
+    "mandatory",
+    "call show_",
+    "call get_figure",
+    "instruction",
+)
+
+
+def _assert_no_directives(result: dict[str, Any]) -> None:
+    for key, value in result.items():
+        haystack = f"{key} {value}".lower()
+        for marker in _DIRECTIVE_MARKERS:
+            assert marker not in haystack, f"directive {marker!r} in result field {key!r}"
+
+
+def test_figure_result_carries_no_directives(conn: Any, fake_embedder: Any, tmp_path: Any) -> None:
+    img = tmp_path / "fig.png"
+    img.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+    _seed_figure_chunk(conn, "fig:ok", image_path=str(img))
+    out = _search_impl("SPI timing diagram", mode="keyword", k=5, project_id="p1", conn=conn)
+    hit = next(r for r in out if r["chunk_id"] == "fig:ok")
+    assert hit["has_figure"] is True
+    _assert_no_directives(hit)
+
+
+def test_unshowable_figure_result_carries_no_directives(conn: Any, fake_embedder: Any) -> None:
+    _seed_figure_chunk(conn, "fig:none", image_path=None, s3_key=None)
+    out = _search_impl("SPI timing diagram", mode="keyword", k=5, project_id="p1", conn=conn)
+    hit = next(r for r in out if r["chunk_id"] == "fig:none")
+    assert hit["figure_status"] == "image_not_stored"
+    _assert_no_directives(hit)
+
+
+@pytest.mark.parametrize("warning", [None, "garbled header"])
+def test_table_result_carries_no_directives(conn: Any, warning: str | None) -> None:
+    chunk = _make_chunk(
+        "t3",
+        doc_id="docA",
+        text="Pin | Function\n88 | -",
+        page=53,
+        layout_type=LayoutType.TABLE,
+        table_structure_warning=warning,
+    )
+    insert_chunks(conn, [chunk], vectors={"t3": _vec(9)}, project_id="p1")
+
+    out = _get_chunk_impl("t3", conn=conn)
+    assert out is not None
+    _assert_no_directives(out)
+
+
+@pytest.mark.parametrize("tool_name", ["search", "get_chunk", "navigate", "zoom_in", "zoom_out"])
+def test_chunk_tools_describe_the_fields_they_emit(tool_name: str) -> None:
+    """What the payload no longer says, the tool description has to say."""
+    pytest.importorskip("mcp")
+    from datasheet_rag.mcp import server as mcp_server
+
+    description = mcp_server.build_server()._tool_manager.get_tool(tool_name).description
+    for field in ("has_figure", "figure_status", "table_structure", "table_structure_warning"):
+        assert field in description, f"{tool_name} does not describe {field}"
+    assert "show_figure(chunk_id)" in description
+    # Flush-left, whichever interpreter compiled the docstring it was appended to.
+    assert "\n\nFields a chunk result may carry" in description
+
+
+@pytest.mark.parametrize("local_client, expected", [(True, "show_pdf"), (False, "show_page")])
+def test_chunk_tool_description_names_the_usable_source_page_tool(
+    local_client: bool, expected: str
+) -> None:
+    pytest.importorskip("mcp")
+    from datasheet_rag.mcp import server as mcp_server
+
+    server = mcp_server.build_server(local_client=local_client)
+    description = server._tool_manager.get_tool("search").description
+    assert f"{expected}(doc_id, page)" in description
