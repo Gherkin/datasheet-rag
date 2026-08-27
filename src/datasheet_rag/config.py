@@ -123,6 +123,31 @@ class Settings(BaseSettings):
             "default because ingest requests embed server-side and can be slow."
         ),
     )
+    server_max_upload_mb: int = Field(
+        default=512,
+        alias="RAG_SERVER_MAX_UPLOAD_MB",
+        description=(
+            "Largest source PDF the server accepts on an upload route, in MiB. "
+            "Uploads are read into memory, so this is the bound on what one "
+            "request can cost the process; a datasheet that trips it is far "
+            "more likely to be a mistake than a real document."
+        ),
+    )
+    compute: Literal["server", "client"] = Field(
+        default="server",
+        description=(
+            "Where model work runs in remote mode: 'server' (default — the "
+            "server parses, embeds, describes figures and infers titles, so "
+            "this client needs no models) or 'client' (this machine does all "
+            "of it and the server is only a vector store). Set it to 'client' "
+            "when the server host has no GPU and your workstation does. "
+            "Ignored in local mode, where there is no server to defer to. "
+            "Client-side embedding only makes sense if this machine's "
+            "embedding model matches the one the corpus was built with — the "
+            "client checks the server's /health and refuses on a dimension "
+            "mismatch (see RAG_EMBEDDING_DIMENSIONS)."
+        ),
+    )
 
     # ------------------------------------------------------------------
     # MCP over HTTP — the server mounts the MCP tool surface at /mcp so
@@ -503,6 +528,14 @@ class Settings(BaseSettings):
             if tok:
                 return tok
         return self.server_read_token or self.server_token
+
+    def client_side_compute(self) -> bool:
+        """True when this process should run the models itself, not the server.
+
+        Only ever true in remote mode: in local mode every model call already
+        happens here, and ``compute`` has nothing to redirect.
+        """
+        return bool(self.server_url) and self.compute == "client"
 
     def cors_origins_list(self) -> list[str]:
         """Parse the CORS allowlist into a list (empty when unset)."""

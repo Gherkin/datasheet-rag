@@ -245,6 +245,21 @@ def test_check_embedding_dim_mismatch_raises(conn: sqlite3.Connection) -> None:
         _check_embedding_dim(conn, EMBED_DIM + 4)
 
 
+def test_unreadable_embedding_dim_is_not_silently_treated_as_fresh(
+    conn: sqlite3.Connection,
+) -> None:
+    """None means "no row recorded", which _check_embedding_dim lets through.
+
+    So a store that cannot answer has to raise instead — swallowing the error
+    into None would disable the dimension guard exactly when it matters.
+    """
+    from datasheet_rag.store.schema import stored_embedding_dim
+
+    conn.execute("DROP TABLE schema_version")
+    with pytest.raises(sqlite3.Error):
+        stored_embedding_dim(conn)
+
+
 # ---------------------------------------------------------------------------
 # 2. Insert + get_chunk round-trip
 # ---------------------------------------------------------------------------

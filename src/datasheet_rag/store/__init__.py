@@ -27,6 +27,7 @@ from datasheet_rag.store.control import (
 )
 from datasheet_rag.store.metadata import (
     DocMetadata,
+    TitleSource,
     apply_metadata_to_chunks,
     delete_metadata,
     get_metadata,
@@ -39,6 +40,7 @@ from datasheet_rag.store.schema import (
     fts_status,
     init_schema,
     rebuild_fts,
+    stored_embedding_dim,
 )
 from datasheet_rag.store.search import (
     SearchFilters,
@@ -72,6 +74,7 @@ __all__ = [
     "DocMetadata",
     "SearchFilters",
     "SearchResult",
+    "TitleSource",
     "apply_metadata_to_chunks",
     "connect",
     "count_api_keys",
@@ -90,6 +93,7 @@ __all__ = [
     "fts_status",
     "init_schema",
     "rebuild_fts",
+    "stored_embedding_dim",
     "InsertStats",
     "insert_chunk_graph",
     "insert_chunks",

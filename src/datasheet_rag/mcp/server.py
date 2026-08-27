@@ -59,6 +59,8 @@ from datasheet_rag.backend import (
     FigureUnavailableError,
     RagBackend,
     backend_mode,
+    compute_mode,
+    emit_client_compute_notice,
     emit_local_notice,
     get_backend,
 )
@@ -1234,6 +1236,7 @@ def main() -> None:
             {
                 "event": "rag-mcp.start",
                 "mode": mode,
+                "compute": compute_mode(),
                 "server_url": settings.server_url,
                 "server_token_set": bool(settings.server_token) if mode == "remote" else None,
                 "db_path": str(settings.sqlite_db_path) if mode == "local" else None,
@@ -1245,6 +1248,7 @@ def main() -> None:
     )
     # In local mode, emit the one-line notice too (consistent with the CLI).
     emit_local_notice()
+    emit_client_compute_notice()
     # Pre-fetch PDF.js in the background so the first show_pdf call returns
     # instantly. Errors are silently ignored — pdf_viewer fetches lazily on
     # first /static/ request and surfaces a helpful error if that also fails.

@@ -65,6 +65,31 @@ class ParseResult:
     figure_count: int = 0
 
 
+def collect_figure_uploads(graph: ChunkGraph) -> tuple[dict[str, tuple[bytes, str]], list[str]]:
+    """Read every croppable figure in *graph* for upload to a remote server.
+
+    Returns ``(uploads, missing)`` where ``missing`` lists the chunk ids whose
+    recorded crop could not be read here. Paths go through
+    ``resolve_figure_path`` because a stored path may be relative to
+    ``figures_dir`` — treating one as a plain filesystem path resolves it
+    against the CWD, silently loses the crop, and leaves the server holding a
+    path it cannot serve (GH #41).
+    """
+    from datasheet_rag.store import resolve_figure_path
+
+    uploads: dict[str, tuple[bytes, str]] = {}
+    missing: list[str] = []
+    for c in graph.chunks.values():
+        if not c.figure_image_path:
+            continue
+        path = resolve_figure_path(c.figure_image_path)
+        if path is not None and path.is_file():
+            uploads[c.id] = (path.read_bytes(), path.suffix.lstrip(".") or "png")
+        else:
+            missing.append(c.id)
+    return uploads, missing
+
+
 class OcrRequiredError(Exception):
     """Raised when a scanned PDF needs paid Textract OCR but it was disallowed.
 
