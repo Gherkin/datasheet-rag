@@ -89,9 +89,11 @@ accidental, and both carry a comment where they sit:
 
 - Optional third-party modules that arrive untyped, or that live behind the
   `local-hf` extra, are listed in `pyproject.toml`'s mypy overrides.
-- Five MCP tools that return content blocks carry no return annotation.
-  Annotating one makes FastMCP publish an `outputSchema` and start returning
-  `structuredContent`, which changes what the tool puts on the wire.
+- Five MCP tools that return content blocks are annotated `ContentBlocks` and
+  registered with `structured_output=False`. They must never publish an
+  `outputSchema`: `structuredContent` would repeat every block as JSON, base64
+  image included, doubling the payload the host already renders. Keep the flag
+  on any tool you add there rather than relying on the SDK to infer it.
 
 ## Pull requests
 

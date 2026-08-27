@@ -2,7 +2,7 @@
 
 We test the ``_impl`` functions directly — they take ``conn`` and
 ``embedder`` as kwargs so we can bypass the module-level singletons and
-the FastMCP transport. This keeps tests fast and free of the ``mcp``
+the MCP transport. This keeps tests fast and free of the ``mcp``
 SDK dependency.
 """
 
@@ -688,3 +688,58 @@ def test_figure_tools_answer_softly_when_there_is_no_image(
     assert out[0].type == "text"
     assert "do not retry" in out[0].text
     assert "show_pdf('docA', <page>)" in out[0].text
+
+
+#: Tools that hand back content blocks the host renders itself. Their payload
+#: is the blocks — a structured copy alongside would be dead weight (GH #48).
+_CONTENT_BLOCK_TOOLS = {"get_figure", "show_figure", "show_pdf", "show_page", "show_hello"}
+
+#: Tools carrying an MCP App widget, keyed by the resource the host loads.
+_APP_TOOLS = {
+    "show_figure": "ui://datasheet-rag/figure-app",
+    "show_page": "ui://datasheet-rag/figure-app",
+    "show_hello": "ui://datasheet-rag/hello",
+}
+
+
+def test_only_the_data_tools_publish_an_output_schema() -> None:
+    """Content-block tools must not double their payload with structuredContent.
+
+    A structured copy repeats every block as JSON, base64 image included, for
+    blocks the host already renders (GH #48). This pins the split so neither
+    an SDK upgrade nor a dropped ``structured_output=False`` moves a tool
+    across it quietly.
+    """
+    pytest.importorskip("mcp")
+    import asyncio
+
+    from datasheet_rag.mcp import server as mcp_server
+
+    tools = asyncio.run(mcp_server.build_server().list_tools())
+    schemas = {t.name: t.output_schema for t in tools}
+
+    assert _CONTENT_BLOCK_TOOLS <= set(schemas)
+    for name in _CONTENT_BLOCK_TOOLS:
+        assert schemas[name] is None, f"{name} publishes an outputSchema"
+    for name in set(schemas) - _CONTENT_BLOCK_TOOLS:
+        assert schemas[name] is not None, f"{name} lost its outputSchema"
+
+
+def test_mcp_app_tools_declare_their_widget_resource() -> None:
+    """``_meta.ui.resourceUri`` rides on the tool definition, not the result."""
+    pytest.importorskip("mcp")
+    import asyncio
+
+    from datasheet_rag.mcp import server as mcp_server
+
+    server = mcp_server.build_server()
+    tools = asyncio.run(server.list_tools())
+    declared = {
+        t.name: (t.meta or {}).get("ui", {}).get("resourceUri")
+        for t in tools
+        if (t.meta or {}).get("ui")
+    }
+    assert declared == _APP_TOOLS
+
+    served = {str(r.uri) for r in asyncio.run(server.list_resources())}
+    assert set(_APP_TOOLS.values()) <= served
