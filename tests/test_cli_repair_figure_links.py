@@ -32,7 +32,9 @@ def _figure_chunk(index: int, page: int, text: str = "[Figure]") -> Chunk:
         context_text=text,
         token_count=2,
         metadata=ChunkMetadata(
-            doc_id=DOC, doc_title="Widget Manual", page_numbers=[page],
+            doc_id=DOC,
+            doc_title="Widget Manual",
+            page_numbers=[page],
             layout_type=LayoutType.FIGURE,
         ),
     )
@@ -50,20 +52,24 @@ def figures_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     for i, page in enumerate([3, 3, 5]):
         name = f"p{page:03d}_fig{i:03d}.png"
         (doc_dir / name).write_bytes(b"\x89PNGFAKE" + str(i).encode())
-        entries.append({
-            "block_id": f"docling_figure_{i + 1}",
-            "page": page,
-            "caption": f"Figure {i + 1}: view",
-            # As written on the machine that cropped them — a path that does
-            # not exist here.
-            "image_path": f"/elsewhere/{DOC}/{name}",
-        })
-    entries.append({
-        "block_id": "docling_formula_1",
-        "page": 5,
-        "caption": "",
-        "image_path": f"/elsewhere/{DOC}/p005_formula003.png",
-    })
+        entries.append(
+            {
+                "block_id": f"docling_figure_{i + 1}",
+                "page": page,
+                "caption": f"Figure {i + 1}: view",
+                # As written on the machine that cropped them — a path that does
+                # not exist here.
+                "image_path": f"/elsewhere/{DOC}/{name}",
+            }
+        )
+    entries.append(
+        {
+            "block_id": "docling_formula_1",
+            "page": 5,
+            "caption": "",
+            "image_path": f"/elsewhere/{DOC}/p005_formula003.png",
+        }
+    )
     (doc_dir / "manifest.json").write_text(json.dumps({"figures": entries}))
     return root
 
@@ -117,9 +123,7 @@ def test_apply_relinks_crops_and_captions(db_path: Path, figures_dir: Path) -> N
     assert "already has an image source" in again.output
 
 
-def test_a_page_whose_counts_disagree_is_left_alone(
-    db_path: Path, figures_dir: Path
-) -> None:
+def test_a_page_whose_counts_disagree_is_left_alone(db_path: Path, figures_dir: Path) -> None:
     """Better an unrepaired page than a chunk pointing at the wrong picture."""
     conn = connect(db_path, embedding_dim=get_settings().embedding_dimensions)
     insert_chunks(conn, [_figure_chunk(3, 3)], project_id="proj-a")  # 3 chunks, 2 crops
@@ -137,8 +141,9 @@ def test_a_page_whose_counts_disagree_is_left_alone(
     conn.close()
 
 
-def test_a_document_without_crops_says_so(db_path: Path, tmp_path: Path,
-                                          monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_document_without_crops_says_so(
+    db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setattr(get_settings(), "figures_dir", tmp_path / "empty")
     result = _run(db_path, "repair", "figure-links")
     assert result.exit_code == 0, result.output
@@ -146,9 +151,7 @@ def test_a_document_without_crops_says_so(db_path: Path, tmp_path: Path,
     assert "re-ingest" in result.output
 
 
-def test_documents_needing_only_a_rechunk_are_summarised(
-    db_path: Path, figures_dir: Path
-) -> None:
+def test_documents_needing_only_a_rechunk_are_summarised(db_path: Path, figures_dir: Path) -> None:
     """A MESO figure chunk has no crop of its own — relinking cannot help."""
     conn = connect(db_path, embedding_dim=get_settings().embedding_dimensions)
     meso = _figure_chunk(0, 3)

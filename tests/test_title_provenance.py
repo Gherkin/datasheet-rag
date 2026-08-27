@@ -4,6 +4,7 @@ Covers every (stored source, incoming source) pair, not just the blank
 case — an auto-detected title that is merely *wrong* ("Contents") used to
 win on re-ingest simply because it was non-empty. See issue #32.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -24,10 +25,24 @@ DOC = "c" * 64
 
 
 def _chunk(title: str) -> Chunk:
-    md = ChunkMetadata(doc_id=DOC, doc_title=title, chapter_title="", section_title="",
-                       page_numbers=[1], layout_type=LayoutType.TEXT, context_string="")
-    return Chunk(id=f"{DOC}:L1:0", doc_id=DOC, level=ChunkLevel.MICRO, text="t",
-                 context_text="t", token_count=1, metadata=md)
+    md = ChunkMetadata(
+        doc_id=DOC,
+        doc_title=title,
+        chapter_title="",
+        section_title="",
+        page_numbers=[1],
+        layout_type=LayoutType.TEXT,
+        context_string="",
+    )
+    return Chunk(
+        id=f"{DOC}:L1:0",
+        doc_id=DOC,
+        level=ChunkLevel.MICRO,
+        text="t",
+        context_text="t",
+        token_count=1,
+        metadata=md,
+    )
 
 
 @pytest.fixture
@@ -45,6 +60,7 @@ def _ingest(conn, title: str, **kw) -> None:
 
 
 # -- the case #32 is about: a wrong-but-present auto title ------------------
+
 
 @pytest.mark.parametrize("stored_source", ["manual", "inferred"])
 def test_reingest_does_not_clobber_better_sourced_title(conn, stored_source: str) -> None:
@@ -74,6 +90,7 @@ def test_reingest_with_force_overrides_provenance(conn) -> None:
 
 
 # -- write-path precedence, source pair by source pair ----------------------
+
 
 @pytest.mark.parametrize(
     ("stored", "incoming", "expected"),
@@ -121,6 +138,7 @@ def test_force_beats_precedence(conn) -> None:
 
 # -- clearing a title is a deliberate act, and sticks -----------------------
 
+
 def test_manually_cleared_title_is_not_refilled_by_reingest(conn) -> None:
     _ingest(conn, "Contents")
     set_doc_title(conn, DOC, "", source="manual")
@@ -131,6 +149,7 @@ def test_manually_cleared_title_is_not_refilled_by_reingest(conn) -> None:
 
 
 # -- the b3a7388 case still holds ------------------------------------------
+
 
 def test_reembed_keeps_inferred_title(conn) -> None:
     """A cached chunk graph carrying a blank must not wipe a stored title."""
@@ -143,6 +162,7 @@ def test_reembed_keeps_inferred_title(conn) -> None:
 
 
 # -- legacy stores ----------------------------------------------------------
+
 
 def test_legacy_title_inferred_boolean_reads_as_inferred(conn) -> None:
     _ingest(conn, "Contents")
@@ -161,6 +181,7 @@ def test_legacy_boolean_is_retired_on_next_write(conn) -> None:
     set_doc_title(conn, DOC, "Hand Written", source="manual")
 
     from datasheet_rag.store.metadata import get_metadata
+
     attrs = get_metadata(conn, DOC).attributes
     assert attrs["title_source"] == "manual"
     assert "title_inferred" not in attrs
@@ -182,4 +203,5 @@ def test_provenance_does_not_leave_a_null_legacy_key(conn) -> None:
     set_doc_title(conn, DOC, "Hand Written", source="manual")
 
     from datasheet_rag.store.metadata import get_metadata
+
     assert get_metadata(conn, DOC).attributes == {"title_source": "manual"}

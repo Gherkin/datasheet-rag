@@ -25,19 +25,29 @@ from datasheet_rag.project_config import get_project_config
 from datasheet_rag.store.schema import connect
 from datasheet_rag.store.sqlite import insert_chunks
 
-DOC_ID = "a" * 64          # has chunks + a real PDF on disk
-DOC_NO_PDF = "b" * 64      # has chunks but no PDF file on disk
+DOC_ID = "a" * 64  # has chunks + a real PDF on disk
+DOC_NO_PDF = "b" * 64  # has chunks but no PDF file on disk
 _FAKE_PDF_BYTES = b"%PDF-1.4 fake pdf content for tests\n%%EOF"
 
 
 def _chunk(doc_id: str, title: str = "Widget Datasheet") -> Chunk:
     md = ChunkMetadata(
-        doc_id=doc_id, doc_title=title, section_title="", chapter_title="",
-        page_numbers=[1], layout_type=LayoutType.TEXT, context_string="",
+        doc_id=doc_id,
+        doc_title=title,
+        section_title="",
+        chapter_title="",
+        page_numbers=[1],
+        layout_type=LayoutType.TEXT,
+        context_string="",
     )
     return Chunk(
-        id=f"{doc_id}:L2:0", doc_id=doc_id, level=ChunkLevel.MICRO,
-        text="t", context_text="t", token_count=1, metadata=md,
+        id=f"{doc_id}:L2:0",
+        doc_id=doc_id,
+        level=ChunkLevel.MICRO,
+        text="t",
+        context_text="t",
+        token_count=1,
+        metadata=md,
     )
 
 
@@ -103,9 +113,7 @@ def test_get_doc_default_name(tmp_path, db_path, monkeypatch) -> None:
 
 def test_get_doc_explicit_output_path(tmp_path, db_path) -> None:
     dest = tmp_path / "custom-name.pdf"
-    result = CliRunner().invoke(
-        cli, ["get", "doc", DOC_ID, "--db", str(db_path), "-o", str(dest)]
-    )
+    result = CliRunner().invoke(cli, ["get", "doc", DOC_ID, "--db", str(db_path), "-o", str(dest)])
     assert result.exit_code == 0, result.output
     assert dest.exists()
     assert dest.read_bytes() == _FAKE_PDF_BYTES
@@ -165,15 +173,13 @@ def test_get_doc_host_serves_pdf_bytes(tmp_path, db_path, monkeypatch) -> None:
     opened_urls: list[str] = []
     monkeypatch.setattr("webbrowser.open", lambda url: opened_urls.append(url))
 
-    result = CliRunner().invoke(
-        cli, ["get", "doc", DOC_ID, "--host", "--db", str(db_path)]
-    )
+    result = CliRunner().invoke(cli, ["get", "doc", DOC_ID, "--host", "--db", str(db_path)])
     assert result.exit_code == 0, result.output
     assert "PDF viewer running" in result.output
     assert f"/viewer/{DOC_ID}#page=1" in result.output
     assert "Stopped." in result.output
     assert len(opened_urls) == 1
-    assert f"127.0.0.1" in opened_urls[0]
+    assert "127.0.0.1" in opened_urls[0]
     assert f"/viewer/{DOC_ID}#page=1" in opened_urls[0]
 
     # Confirm the server actually started and serves the primed PDF bytes —
@@ -211,8 +217,6 @@ def test_get_doc_host_custom_page_in_urls(tmp_path, db_path, monkeypatch) -> Non
 
 def test_get_doc_host_missing_pdf_errors(tmp_path, db_path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
-    result = CliRunner().invoke(
-        cli, ["get", "doc", DOC_NO_PDF, "--host", "--db", str(db_path)]
-    )
+    result = CliRunner().invoke(cli, ["get", "doc", DOC_NO_PDF, "--host", "--db", str(db_path)])
     assert result.exit_code != 0
     assert "PDF not found" in result.output

@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import http.server
 import socket
-from pathlib import Path
 from threading import Lock, Thread
 from typing import Any
 
@@ -238,9 +237,9 @@ def load_pdf_bytes(doc_id: str) -> bytes:
             )
             for obj in resp.get("Contents", []):
                 if obj["Key"].lower().endswith(".pdf"):
-                    body = client.get_object(
-                        Bucket=settings.s3_bucket, Key=obj["Key"]
-                    )["Body"].read()
+                    body = client.get_object(Bucket=settings.s3_bucket, Key=obj["Key"])[
+                        "Body"
+                    ].read()
                     with _pdf_cache_lock:
                         _pdf_cache[doc_id] = body
                     return body
@@ -270,7 +269,7 @@ def _get_pdfjs_bytes(filename: str) -> bytes:
 
     url = _PDFJS_CDN + filename
     with urllib.request.urlopen(url, timeout=30) as resp:  # noqa: S310
-        data = resp.read()
+        data: bytes = resp.read()
     with _pdfjs_cache_lock:
         _pdfjs_cache[filename] = data
     return data
@@ -311,7 +310,7 @@ def ensure_pdf_server() -> int:
             return _pdf_server_port
         with socket.socket() as s:
             s.bind(("0.0.0.0", 0))
-            port = s.getsockname()[1]
+            port: int = s.getsockname()[1]
         srv = http.server.ThreadingHTTPServer(("0.0.0.0", port), _PDFHandler)
         Thread(target=srv.serve_forever, daemon=True).start()
         _pdf_server_port = port

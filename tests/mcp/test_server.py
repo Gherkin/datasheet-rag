@@ -28,7 +28,6 @@ from datasheet_rag.store import (
     set_metadata,
 )
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -98,40 +97,79 @@ def conn() -> Any:
 
     chunks = [
         _make_chunk("m1", level=ChunkLevel.MACRO, chapter="Comm", section="Comm"),
-        _make_chunk("s1", level=ChunkLevel.MESO, chapter="Comm", section="I2C",
-                    parent_id="m1", chapter_root_id="m1", next_id="s2"),
-        _make_chunk("s2", level=ChunkLevel.MESO, chapter="Comm", section="ESD",
-                    parent_id="m1", chapter_root_id="m1", prev_id="s1"),
-        _make_chunk("c1", text="I2C clock stretching specification",
-                    section="I2C", chapter="Comm",
-                    parent_id="s1", chapter_root_id="m1", next_id="c2"),
-        _make_chunk("c2", text="STM32H743 SPI4 CR1 register layout",
-                    section="I2C", chapter="Comm",
-                    parent_id="s1", chapter_root_id="m1", prev_id="c1"),
-        _make_chunk("c3", text="ESD HBM rating for the input pin",
-                    section="ESD", chapter="Comm",
-                    parent_id="s2", chapter_root_id="m1"),
-        _make_chunk("c4", doc_id="docB",
-                    text="dropout voltage versus load current curve",
-                    section="LDO", chapter="Power"),
+        _make_chunk(
+            "s1",
+            level=ChunkLevel.MESO,
+            chapter="Comm",
+            section="I2C",
+            parent_id="m1",
+            chapter_root_id="m1",
+            next_id="s2",
+        ),
+        _make_chunk(
+            "s2",
+            level=ChunkLevel.MESO,
+            chapter="Comm",
+            section="ESD",
+            parent_id="m1",
+            chapter_root_id="m1",
+            prev_id="s1",
+        ),
+        _make_chunk(
+            "c1",
+            text="I2C clock stretching specification",
+            section="I2C",
+            chapter="Comm",
+            parent_id="s1",
+            chapter_root_id="m1",
+            next_id="c2",
+        ),
+        _make_chunk(
+            "c2",
+            text="STM32H743 SPI4 CR1 register layout",
+            section="I2C",
+            chapter="Comm",
+            parent_id="s1",
+            chapter_root_id="m1",
+            prev_id="c1",
+        ),
+        _make_chunk(
+            "c3",
+            text="ESD HBM rating for the input pin",
+            section="ESD",
+            chapter="Comm",
+            parent_id="s2",
+            chapter_root_id="m1",
+        ),
+        _make_chunk(
+            "c4",
+            doc_id="docB",
+            text="dropout voltage versus load current curve",
+            section="LDO",
+            chapter="Power",
+        ),
     ]
     vectors = {
-        "m1": _vec(0), "s1": _vec(1), "s2": _vec(2),
-        "c1": _vec(3),   # I2C
-        "c2": _vec(4),   # SPI4
-        "c3": _vec(5),   # ESD
-        "c4": _vec(6),   # dropout
+        "m1": _vec(0),
+        "s1": _vec(1),
+        "s2": _vec(2),
+        "c1": _vec(3),  # I2C
+        "c2": _vec(4),  # SPI4
+        "c3": _vec(5),  # ESD
+        "c4": _vec(6),  # dropout
     }
 
     # docA gets project p1; docB gets p2 (insert in two calls so project
     # is correctly attached per doc).
     insert_chunks(
-        c, [ch for ch in chunks if ch.doc_id == "docA"],
+        c,
+        [ch for ch in chunks if ch.doc_id == "docA"],
         vectors={k: v for k, v in vectors.items() if k != "c4"},
         project_id="p1",
     )
     insert_chunks(
-        c, [ch for ch in chunks if ch.doc_id == "docB"],
+        c,
+        [ch for ch in chunks if ch.doc_id == "docB"],
         vectors={"c4": vectors["c4"]},
         project_id="p2",
     )
@@ -167,8 +205,11 @@ def fake_embedder() -> Any:
 
 def test_search_keyword_finds_exact_phrase(conn: Any) -> None:
     out = _search_impl(
-        "clock stretching", mode="keyword", k=3,
-        project_id="p1", conn=conn,
+        "clock stretching",
+        mode="keyword",
+        k=3,
+        project_id="p1",
+        conn=conn,
     )
     assert out, "keyword search returned nothing"
     assert out[0]["chunk_id"] == "c1"
@@ -178,8 +219,12 @@ def test_search_vector_uses_embedder_and_orders_by_similarity(
     conn: Any, fake_embedder: Any
 ) -> None:
     out = _search_impl(
-        "i2c question", mode="vector", k=3,
-        project_id="p1", conn=conn, embedder=fake_embedder,
+        "i2c question",
+        mode="vector",
+        k=3,
+        project_id="p1",
+        conn=conn,
+        embedder=fake_embedder,
     )
     assert out[0]["chunk_id"] == "c1"
     fake_embedder.embed_one.assert_called_once()
@@ -188,8 +233,12 @@ def test_search_vector_uses_embedder_and_orders_by_similarity(
 def test_search_hybrid_combines_signals(conn: Any, fake_embedder: Any) -> None:
     # A query that hits c2 on both keyword (SPI4 CR1) and vector (slot 4).
     out = _search_impl(
-        "SPI4 CR1", mode="hybrid", k=3,
-        project_id="p1", conn=conn, embedder=fake_embedder,
+        "SPI4 CR1",
+        mode="hybrid",
+        k=3,
+        project_id="p1",
+        conn=conn,
+        embedder=fake_embedder,
     )
     assert out[0]["chunk_id"] == "c2"
 
@@ -197,8 +246,11 @@ def test_search_hybrid_combines_signals(conn: Any, fake_embedder: Any) -> None:
 def test_search_respects_project_filter(conn: Any, fake_embedder: Any) -> None:
     # The "dropout" chunk lives in project p2 — filtering to p1 must hide it.
     out = _search_impl(
-        "dropout voltage", mode="keyword", k=5,
-        project_id="p1", conn=conn,
+        "dropout voltage",
+        mode="keyword",
+        k=5,
+        project_id="p1",
+        conn=conn,
     )
     ids = [r["chunk_id"] for r in out]
     assert "c4" not in ids
@@ -206,16 +258,23 @@ def test_search_respects_project_filter(conn: Any, fake_embedder: Any) -> None:
 
 def test_search_doc_id_filter_narrows_to_doc(conn: Any) -> None:
     out = _search_impl(
-        "dropout voltage", mode="keyword", k=5,
-        doc_id="docB", conn=conn,
+        "dropout voltage",
+        mode="keyword",
+        k=5,
+        doc_id="docB",
+        conn=conn,
     )
     assert [r["chunk_id"] for r in out] == ["c4"]
 
 
 def test_search_level_filter(conn: Any) -> None:
     out = _search_impl(
-        "Comm", mode="keyword", k=10, level="macro",
-        project_id="p1", conn=conn,
+        "Comm",
+        mode="keyword",
+        k=10,
+        level="macro",
+        project_id="p1",
+        conn=conn,
     )
     assert all(r["level"] == "MACRO" for r in out)
 
@@ -232,8 +291,7 @@ def test_search_invalid_level_raises(conn: Any) -> None:
 
 def test_search_invalid_layout_type_raises(conn: Any) -> None:
     with pytest.raises(ValueError, match="layout_type"):
-        _search_impl("anything", mode="keyword",
-                     layout_types=["pixelart"], conn=conn)
+        _search_impl("anything", mode="keyword", layout_types=["pixelart"], conn=conn)
 
 
 # ---------------------------------------------------------------------------
@@ -256,9 +314,15 @@ def test_get_chunk_missing_returns_none(conn: Any) -> None:
 
 
 def test_table_chunk_without_warning_gets_visual_check_nudge(conn: Any) -> None:
-    chunk = _make_chunk("t1", doc_id="docA", text="Pin | Function\n88 | -",
-                         section="Pinout", chapter="Comm", page=53,
-                         layout_type=LayoutType.TABLE)
+    chunk = _make_chunk(
+        "t1",
+        doc_id="docA",
+        text="Pin | Function\n88 | -",
+        section="Pinout",
+        chapter="Comm",
+        page=53,
+        layout_type=LayoutType.TABLE,
+    )
     insert_chunks(conn, [chunk], vectors={"t1": _vec(7)}, project_id="p1")
 
     out = _get_chunk_impl("t1", conn=conn)
@@ -268,10 +332,16 @@ def test_table_chunk_without_warning_gets_visual_check_nudge(conn: Any) -> None:
 
 
 def test_table_chunk_with_warning_flags_it(conn: Any) -> None:
-    chunk = _make_chunk("t2", doc_id="docA", text="Pin | Function\n88 | -",
-                         section="Pinout", chapter="Comm", page=53,
-                         layout_type=LayoutType.TABLE,
-                         table_structure_warning="garbled header")
+    chunk = _make_chunk(
+        "t2",
+        doc_id="docA",
+        text="Pin | Function\n88 | -",
+        section="Pinout",
+        chapter="Comm",
+        page=53,
+        layout_type=LayoutType.TABLE,
+        table_structure_warning="garbled header",
+    )
     insert_chunks(conn, [chunk], vectors={"t2": _vec(8)}, project_id="p1")
 
     out = _get_chunk_impl("t2", conn=conn)
@@ -343,10 +413,8 @@ def test_navigate_missing_chunk_returns_empty(conn: Any) -> None:
 
 
 def test_list_documents_filters_by_project(conn: Any) -> None:
-    set_metadata(conn, "docA", project_id="p1", mpn="STM32H743",
-                 manufacturer="ST", subsystem="mcu")
-    set_metadata(conn, "docB", project_id="p2", mpn="LM317",
-                 manufacturer="TI", subsystem="power")
+    set_metadata(conn, "docA", project_id="p1", mpn="STM32H743", manufacturer="ST", subsystem="mcu")
+    set_metadata(conn, "docB", project_id="p2", mpn="LM317", manufacturer="TI", subsystem="power")
 
     out = _list_documents_impl(project_id="p1", conn=conn)
     assert [d["doc_id"] for d in out] == ["docA"]
@@ -462,13 +530,17 @@ def test_search_results_flag_figure_chunks_with_uri(
     img = tmp_path / "fig.png"
     img.write_bytes(b"\x89PNG\r\n\x1a\nfake")
     _seed_figure_chunk(
-        conn, "fig:c1",
+        conn,
+        "fig:c1",
         image_path=str(img),
         description="Block diagram of SPI4",
     )
     out = _search_impl(
-        "SPI timing diagram", mode="keyword", k=5,
-        project_id="p1", conn=conn,
+        "SPI timing diagram",
+        mode="keyword",
+        k=5,
+        project_id="p1",
+        conn=conn,
     )
     fig_hits = [r for r in out if r.get("has_figure")]
     assert fig_hits, "figure chunk should be surfaced"
@@ -478,16 +550,15 @@ def test_search_results_flag_figure_chunks_with_uri(
     assert fig["figure_description"] == "Block diagram of SPI4"
 
 
-def test_get_figure_returns_image_bytes_and_citation(
-    conn: Any, tmp_path: Any
-) -> None:
+def test_get_figure_returns_image_bytes_and_citation(conn: Any, tmp_path: Any) -> None:
     from datasheet_rag.mcp.server import _get_figure_impl
 
     payload = b"\x89PNG\r\n\x1a\nimg-bytes-here"
     img = tmp_path / "spi.png"
     img.write_bytes(payload)
     _seed_figure_chunk(
-        conn, "fig:show",
+        conn,
+        "fig:show",
         image_path=str(img),
         description="State diagram of the SPI4 controller.",
     )
@@ -524,7 +595,8 @@ def test_get_figure_missing_local_file_falls_through_to_s3_error(conn: Any, tmp_
     from datasheet_rag.mcp.server import _get_figure_impl
 
     _seed_figure_chunk(
-        conn, "fig:gone",
+        conn,
+        "fig:gone",
         image_path=str(tmp_path / "does-not-exist.png"),
     )
     with pytest.raises(ValueError, match="no usable figure source"):
@@ -552,7 +624,11 @@ def test_search_does_not_advertise_a_figure_it_cannot_serve(
     _seed_figure_chunk(conn, "fig:gone", image_path=str(tmp_path / "vanished.png"))
 
     out = _search_impl(
-        "SPI timing diagram", mode="keyword", k=5, project_id="p1", conn=conn,
+        "SPI timing diagram",
+        mode="keyword",
+        k=5,
+        project_id="p1",
+        conn=conn,
     )
     hit = next(r for r in out if r["chunk_id"] == "fig:gone")
     assert hit["has_figure"] is False
@@ -562,14 +638,16 @@ def test_search_does_not_advertise_a_figure_it_cannot_serve(
     assert "show_pdf('docA', 42)" in hit["DISPLAY_INSTRUCTION"]
 
 
-def test_search_marks_sourceless_figure_chunks_unshowable(
-    conn: Any, fake_embedder: Any
-) -> None:
+def test_search_marks_sourceless_figure_chunks_unshowable(conn: Any, fake_embedder: Any) -> None:
     """Figures skipped at ingest leave caption-only chunks — say so."""
     _seed_figure_chunk(conn, "fig:bare", image_path=None, s3_key=None)
 
     out = _search_impl(
-        "SPI timing diagram", mode="keyword", k=5, project_id="p1", conn=conn,
+        "SPI timing diagram",
+        mode="keyword",
+        k=5,
+        project_id="p1",
+        conn=conn,
     )
     hit = next(r for r in out if r["chunk_id"] == "fig:bare")
     assert hit["has_figure"] is False

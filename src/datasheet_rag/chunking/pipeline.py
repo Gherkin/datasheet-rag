@@ -105,15 +105,13 @@ def save_chunk_graph(graph: ChunkGraph, path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
 
     # Serialize without embeddings (they'd make the file huge)
-    data = {
+    data: dict[str, Any] = {
         "doc_id": graph.doc_id,
         "stats": graph.stats(),
         "chunks": {},
     }
     for chunk_id, chunk in graph.chunks.items():
-        chunk_dict = chunk.model_dump(
-            exclude={"content_embedding", "context_embedding"}
-        )
+        chunk_dict = chunk.model_dump(exclude={"content_embedding", "context_embedding"})
         data["chunks"][chunk_id] = chunk_dict
 
     with open(path, "w") as f:

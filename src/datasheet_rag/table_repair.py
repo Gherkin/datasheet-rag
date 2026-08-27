@@ -59,7 +59,7 @@ def _is_transient_model_error(exc: BaseException) -> bool:
     resp = getattr(exc, "response", None)
     if not isinstance(resp, dict):
         return False
-    return resp.get("Error", {}).get("Code") == "ModelErrorException"
+    return bool(resp.get("Error", {}).get("Code") == "ModelErrorException")
 
 
 # ---------------------------------------------------------------------------
@@ -196,8 +196,10 @@ def validate_header_grid(
     for entry in proposed:
         try:
             row, col, row_span, col_span = (
-                int(entry["row"]), int(entry["col"]),
-                int(entry["row_span"]), int(entry["col_span"]),
+                int(entry["row"]),
+                int(entry["col"]),
+                int(entry["row_span"]),
+                int(entry["col_span"]),
             )
         except (TypeError, ValueError):
             return f"cell {entry!r} has non-integer row/col/span values"
@@ -222,8 +224,7 @@ def validate_header_grid(
 
     # Anti-degenerate: same long text still repeated across distinct columns
     counts = Counter(
-        text for text in texts_by_pos.values()
-        if len(text) >= _GARBLED_HEADER_MIN_CHARS
+        text for text in texts_by_pos.values() if len(text) >= _GARBLED_HEADER_MIN_CHARS
     )
     for text, count in counts.most_common(1):
         if count >= _GARBLED_HEADER_MIN_REPEATS:
@@ -231,13 +232,13 @@ def validate_header_grid(
 
     # Anti-fusion: proposed header text recreating a leaked data row
     data_texts_by_col: dict[int, set[str]] = {}
-    for c in data_cells:
-        if not c.get("is_origin", True):
+    for cell in data_cells:
+        if not cell.get("is_origin", True):
             continue
-        text = c["text"].strip().casefold()
+        text = cell["text"].strip().casefold()
         if len(text) < _FUSED_HEADER_MIN_CHARS:
             continue
-        for col in range(c["col"], c["col"] + c["col_span"]):
+        for col in range(cell["col"], cell["col"] + cell["col_span"]):
             data_texts_by_col.setdefault(col, set()).add(text)
 
     for row in range(1, header_rows + 1):
@@ -276,15 +277,17 @@ def splice_header_band(
         text = str(entry.get("text", "")).strip()
         for r in range(row, row + row_span):
             for c in range(col, col + col_span):
-                new_header.append({
-                    "row": r,
-                    "col": c,
-                    "row_span": row_span,
-                    "col_span": col_span,
-                    "text": text,
-                    "is_header": True,
-                    "is_origin": (r, c) == (row, col),
-                })
+                new_header.append(
+                    {
+                        "row": r,
+                        "col": c,
+                        "row_span": row_span,
+                        "col_span": col_span,
+                        "text": text,
+                        "is_header": True,
+                        "is_origin": (r, c) == (row, col),
+                    }
+                )
 
     rest = [c for c in cells if c["row"] > header_rows]
     return sorted(new_header + rest, key=lambda c: (c["row"], c["col"]))
@@ -336,9 +339,7 @@ class TableRepairer:
         verbose: bool = False,
     ) -> None:
         settings = get_settings()
-        self.model_id = (
-            model_id or settings.table_repair_model_id or settings.description_model_id
-        )
+        self.model_id = model_id or settings.table_repair_model_id or settings.description_model_id
         self.max_tokens = max_tokens or settings.table_repair_max_tokens
         self.max_concurrency = max_concurrency or settings.table_repair_concurrency
         self.verbose = verbose
@@ -356,6 +357,7 @@ class TableRepairer:
     def _get_client(self) -> Any:
         if self.client is None:
             from datasheet_rag.local_models import get_chat_client
+
             self.client = get_chat_client(kind="vision", region=self.region, profile=self.profile)
         return self.client
 

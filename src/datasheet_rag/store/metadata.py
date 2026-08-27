@@ -101,9 +101,7 @@ def get_title_source(conn: sqlite3.Connection, doc_id: str) -> str:
 def set_title_source(conn: sqlite3.Connection, doc_id: str, source: str) -> None:
     """Record ``doc_id``'s title provenance, retiring the legacy boolean."""
     if source not in _TITLE_RANK:
-        raise ValueError(
-            f"unknown title source {source!r} (expected one of {TITLE_SOURCES})"
-        )
+        raise ValueError(f"unknown title source {source!r} (expected one of {TITLE_SOURCES})")
     set_metadata(
         conn,
         doc_id,
@@ -284,9 +282,7 @@ def list_docs(
         params.append(group_name)
     if mpn is not None:
         # mpn column may hold comma-separated aliases; match any token
-        clauses.append(
-            "(mpn = ? OR mpn LIKE ? OR mpn LIKE ? OR mpn LIKE ?)"
-        )
+        clauses.append("(mpn = ? OR mpn LIKE ? OR mpn LIKE ? OR mpn LIKE ?)")
         params.extend([mpn, f"{mpn},%", f"%,{mpn},%", f"%,{mpn}"])
 
     where = f" WHERE {' AND '.join(clauses)}" if clauses else ""

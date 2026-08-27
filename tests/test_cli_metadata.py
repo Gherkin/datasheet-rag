@@ -82,8 +82,7 @@ def _list(db_path: Path, *args: str):
     the filtering they exist to check.
     """
     runner = CliRunner()
-    return runner.invoke(cli, ["list", *args, "--db", str(db_path)],
-                         env={"COLUMNS": "200"})
+    return runner.invoke(cli, ["list", *args, "--db", str(db_path)], env={"COLUMNS": "200"})
 
 
 def _get_json(db_path: Path, doc_id: str) -> dict:
@@ -123,9 +122,7 @@ def test_clear_tags_wipes_list(db_path: Path) -> None:
 
 
 def test_attr_sets_arbitrary_key_value(db_path: Path) -> None:
-    result = _meta(
-        db_path, DOC_A, "--attr", "revision=B", "--attr", "reviewed_by=hector"
-    )
+    result = _meta(db_path, DOC_A, "--attr", "revision=B", "--attr", "reviewed_by=hector")
     assert result.exit_code == 0, result.output
     assert _get_json(db_path, DOC_A)["attributes"] == {
         "revision": "B",

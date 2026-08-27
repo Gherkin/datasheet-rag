@@ -82,9 +82,7 @@ class EvalSet(BaseModel):
                 try:
                     items.append(GoldenItem.model_validate_json(line))
                 except Exception as e:  # noqa: BLE001 - want the line number
-                    raise ValueError(
-                        f"{p}:{line_no}: invalid GoldenItem JSONL line: {e}"
-                    ) from e
+                    raise ValueError(f"{p}:{line_no}: invalid GoldenItem JSONL line: {e}") from e
         return cls(items=items)
 
     def save(self, path: Path | str) -> None:

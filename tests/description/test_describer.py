@@ -23,7 +23,6 @@ from datasheet_rag.description import FigureDescriber, describe_figures_in_store
 from datasheet_rag.models.chunk import Chunk, ChunkLevel, ChunkMetadata, LayoutType
 from datasheet_rag.store import connect, insert_chunks
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -35,13 +34,15 @@ def _mock_bedrock_response(
     input_tokens: int = 1200,
     output_tokens: int = 80,
 ) -> Any:
-    body = json.dumps({
-        "content": [{"type": "text", "text": text}],
-        "usage": {
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-        },
-    }).encode()
+    body = json.dumps(
+        {
+            "content": [{"type": "text", "text": text}],
+            "usage": {
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+            },
+        }
+    ).encode()
     resp = MagicMock()
     resp.__getitem__.side_effect = lambda k: {"body": MagicMock(read=lambda: body)}[k]
     return resp
@@ -89,8 +90,13 @@ def _text_chunk(chunk_id: str, text: str) -> Chunk:
         layout_type=LayoutType.TEXT,
     )
     return Chunk(
-        id=chunk_id, doc_id="docA", level=ChunkLevel.MICRO,
-        text=text, context_text=text, token_count=10, metadata=md,
+        id=chunk_id,
+        doc_id="docA",
+        level=ChunkLevel.MICRO,
+        text=text,
+        context_text=text,
+        token_count=10,
+        metadata=md,
     )
 
 
@@ -156,14 +162,16 @@ def test_describe_one_media_type_inference(fake_client: Any) -> None:
 def test_describe_one_strips_text_blocks_correctly() -> None:
     """If Bedrock returns multiple text blocks they're joined; non-text blocks ignored."""
     client = MagicMock()
-    body = json.dumps({
-        "content": [
-            {"type": "text", "text": "First sentence."},
-            {"type": "text", "text": "Second sentence."},
-            {"type": "image", "source": {}},  # should be ignored
-        ],
-        "usage": {"input_tokens": 1, "output_tokens": 1},
-    }).encode()
+    body = json.dumps(
+        {
+            "content": [
+                {"type": "text", "text": "First sentence."},
+                {"type": "text", "text": "Second sentence."},
+                {"type": "image", "source": {}},  # should be ignored
+            ],
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        }
+    ).encode()
     client.invoke_model.return_value = {"body": MagicMock(read=lambda: body)}
     describer = FigureDescriber(client=client)
     out = describer.describe_one(image_bytes=b"x", image_format="png")
@@ -181,8 +189,7 @@ def test_describe_chunk_in_context_pulls_neighbors_from_store(
     img = tmp_path / "fig.png"
     img.write_bytes(b"\x89PNGFAKE")
     prev_chunk = _text_chunk("c-prev", "The preceding paragraph mentions SPI4 modes.")
-    fig = _figure_chunk("c-fig", image_path=str(img),
-                        prev_id="c-prev", next_id="c-next")
+    fig = _figure_chunk("c-fig", image_path=str(img), prev_id="c-prev", next_id="c-next")
     next_chunk = _text_chunk("c-next", "The next paragraph discusses CR1 register layout.")
     insert_chunks(conn, [prev_chunk, fig, next_chunk])
 
@@ -197,9 +204,7 @@ def test_describe_chunk_in_context_pulls_neighbors_from_store(
     assert "Comm > SPI Timing" in text
 
 
-def test_describe_chunk_in_context_rejects_non_figure(
-    conn: Any, fake_client: Any
-) -> None:
+def test_describe_chunk_in_context_rejects_non_figure(conn: Any, fake_client: Any) -> None:
     plain = _text_chunk("c-plain", "Body text only.")
     insert_chunks(conn, [plain])
     describer = FigureDescriber(client=fake_client)
@@ -222,9 +227,7 @@ def test_describe_chunk_in_context_missing_local_file_raises(
 # ---------------------------------------------------------------------------
 
 
-def test_describe_chunks_tolerates_per_chunk_failures(
-    conn: Any, tmp_path: Any
-) -> None:
+def test_describe_chunks_tolerates_per_chunk_failures(conn: Any, tmp_path: Any) -> None:
     good_img = tmp_path / "good.png"
     good_img.write_bytes(b"\x89PNGGOOD")
     bad_img = tmp_path / "missing.png"  # never created
@@ -329,16 +332,15 @@ def test_stats_count_errors() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_describe_figures_in_store_writes_and_skips_missing_only(
-    conn: Any, tmp_path: Any
-) -> None:
+def test_describe_figures_in_store_writes_and_skips_missing_only(conn: Any, tmp_path: Any) -> None:
     img = tmp_path / "fig.png"
     img.write_bytes(b"\x89PNGFAKE")
     other = tmp_path / "fig2.png"
     other.write_bytes(b"\x89PNGFAKE2")
 
     already_described = _figure_chunk(
-        "c-done", image_path=str(img),
+        "c-done",
+        image_path=str(img),
         description="existing description — do not overwrite",
     )
     # A different image: chunks that share one are deliberately described
@@ -351,12 +353,15 @@ def test_describe_figures_in_store_writes_and_skips_missing_only(
     describer = FigureDescriber(client=client, max_concurrency=1)
 
     out = describe_figures_in_store(
-        conn, missing_only=True, describer=describer,
+        conn,
+        missing_only=True,
+        describer=describer,
     )
     assert set(out.keys()) == {"c-todo"}
 
     # The already-described chunk must be untouched.
     from datasheet_rag.store import get_chunk
+
     intact = get_chunk(conn, "c-done")
     assert intact is not None
     assert intact.figure_description == "existing description — do not overwrite"
@@ -368,9 +373,7 @@ def test_describe_figures_in_store_writes_and_skips_missing_only(
     assert "new description" in updated.context_text
 
 
-def test_describe_figures_in_store_dry_run_does_not_persist(
-    conn: Any, tmp_path: Any
-) -> None:
+def test_describe_figures_in_store_dry_run_does_not_persist(conn: Any, tmp_path: Any) -> None:
     img = tmp_path / "fig.png"
     img.write_bytes(b"\x89PNGFAKE")
     chunk = _figure_chunk("c-dry", image_path=str(img))
@@ -380,19 +383,20 @@ def test_describe_figures_in_store_dry_run_does_not_persist(
     client.invoke_model.return_value = _mock_bedrock_response("hypothetical desc")
     describer = FigureDescriber(client=client)
     out = describe_figures_in_store(
-        conn, describer=describer, dry_run=True,
+        conn,
+        describer=describer,
+        dry_run=True,
     )
     assert out == {"c-dry": "hypothetical desc"}
 
     from datasheet_rag.store import get_chunk
+
     after = get_chunk(conn, "c-dry")
     assert after is not None
     assert after.figure_description is None  # not persisted
 
 
-def test_describe_figures_in_store_limit_truncates(
-    conn: Any, tmp_path: Any
-) -> None:
+def test_describe_figures_in_store_limit_truncates(conn: Any, tmp_path: Any) -> None:
     # One file per figure: chunks sharing an image are described once, so a
     # limit only bites when the images are genuinely distinct.
     chunks = []
@@ -409,9 +413,7 @@ def test_describe_figures_in_store_limit_truncates(
     assert len(out) == 2
 
 
-def test_describe_figures_in_store_describes_shared_image_once(
-    conn: Any, tmp_path: Any
-) -> None:
+def test_describe_figures_in_store_describes_shared_image_once(conn: Any, tmp_path: Any) -> None:
     """A MESO wrapping a single figure carries its MICRO's image (GH #41).
 
     Both rows must end up described, but the vision model is only worth

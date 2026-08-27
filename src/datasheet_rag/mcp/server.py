@@ -67,6 +67,22 @@ from datasheet_rag.models.chunk import ChunkLevel, LayoutType
 from datasheet_rag.store import DocMetadata, SearchFilters, SearchResult
 
 # ---------------------------------------------------------------------------
+# Return annotations on the content-block tools
+# ---------------------------------------------------------------------------
+# get_figure, show_figure, show_pdf, show_page and show_hello all return
+# ``list[ImageContent | TextContent]`` and are deliberately left unannotated.
+#
+# FastMCP reads the return annotation to decide whether a tool has structured
+# output: annotate one of these and it starts publishing an outputSchema and
+# returning ``structuredContent`` beside the content blocks. Hosts render these
+# blocks directly — the MCP App path especially — so their advertised shape is
+# protocol, not a typing detail. Saying `structured_output=False` alongside the
+# annotation would express the same thing, but that argument is much newer than
+# the ``mcp>=1.2.0`` floor this package declares.
+#
+# Hence the `type: ignore[no-untyped-def]` on each of the five.
+
+# ---------------------------------------------------------------------------
 # Backend access — local sqlite or remote HTTP, chosen from config.
 # ---------------------------------------------------------------------------
 
@@ -169,8 +185,7 @@ def _resolve_layout_types(layout_types: list[str] | None) -> list[LayoutType] | 
             out.append(LayoutType(lt.lower()))
         except ValueError as e:
             raise ValueError(
-                f"Unknown layout_type '{lt}'. Valid: "
-                f"{[m.value for m in LayoutType]}"
+                f"Unknown layout_type '{lt}'. Valid: {[m.value for m in LayoutType]}"
             ) from e
     return out
 
@@ -458,7 +473,7 @@ def _compress_for_mcp(image_bytes: bytes, fmt: str) -> tuple[bytes, str]:
 
     from PIL import Image
 
-    img = Image.open(io.BytesIO(image_bytes))
+    img: Image.Image = Image.open(io.BytesIO(image_bytes))
     if img.mode in ("RGBA", "LA", "P"):
         bg = Image.new("RGB", img.size, (255, 255, 255))
         bg.paste(img, mask=img.split()[-1] if img.mode in ("RGBA", "LA") else None)
@@ -689,17 +704,20 @@ def build_server(
         - `layout_types`: restrict to text/table/figure/key_value/list.
         """
         return _search_impl(
-            query, mode=mode, k=k, project_id=project_id,
-            doc_id=doc_id, level=level, layout_types=layout_types,
+            query,
+            mode=mode,
+            k=k,
+            project_id=project_id,
+            doc_id=doc_id,
+            level=level,
+            layout_types=layout_types,
             backend=backend,
         )
 
     @mcp.tool()
     def get_chunk(chunk_id: str, include_neighbors: bool = False) -> dict[str, Any] | None:
         """Fetch a chunk by ID. If include_neighbors, also returns parent/prev/next."""
-        return _get_chunk_impl(
-            chunk_id, include_neighbors=include_neighbors, backend=backend
-        )
+        return _get_chunk_impl(chunk_id, include_neighbors=include_neighbors, backend=backend)
 
     @mcp.tool()
     def navigate(chunk_id: str, direction: Direction) -> list[dict[str, Any]]:
@@ -731,7 +749,10 @@ def build_server(
         that do have metadata, since that is the only place those live.
         """
         return _list_documents_impl(
-            project_id=project_id, group=group, mpn=mpn, manufacturer=manufacturer,
+            project_id=project_id,
+            group=group,
+            mpn=mpn,
+            manufacturer=manufacturer,
             backend=backend,
         )
 
@@ -753,7 +774,7 @@ def build_server(
         return _stats_impl(project_id=project_id, doc_id=doc_id, backend=backend)
 
     @mcp.tool()
-    def get_figure(chunk_id: str):
+    def get_figure(chunk_id: str):  # type: ignore[no-untyped-def]
         """Fetch raw figure bytes for further reasoning (fallback for non-Desktop hosts).
 
         Prefer ``show_figure`` in Claude Desktop — it renders the image inline
@@ -765,6 +786,7 @@ def build_server(
         block is what the client renders.
         """
         import base64
+
         try:
             result = _get_figure_impl(chunk_id, backend=backend)
         except FigureUnavailableError as exc:
@@ -796,7 +818,8 @@ def build_server(
         in-tool-result rendering path.
         """
         result = _get_figure_impl(chunk_id, backend=backend)
-        return result["image_bytes"]
+        image_bytes: bytes = result["image_bytes"]
+        return image_bytes
 
     # ------------------------------------------------------------------
     # MCP Apps experiment — Goose-style inline UI for figures.
@@ -810,7 +833,7 @@ def build_server(
     # tutorial showed _meta on the call result, but Claude Desktop ignores
     # that placement entirely.
     @mcp.tool(meta={"ui": {"resourceUri": "ui://datasheet-rag/figure-app"}})
-    def show_figure(chunk_id: str):
+    def show_figure(chunk_id: str):  # type: ignore[no-untyped-def]
         """Display a figure as an inline rendered image widget (preferred in Claude Desktop).
 
         Calling this is MANDATORY when the figure is clearly relevant to the
@@ -824,6 +847,7 @@ def build_server(
         description if none), page number, and section.
         """
         import base64
+
         try:
             result = _get_figure_impl(chunk_id, backend=backend)
         except FigureUnavailableError as exc:
@@ -962,8 +986,9 @@ def build_server(
     # disappointing; show_page covers the remote case by rendering inline.
     # GH #45 tracks serving PDFs from the server so this can come back.
     if local_client:
+
         @mcp.tool()
-        def show_pdf(doc_id: str, page: int = 1):
+        def show_pdf(doc_id: str, page: int = 1):  # type: ignore[no-untyped-def]
             """Open the source PDF in a browser-based interactive viewer.
 
             Starts a local HTTP server (if not already running) and returns a
@@ -994,16 +1019,18 @@ def build_server(
                 parts = [meta.get("mpn") or "", meta.get("manufacturer") or ""]
                 label = " — ".join(p for p in parts if p)
             desc = f" ({label})" if label else ""
-            return [TextContent(
-                type="text",
-                text=(
-                    f"PDF viewer{desc}: {url}\n\n"
-                    "Open this URL in your browser to view the full document."
-                ),
-            )]
+            return [
+                TextContent(
+                    type="text",
+                    text=(
+                        f"PDF viewer{desc}: {url}\n\n"
+                        "Open this URL in your browser to view the full document."
+                    ),
+                )
+            ]
 
     @mcp.tool(meta={"ui": {"resourceUri": "ui://datasheet-rag/figure-app"}})
-    def show_page(doc_id: str, page: int = 1):
+    def show_page(doc_id: str, page: int = 1):  # type: ignore[no-untyped-def]
         """Render a single PDF page as an inline image widget in Claude Desktop.
 
         Converts the page to PNG server-side (via poppler/pdf2image) and
@@ -1058,17 +1085,19 @@ def build_server(
     # ------------------------------------------------------------------
 
     @mcp.tool(meta={"ui": {"resourceUri": "ui://datasheet-rag/hello"}})
-    def show_hello():
+    def show_hello():  # type: ignore[no-untyped-def]
         """Diagnostic: render a trivial 'Hello' MCP App with no images or DB access.
 
         ``_meta.ui.resourceUri`` is on the tool definition (the placement
         Claude Desktop's built-in apps use). Hosts that support MCP Apps
         load the ``ui://datasheet-rag/hello`` resource into a sandboxed iframe.
         """
-        return [TextContent(
-            type="text",
-            text="Hello MCP App rendered above (if host supports it).",
-        )]
+        return [
+            TextContent(
+                type="text",
+                text="Hello MCP App rendered above (if host supports it).",
+            )
+        ]
 
     @mcp.resource(
         "ui://datasheet-rag/hello",
@@ -1147,21 +1176,23 @@ def main() -> None:
     # Honor RAG_DEFAULT_PROJECT_ID set in the .mcp.json env block.
     if "RAG_DEFAULT_PROJECT_ID" in os.environ:
         # Bust the settings cache so the env var is picked up.
-        get_settings.cache_clear()  # type: ignore[attr-defined]
+        get_settings.cache_clear()
 
     server = build_server()
     settings = get_settings()
     mode = backend_mode()
     print(
-        json.dumps({
-            "event": "rag-mcp.start",
-            "mode": mode,
-            "server_url": settings.server_url,
-            "server_token_set": bool(settings.server_token) if mode == "remote" else None,
-            "db_path": str(settings.sqlite_db_path) if mode == "local" else None,
-            "default_project_id": settings.default_project_id,
-            "embedding_model_id": settings.embedding_model_id,
-        }),
+        json.dumps(
+            {
+                "event": "rag-mcp.start",
+                "mode": mode,
+                "server_url": settings.server_url,
+                "server_token_set": bool(settings.server_token) if mode == "remote" else None,
+                "db_path": str(settings.sqlite_db_path) if mode == "local" else None,
+                "default_project_id": settings.default_project_id,
+                "embedding_model_id": settings.embedding_model_id,
+            }
+        ),
         file=sys.stderr,
     )
     # In local mode, emit the one-line notice too (consistent with the CLI).

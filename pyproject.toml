@@ -86,12 +86,44 @@ line-length = 100
 select = ["E", "F", "I", "N", "W", "UP"]
 
 [tool.ruff.lint.per-file-ignores]
-# Embedded HTML/JS template lines exceed the line length by nature.
+# Embedded HTML/JS template lines exceed the line length by nature. They live
+# inside triple-quoted strings, so an inline `# noqa` would land in the markup.
 "src/datasheet_rag/eval/review.py" = ["E501"]
+"src/datasheet_rag/mcp/server.py" = ["E501"]
 
 [tool.mypy]
 python_version = "3.11"
 strict = true
+
+# Third-party modules that reach us untyped. Two separate reasons, one setting:
+#
+#   * fitz (PyMuPDF), sqlite_vec — installed, but ship no py.typed marker and
+#     have no stubs on typeshed.
+#   * sentence_transformers, transformers, torch — behind the `local-hf` extra,
+#     which CI does not install (multi-GB torch wheels for a type check). Every
+#     import of them in src/ is already lazy and guarded.
+#
+# Everything else the project depends on is typed, including docling and boto3
+# (via boto3-stubs in the `dev` extra), and is checked normally.
+[[tool.mypy.overrides]]
+module = [
+    "fitz.*",
+    "sentence_transformers.*",
+    "sqlite_vec.*",
+    "torch.*",
+    "transformers.*",
+]
+ignore_missing_imports = true
+
+# docling and docling-core re-export these names from their package modules
+# without an __all__, which strict mode reads as "not part of the public API".
+# The names are what their own docs tell you to import.
+[[tool.mypy.overrides]]
+module = [
+    "docling.*",
+    "docling_core.*",
+]
+implicit_reexport = true
 
 [tool.pytest.ini_options]
 # Scope collection to tests/ — a bare `pytest` otherwise walks the repo root

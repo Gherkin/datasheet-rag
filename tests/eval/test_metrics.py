@@ -49,9 +49,7 @@ def _chunk(
 
 
 def _result(chunk: Chunk, score: float = 1.0) -> SearchResult:
-    return SearchResult(
-        chunk_id=chunk.id, score=score, chunk=chunk, match_source="vector"
-    )
+    return SearchResult(chunk_id=chunk.id, score=score, chunk=chunk, match_source="vector")
 
 
 def _item(**kw) -> GoldenItem:
@@ -107,13 +105,13 @@ def _family_graph():
 def test_lineage_includes_ancestors_descendants_siblings() -> None:
     graph = _family_graph()
     rel = lineage_relevant_ids(["a"], graph)
-    assert "a" in rel              # exact
+    assert "a" in rel  # exact
     assert "S" in rel and "M" in rel  # ancestors
-    assert "b" in rel              # immediate reading-order sibling
+    assert "b" in rel  # immediate reading-order sibling
     # 'c' is a non-adjacent sibling: included via descendants-of-S only if S
     # is gold; here it should NOT be credited from gold 'a'.
     assert "c" not in rel
-    assert "z" not in rel          # unrelated, despite sharing page 4
+    assert "z" not in rel  # unrelated, despite sharing page 4
 
 
 def test_lineage_descendants_when_gold_is_macro() -> None:

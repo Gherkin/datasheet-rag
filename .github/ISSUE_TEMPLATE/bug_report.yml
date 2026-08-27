@@ -1,0 +1,63 @@
+name: Bug report
+description: Something behaves differently than documented or expected.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Not for security problems — those go through
+        [private reporting](https://github.com/Gherkin/datasheet-rag/security/advisories/new).
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what you got instead.
+      placeholder: |
+        `rag search "vref"` returns nothing for a document I just ingested.
+        `rag list` shows it with 412 chunks.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      description: >
+        The commands or requests, in order. If a specific PDF is involved, say
+        which one — a link to a public datasheet is ideal.
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: Output
+      description: >
+        The error and traceback, or the wrong output. Pasted as text rather than
+        a screenshot, please — it is searchable.
+      render: text
+
+  - type: dropdown
+    id: shape
+    attributes:
+      label: How are you running it?
+      options:
+        - Local CLI only (no server)
+        - CLI or MCP against a server
+        - The server itself (Docker)
+        - MCP over stdio (rag-mcp)
+    validations:
+      required: true
+
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      description: >
+        Version or commit, Python version, OS, and which backends are selected
+        (the `RAG_*_BACKEND` settings). `rag config show` covers most of it —
+        redact any tokens before pasting.
+      render: text
+    validations:
+      required: true

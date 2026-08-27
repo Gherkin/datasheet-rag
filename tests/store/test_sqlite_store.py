@@ -405,8 +405,7 @@ def test_prune_keeps_curated_fields_on_surviving_chunks(
     chunks = _seed_chunks()
     insert_chunks(conn, chunks)
     conn.execute(
-        "UPDATE chunks SET figure_description = ?, figure_image_path = ? "
-        "WHERE id = 'doc1:2:0'",
+        "UPDATE chunks SET figure_description = ?, figure_image_path = ? WHERE id = 'doc1:2:0'",
         ("A described figure", "doc1/fig.png"),
     )
     conn.commit()
@@ -629,9 +628,7 @@ def test_metadata_set_get_update_and_apply(conn: sqlite3.Connection) -> None:
     assert all(r.chunk.doc_id == "doc1" for r in hits)
 
 
-def _append_mpn_aliases(
-    conn: sqlite3.Connection, doc_id: str, *aliases: str
-) -> str:
+def _append_mpn_aliases(conn: sqlite3.Connection, doc_id: str, *aliases: str) -> str:
     """Replicate the CLI --mpn-alias merge logic in isolation."""
     existing = get_metadata(conn, doc_id)
     base = existing.mpn if existing else None
@@ -810,10 +807,11 @@ def test_update_figure_description_persists_and_folds_into_context(
 def test_schema_v1_database_is_migrated_to_v2() -> None:
     """A database created at schema v1 must gain the new figure columns
     without losing existing rows."""
-    from datasheet_rag.store import schema as schema_mod
-
     # Open a real file-backed DB so we can re-open it. (:memory: dies on close.)
     import tempfile
+
+    from datasheet_rag.store import schema as schema_mod
+
     with tempfile.TemporaryDirectory() as td:
         db_path = f"{td}/v1.sqlite"
 
@@ -843,9 +841,9 @@ def test_schema_v1_database_is_migrated_to_v2() -> None:
             cols = {row["name"] for row in c2.execute("PRAGMA table_info(chunks)")}
             assert "figure_image_path" in cols
             assert "figure_description" in cols
-            version = c2.execute(
-                "SELECT version FROM schema_version WHERE id = 1"
-            ).fetchone()["version"]
+            version = c2.execute("SELECT version FROM schema_version WHERE id = 1").fetchone()[
+                "version"
+            ]
             assert version == schema_mod.SCHEMA_VERSION
         finally:
             c2.close()
@@ -871,8 +869,11 @@ def test_figure_available_reflects_the_file_on_disk(
     bare.figure_s3_key = None
     s3_only = _make_figure_chunk("fig:s3", image_path=None)  # keeps its s3 key
     text = _make_chunk(
-        "doc-fig:2:9", doc_id="doc-fig", level=ChunkLevel.MICRO,
-        text="Plain body text.", layout=LayoutType.TEXT,
+        "doc-fig:2:9",
+        doc_id="doc-fig",
+        level=ChunkLevel.MICRO,
+        text="Plain body text.",
+        layout=LayoutType.TEXT,
     )
     insert_chunks(conn, [here, gone, bare, s3_only, text])
 
@@ -926,12 +927,14 @@ def test_set_figure_source_relinks_and_preserves_a_curated_caption(
     curated.figure_s3_key = None
     insert_chunks(conn, [orphan, curated])
 
-    assert set_figure_source(
-        conn, "fig:orphan", image_path=img, caption="Figure 9: Power tree"
-    ) is True
-    assert set_figure_source(
-        conn, "fig:curated", image_path=img, caption="Figure 9: Power tree"
-    ) is True
+    assert (
+        set_figure_source(conn, "fig:orphan", image_path=img, caption="Figure 9: Power tree")
+        is True
+    )
+    assert (
+        set_figure_source(conn, "fig:curated", image_path=img, caption="Figure 9: Power tree")
+        is True
+    )
     assert set_figure_source(conn, "fig:nope", image_path=img) is False
 
     relinked = get_chunk(conn, "fig:orphan")

@@ -60,9 +60,7 @@ class RagBackend(ABC):
     def get_children(self, chunk_id: str) -> list[Chunk]: ...
 
     @abstractmethod
-    def count_chunks(
-        self, *, doc_id: str | None = None, project_id: str | None = None
-    ) -> int: ...
+    def count_chunks(self, *, doc_id: str | None = None, project_id: str | None = None) -> int: ...
 
     # ---- documents / titles ----
     @abstractmethod
@@ -76,9 +74,7 @@ class RagBackend(ABC):
     ) -> list[DocSummary]: ...
 
     @abstractmethod
-    def get_ingested_docs(
-        self, *, project_id: str | None = None
-    ) -> list[IngestedDoc]: ...
+    def get_ingested_docs(self, *, project_id: str | None = None) -> list[IngestedDoc]: ...
 
     @abstractmethod
     def get_doc_titles(self) -> dict[str, str]: ...
@@ -110,9 +106,7 @@ class RagBackend(ABC):
 
     # ---- stats ----
     @abstractmethod
-    def stats(
-        self, *, project_id: str | None = None, doc_id: str | None = None
-    ) -> StatsResult: ...
+    def stats(self, *, project_id: str | None = None, doc_id: str | None = None) -> StatsResult: ...
 
     # ---- figures ----
     @abstractmethod

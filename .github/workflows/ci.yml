@@ -1,0 +1,117 @@
+# Lint, type-check and test on every push and pull request.
+#
+# The gates match what pyproject already declares, so running `ruff check .`,
+# `ruff format --check .`, `mypy src/` and `pytest` locally tells you exactly
+# what CI will say.
+#
+# Dependencies come from uv.lock via `uv sync --locked`, which fails rather than
+# re-resolving when the lock has drifted from pyproject — the same complaint
+# `uv lock --check` makes. Every `uv run` then passes --no-sync, so the step
+# uses the environment the sync above it built and nothing reconciles the extras
+# away underneath it.
+#
+# Extras: dev (pytest/ruff/mypy/boto3-stubs), server (FastAPI TestClient), aws
+# (botocore, which two tests import directly) and docling — that last one only
+# for pymupdf, since `import fitz` is module-level in two test files. `local-hf`
+# is deliberately absent: multi-GB torch wheels, every import of it in src/ is
+# lazy and guarded, and pyproject's mypy overrides already account for it.
+#
+# The suite is fully mocked — no AWS credentials, no network, a few seconds —
+# but it is not free of *system* dependencies: see the poppler step below.
+#
+# Lint and type-check run once on the default Python; only the tests span the
+# matrix, since that is where a version difference actually shows up.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A new push to a PR makes the run already in flight irrelevant.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install
+        run: uv sync --locked --extra dev
+
+      - name: ruff check
+        # --output-format=github turns findings into inline PR annotations.
+        run: uv run --no-sync ruff check --output-format=github .
+
+      - name: ruff format --check
+        run: uv run --no-sync ruff format --check .
+
+  typecheck:
+    name: mypy (strict)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install
+        # Same extras as the tests: mypy should check the boto3, FastAPI and
+        # docling call sites against their real stubs, not against Any.
+        run: uv sync --locked --extra dev --extra server --extra aws --extra docling
+
+      - name: mypy
+        run: uv run --no-sync mypy src/
+
+  test:
+    name: pytest (${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The floor and the ceiling of what pyproject supports. 3.12 sits
+        # between two green runs.
+        python-version: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install poppler
+        # pdf2image is a wrapper around poppler's pdftoppm/pdfinfo *binaries*,
+        # not a self-contained wheel — `rag get page` and the figure renderer
+        # both go through it, and eight tests in tests/test_cli_get_page.py
+        # exercise that path for real. Same package the Dockerfile installs.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends poppler-utils
+
+      - name: Install
+        # --python repeats what setup-uv already pinned, so the interpreter
+        # under test is named in the step that builds the environment.
+        run: |
+          uv sync --locked --python ${{ matrix.python-version }} \
+            --extra dev --extra server --extra aws --extra docling
+
+      - name: pytest
+        run: uv run --no-sync pytest -q

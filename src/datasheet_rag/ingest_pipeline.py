@@ -24,6 +24,7 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from datasheet_rag.models.chunk import ChunkGraph
 
@@ -42,11 +43,11 @@ class ProgressEvent:
     text: str
     step: int = 0
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {"kind": self.kind, "text": self.text, "step": self.step}
 
     @classmethod
-    def from_dict(cls, d: dict) -> ProgressEvent:
+    def from_dict(cls, d: dict[str, Any]) -> ProgressEvent:
         return cls(kind=d["kind"], text=d["text"], step=int(d.get("step", 0)))
 
 

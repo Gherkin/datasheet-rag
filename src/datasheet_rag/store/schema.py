@@ -137,9 +137,7 @@ def _migrate_if_needed(conn: sqlite3.Connection) -> None:
             if col_name not in existing_cols:
                 cur.execute(f"ALTER TABLE chunks ADD COLUMN {ddl_frag}")
                 existing_cols.add(col_name)
-        console.print(
-            f"[yellow]Migrated chunks store {current} → {target_version}[/]"
-        )
+        console.print(f"[yellow]Migrated chunks store {current} → {target_version}[/]")
 
     cur.execute(
         "UPDATE schema_version SET version = ? WHERE id = 1",
@@ -149,9 +147,7 @@ def _migrate_if_needed(conn: sqlite3.Connection) -> None:
 
 
 def _check_embedding_dim(conn: sqlite3.Connection, embedding_dim: int) -> None:
-    row = conn.execute(
-        "SELECT embedding_dim FROM schema_version WHERE id = 1"
-    ).fetchone()
+    row = conn.execute("SELECT embedding_dim FROM schema_version WHERE id = 1").fetchone()
     if row is None:
         # Table exists but no row — shouldn't happen, but treat as fresh.
         return
@@ -188,9 +184,7 @@ def _ensure_control_tables(conn: sqlite3.Connection) -> None:
         )
         """
     )
-    cur.execute(
-        "CREATE INDEX IF NOT EXISTS ix_api_keys_sha ON api_keys(token_sha256)"
-    )
+    cur.execute("CREATE INDEX IF NOT EXISTS ix_api_keys_sha ON api_keys(token_sha256)")
     # ---- audit_log -------------------------------------------------------
     cur.execute(
         """
@@ -233,10 +227,7 @@ def _ensure_fts(conn: sqlite3.Connection) -> None:
     """
     cur = conn.cursor()
     fresh = (
-        cur.execute(
-            "SELECT name FROM sqlite_master WHERE name = 'chunk_fts'"
-        ).fetchone()
-        is None
+        cur.execute("SELECT name FROM sqlite_master WHERE name = 'chunk_fts'").fetchone() is None
     )
 
     # External-content FTS5 over chunks. The ``porter`` stemmer plus
@@ -341,9 +332,7 @@ def fts_status(conn: sqlite3.Connection) -> FtsStatus:
     """
     chunks = _count(conn, "chunks")
     has_docsize = (
-        conn.execute(
-            "SELECT name FROM sqlite_master WHERE name = 'chunk_fts_docsize'"
-        ).fetchone()
+        conn.execute("SELECT name FROM sqlite_master WHERE name = 'chunk_fts_docsize'").fetchone()
         is not None
     )
     indexed = _count(conn, "chunk_fts_docsize") if has_docsize else None
@@ -379,9 +368,7 @@ def _warn_if_fts_stale(conn: sqlite3.Connection) -> None:
     if status.healthy or not status.chunks:
         return
     lost = (
-        "Keyword search finds nothing"
-        if not status.indexed
-        else "Keyword search is missing hits"
+        "Keyword search finds nothing" if not status.indexed else "Keyword search is missing hits"
     )
     console.print(
         f"[yellow]Keyword index out of sync[/]: chunk_fts covers "
@@ -471,12 +458,8 @@ def init_schema(conn: sqlite3.Connection, *, embedding_dim: int) -> None:
         )
         """
     )
-    cur.execute(
-        "CREATE INDEX IF NOT EXISTS ix_doc_metadata_project ON doc_metadata(project_id)"
-    )
-    cur.execute(
-        "CREATE INDEX IF NOT EXISTS ix_doc_metadata_group ON doc_metadata(group_name)"
-    )
+    cur.execute("CREATE INDEX IF NOT EXISTS ix_doc_metadata_project ON doc_metadata(project_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS ix_doc_metadata_group ON doc_metadata(group_name)")
     cur.execute("CREATE INDEX IF NOT EXISTS ix_doc_metadata_mpn ON doc_metadata(mpn)")
 
     # ---- schema_version --------------------------------------------------

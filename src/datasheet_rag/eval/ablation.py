@@ -87,11 +87,7 @@ def run_matrix(
     """Run every config over the same store; return reports in order."""
     reports: list[RunReport] = []
     for config in configs:
-        reports.append(
-            run_eval(
-                conn, eval_set, config, embedder=embedder, trace_path=trace_path
-            )
-        )
+        reports.append(run_eval(conn, eval_set, config, embedder=embedder, trace_path=trace_path))
     return reports
 
 
@@ -101,9 +97,7 @@ def run_matrix(
 
 
 def _embedding_dim(conn: sqlite3.Connection) -> int:
-    row = conn.execute(
-        "SELECT embedding_dim FROM schema_version WHERE id = 1"
-    ).fetchone()
+    row = conn.execute("SELECT embedding_dim FROM schema_version WHERE id = 1").fetchone()
     if row is None:
         raise RuntimeError("source store has no schema_version row")
     return int(row["embedding_dim"])
@@ -223,9 +217,7 @@ def _load_doc_graph_from_store(conn: sqlite3.Connection, doc_id: str) -> ChunkGr
     originally appended children in, so grouping by ``parent_id`` over that
     order reproduces the original ``children_ids`` lists.
     """
-    rows = conn.execute(
-        "SELECT * FROM chunks WHERE doc_id = ?", (doc_id,)
-    ).fetchall()
+    rows = conn.execute("SELECT * FROM chunks WHERE doc_id = ?", (doc_id,)).fetchall()
     chunks = [_row_to_chunk(r) for r in rows]
     chunks.sort(key=_chunk_sort_key)
 
@@ -248,7 +240,8 @@ def _fetch_vector(conn: sqlite3.Connection, chunk_id: str) -> list[float] | None
     ).fetchone()
     if row is None or row["embedding"] is None:
         return None
-    return np.frombuffer(row["embedding"], dtype=np.float32).tolist()
+    vec: list[float] = np.frombuffer(row["embedding"], dtype=np.float32).tolist()
+    return vec
 
 
 def build_macro_summarizer_variant_store(
@@ -297,8 +290,7 @@ def build_macro_summarizer_variant_store(
     graph = summarizer.summarize_graph(graph)
 
     changed = [
-        c for c in graph.by_level(ChunkLevel.MACRO)
-        if c.context_text != original_context.get(c.id)
+        c for c in graph.by_level(ChunkLevel.MACRO) if c.context_text != original_context.get(c.id)
     ]
     payloads = [c.context_text or c.text for c in changed]
     vectors: dict[str, list[float]] = {}

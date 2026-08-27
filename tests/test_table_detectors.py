@@ -54,6 +54,7 @@ def _cell(
 # Control group: a clean, simple table should never be flagged
 # ---------------------------------------------------------------------------
 
+
 def _clean_two_col_table() -> list[dict[str, Any]]:
     """A plain parameter/value table — the kind that already parses fine."""
     return [
@@ -83,11 +84,10 @@ def test_clean_table_renders_with_compact_pipe_structure():
 # Failure mode #1: garbled header (repeated text stamped across columns)
 # ---------------------------------------------------------------------------
 
+
 def _garbled_header_table() -> list[dict[str, Any]]:
     garbled = "Grouped Signal Values 0x0 0x1 0x2 0x3 0x5 0x6"
-    return [
-        _cell(1, col, garbled, is_header=True, col_span=15) for col in range(1, 4)
-    ] + [
+    return [_cell(1, col, garbled, is_header=True, col_span=15) for col in range(1, 4)] + [
         _cell(2, 1, "30"),
         _cell(2, 2, "RTC"),
         _cell(2, 3, "PZ01"),
@@ -120,6 +120,7 @@ def test_short_repeated_header_tokens_do_not_trigger_garbled_detection():
 # ---------------------------------------------------------------------------
 # Failure mode #3: fused header/data row (data leaked into header band)
 # ---------------------------------------------------------------------------
+
 
 def _fused_header_table() -> list[dict[str, Any]]:
     """Mirrors the reference fusion case: TableFormer fused pin
@@ -248,6 +249,7 @@ def test_single_char_overlap_does_not_trigger_fusion():
 # Span / origin handling — must not double-count or misread spanning cells
 # ---------------------------------------------------------------------------
 
+
 def test_spanning_cell_origin_dedup_in_fusion_check():
     """A col-spanning header cell repeats its text at every covered grid
     position (Docling's grid-fill convention) — only the origin copy should
@@ -271,6 +273,7 @@ def test_spanning_cell_origin_dedup_in_fusion_check():
 # ---------------------------------------------------------------------------
 # Reading-order rendering — the Stage-2 structure-free fallback
 # ---------------------------------------------------------------------------
+
 
 def test_reading_order_text_emits_each_cell_once_in_geometric_order():
     cells = _fused_header_table()

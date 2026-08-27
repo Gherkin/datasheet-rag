@@ -14,7 +14,6 @@ from datasheet_rag.project_config import (
     resolve_cli_project_id,
 )
 
-
 # ---------------------------------------------------------------------------
 # find_project_configs
 # ---------------------------------------------------------------------------
@@ -97,9 +96,15 @@ def test_merge_project_configs_returns_none_for_empty_chain() -> None:
 
 
 def test_merge_project_configs_nearest_scalar_wins(tmp_path: Path) -> None:
-    nearest = ProjectConfig(path=tmp_path / "mpn" / ".rag.toml", mpn="STM32H743VIT6", subsystem="mcu")
-    middle = ProjectConfig(path=tmp_path / "subsystem" / ".rag.toml", subsystem="power", group="psu")
-    root = ProjectConfig(path=tmp_path / ".rag.toml", project_id="proj-a", manufacturer="STMicro", subsystem="root")
+    nearest = ProjectConfig(
+        path=tmp_path / "mpn" / ".rag.toml", mpn="STM32H743VIT6", subsystem="mcu"
+    )
+    middle = ProjectConfig(
+        path=tmp_path / "subsystem" / ".rag.toml", subsystem="power", group="psu"
+    )
+    root = ProjectConfig(
+        path=tmp_path / ".rag.toml", project_id="proj-a", manufacturer="STMicro", subsystem="root"
+    )
 
     merged = merge_project_configs([nearest, middle, root])
 
@@ -181,7 +186,9 @@ def discovered(monkeypatch: pytest.MonkeyPatch) -> ProjectConfig:
     return cfg
 
 
-def test_explicit_project_id_wins_over_everything(discovered: ProjectConfig, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_explicit_project_id_wins_over_everything(
+    discovered: ProjectConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
     assert resolve_cli_project_id("explicit-proj", is_global=False) == "explicit-proj"
     assert resolve_cli_project_id("explicit-proj", is_global=True) == "explicit-proj"
 

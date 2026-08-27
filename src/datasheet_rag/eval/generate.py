@@ -34,8 +34,7 @@ _CATEGORY_SQL: dict[Category, str] = {
     "identifier": "level = 2 AND layout_type IN ('text', 'key_value', 'list')",
     "conceptual": "level = 1 AND layout_type = 'text'",
     "figure": (
-        "layout_type = 'figure' AND "
-        "(figure_caption IS NOT NULL OR figure_description IS NOT NULL)"
+        "layout_type = 'figure' AND (figure_caption IS NOT NULL OR figure_description IS NOT NULL)"
     ),
     "table_spec": "layout_type = 'table'",
     "synthesis": "level = 0",
@@ -208,13 +207,10 @@ def generate_golden_set(
             rng=rng,
         )
         if verbose:
-            console.print(
-                f"[cyan]{category}[/]: sampled {len(sampled)} candidate chunks"
-            )
+            console.print(f"[cyan]{category}[/]: sampled {len(sampled)} candidate chunks")
         for chunk in sampled:
             user_text = (
-                f"{_CATEGORY_GUIDANCE[category]}\n\n"
-                f"--- SOURCE CONTENT ---\n{_chunk_context(chunk)}"
+                f"{_CATEGORY_GUIDANCE[category]}\n\n--- SOURCE CONTENT ---\n{_chunk_context(chunk)}"
             )
             try:
                 raw = _invoke_claude(client, model_id, user_text, max_tokens)

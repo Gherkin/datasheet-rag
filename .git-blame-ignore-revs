@@ -1,0 +1,16 @@
+# Revisions to skip when running `git blame`. These are whole-tree mechanical
+# rewrites — reformatting, mass renames — where the commit that touched a line
+# is never the commit that is actually responsible for it.
+#
+# Enable it once per clone:
+#
+#     git config blame.ignoreRevsFile .git-blame-ignore-revs
+#
+# GitHub reads this file automatically, no configuration needed.
+#
+# NOTE: these must be the SHAs as they exist on main. If a branch listed here
+# was rebased on merge, update the entry to the rebased SHA — git silently
+# ignores hashes it cannot resolve, so a stale entry just stops working.
+
+# Run ruff format over the tree
+bc3f9babbb969c26b1b65cb8befc7253c780f90f

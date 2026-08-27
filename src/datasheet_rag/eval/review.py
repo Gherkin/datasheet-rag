@@ -184,15 +184,14 @@ def _make_handler(state: ReviewState) -> type[http.server.BaseHTTPRequestHandler
                     self._bytes(_INDEX_HTML.encode("utf-8"), "text/html; charset=utf-8")
                 elif path == "/api/items":
                     with state.lock:
-                        items = [
-                            item_to_dict(it, i)
-                            for i, it in enumerate(state.eval_set.items)
-                        ]
-                        self._json({
-                            "items": items,
-                            "categories": list(CATEGORIES),
-                            "summary": state.summary(),
-                        })
+                        items = [item_to_dict(it, i) for i, it in enumerate(state.eval_set.items)]
+                        self._json(
+                            {
+                                "items": items,
+                                "categories": list(CATEGORIES),
+                                "summary": state.summary(),
+                            }
+                        )
                 elif path == "/api/chunks":
                     doc_id = qs.get("doc_id", [""])[0]
                     pages = [int(p) for p in qs.get("pages", [""])[0].split(",") if p.strip()]
@@ -203,14 +202,12 @@ def _make_handler(state: ReviewState) -> type[http.server.BaseHTTPRequestHandler
                     with state.lock:
                         item = state.eval_set.items[idx]
                     try:
-                        results = retrieval_preview(
-                            state.conn, state.embedder(), item, k=state.k
-                        )
+                        results = retrieval_preview(state.conn, state.embedder(), item, k=state.k)
                         self._json({"results": results})
                     except Exception as exc:  # noqa: BLE001
                         self._json({"error": str(exc)}, status=200)
                 elif path.startswith("/api/page/"):
-                    self._serve_page(path[len("/api/page/"):])
+                    self._serve_page(path[len("/api/page/") :])
                 else:
                     self.send_error(404)
             except Exception as exc:  # noqa: BLE001
@@ -221,15 +218,19 @@ def _make_handler(state: ReviewState) -> type[http.server.BaseHTTPRequestHandler
             if not parsed.path.startswith("/api/item/"):
                 self.send_error(404)
                 return
-            idx = int(parsed.path[len("/api/item/"):])
+            idx = int(parsed.path[len("/api/item/") :])
             payload = self._body()
             try:
                 with state.lock:
                     item = state.eval_set.items[idx]
                     state.eval_set.items[idx] = apply_update(item, payload)
                     state.save()
-                    self._json({"item": item_to_dict(state.eval_set.items[idx], idx),
-                                "summary": state.summary()})
+                    self._json(
+                        {
+                            "item": item_to_dict(state.eval_set.items[idx], idx),
+                            "summary": state.summary(),
+                        }
+                    )
             except Exception as exc:  # noqa: BLE001
                 self._json({"error": str(exc)}, status=500)
 
@@ -238,7 +239,7 @@ def _make_handler(state: ReviewState) -> type[http.server.BaseHTTPRequestHandler
             if not parsed.path.startswith("/api/item/"):
                 self.send_error(404)
                 return
-            idx = int(parsed.path[len("/api/item/"):])
+            idx = int(parsed.path[len("/api/item/") :])
             try:
                 with state.lock:
                     del state.eval_set.items[idx]

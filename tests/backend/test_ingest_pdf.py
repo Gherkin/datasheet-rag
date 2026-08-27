@@ -57,9 +57,7 @@ def test_iter_sse_parses_events() -> None:
 
 def _remote_with_handler(handler) -> RemoteBackend:
     rb = RemoteBackend("http://test")
-    rb._client = httpx.Client(
-        base_url="http://test", transport=httpx.MockTransport(handler)
-    )
+    rb._client = httpx.Client(base_url="http://test", transport=httpx.MockTransport(handler))
     return rb
 
 
@@ -84,9 +82,7 @@ def test_remote_ingest_pdf_streams_progress_and_result(tmp_path) -> None:
 
     rb = _remote_with_handler(handler)
     seen: list[ProgressEvent] = []
-    result = rb.ingest_pdf(
-        _pdf(tmp_path), project_id="p", progress=seen.append
-    )
+    result = rb.ingest_pdf(_pdf(tmp_path), project_id="p", progress=seen.append)
 
     assert result == IngestResult(doc_id=did, inserted=12, described=3)
     assert [e.text for e in seen] == [

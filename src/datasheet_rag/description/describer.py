@@ -56,7 +56,7 @@ def _is_transient_model_error(exc: BaseException) -> bool:
     resp = getattr(exc, "response", None)
     if not isinstance(resp, dict):
         return False
-    return resp.get("Error", {}).get("Code") == "ModelErrorException"
+    return bool(resp.get("Error", {}).get("Code") == "ModelErrorException")
 
 
 # ---------------------------------------------------------------------------
@@ -132,22 +132,20 @@ def _load_figure_bytes(chunk: Chunk) -> tuple[bytes, str]:
     if path is not None:
         if not path.is_file():
             raise FileNotFoundError(
-                f"figure_image_path on chunk {chunk.id} points to a missing "
-                f"file: {path}"
+                f"figure_image_path on chunk {chunk.id} points to a missing file: {path}"
             )
         fmt = path.suffix.lstrip(".").lower() or "png"
         return path.read_bytes(), fmt
 
     if chunk.figure_s3_key:
         settings = get_settings()
-        resp = s3_client().get_object(Bucket=settings.s3_bucket, Key=chunk.figure_s3_key)
+        resp = s3_client().get_object(Bucket=settings.require_s3_bucket(), Key=chunk.figure_s3_key)
         data = resp["Body"].read()
         fmt = Path(chunk.figure_s3_key).suffix.lstrip(".").lower() or "png"
         return data, fmt
 
     raise ValueError(
-        f"chunk {chunk.id} has no figure_image_path or figure_s3_key — "
-        f"nothing to describe."
+        f"chunk {chunk.id} has no figure_image_path or figure_s3_key — nothing to describe."
     )
 
 
@@ -173,9 +171,7 @@ def _surrounding_text_from_store(
     for nid in (chunk.prev_id, chunk.next_id):
         if not nid:
             continue
-        row = conn.execute(
-            "SELECT text FROM chunks WHERE id = ?", (nid,)
-        ).fetchone()
+        row = conn.execute("SELECT text FROM chunks WHERE id = ?", (nid,)).fetchone()
         if row and row["text"]:
             fragments.append(row["text"][:char_limit])
     return " [...] ".join(fragments)
@@ -222,6 +218,7 @@ class FigureDescriber:
     def _get_client(self) -> Any:
         if self.client is None:
             from datasheet_rag.local_models import get_chat_client
+
             self.client = get_chat_client(kind="vision", region=self.region)
         return self.client
 
@@ -264,8 +261,7 @@ class FigureDescriber:
         """Convenience: pull image + neighbours from the store, call Bedrock."""
         if chunk.metadata.layout_type != LayoutType.FIGURE:
             raise ValueError(
-                f"chunk {chunk.id} is not a figure "
-                f"(layout_type={chunk.metadata.layout_type.value})"
+                f"chunk {chunk.id} is not a figure (layout_type={chunk.metadata.layout_type.value})"
             )
         image_bytes, image_format = _load_figure_bytes(chunk)
         surrounding = _surrounding_text_from_store(conn, chunk)
@@ -432,9 +428,9 @@ def describe_figures_in_store(
         key = c.figure_image_path or c.figure_s3_key or c.id
         groups.setdefault(key, []).append(c)
 
-    reuse: dict[str, str] = {}          # chunk_id → description already on hand
-    to_describe: list[Chunk] = []       # one representative per image
-    fanout: dict[str, list[str]] = {}   # representative id → siblings to copy to
+    reuse: dict[str, str] = {}  # chunk_id → description already on hand
+    to_describe: list[Chunk] = []  # one representative per image
+    fanout: dict[str, list[str]] = {}  # representative id → siblings to copy to
 
     for members in groups.values():
         needing = [c for c in members if not c.figure_description] if missing_only else members

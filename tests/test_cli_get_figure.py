@@ -25,8 +25,7 @@ DOC_A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 # A real, tiny, valid 1x1 transparent PNG so image_bytes() round-trips cleanly.
 _PNG_BYTES = base64.b64decode(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY"
-    "42YAAAAASUVORK5CYII="
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 )
 
 
@@ -80,7 +79,9 @@ def db_path(tmp_path: Path, figure_path: Path) -> Path:
     conn = connect(path, embedding_dim=get_settings().embedding_dimensions)
 
     fig = _chunk(
-        DOC_A, 0, "See figure for thermal derating curve.",
+        DOC_A,
+        0,
+        "See figure for thermal derating curve.",
         layout_type=LayoutType.FIGURE,
         figure_caption="Fig 1: Thermal derating curve",
         figure_description="A line chart showing power derating vs ambient temperature.",
@@ -88,7 +89,9 @@ def db_path(tmp_path: Path, figure_path: Path) -> Path:
     )
     text_chunk = _chunk(DOC_A, 1, "Plain paragraph, not a figure.")
     orphan_fig = _chunk(
-        DOC_A, 2, "Figure chunk with no usable image source.",
+        DOC_A,
+        2,
+        "Figure chunk with no usable image source.",
         layout_type=LayoutType.FIGURE,
     )
 
@@ -145,9 +148,7 @@ def test_get_figure_by_abbreviated_doc_id(
 def test_get_figure_explicit_output_path(tmp_path: Path, db_path: Path) -> None:
     full_id = f"{DOC_A}:L2:0"
     dest = tmp_path / "custom-name.png"
-    result = CliRunner().invoke(
-        cli, ["get", "fig", full_id, "--db", str(db_path), "-o", str(dest)]
-    )
+    result = CliRunner().invoke(cli, ["get", "fig", full_id, "--db", str(db_path), "-o", str(dest)])
     assert result.exit_code == 0, result.output
     assert dest.exists()
     assert dest.read_bytes() == _PNG_BYTES

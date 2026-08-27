@@ -68,21 +68,25 @@ def _mock_bedrock_response(
     input_tokens: int = 900,
     output_tokens: int = 120,
 ) -> Any:
-    body = json.dumps({
-        "content": [{"type": "text", "text": text}],
-        "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens},
-    }).encode()
+    body = json.dumps(
+        {
+            "content": [{"type": "text", "text": text}],
+            "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens},
+        }
+    ).encode()
     resp = MagicMock()
     resp.__getitem__.side_effect = lambda k: {"body": MagicMock(read=lambda: body)}[k]
     return resp
 
 
-_VALID_REPAIR_JSON = json.dumps({
-    "cells": [
-        {"row": 1, "col": 1, "row_span": 1, "col_span": 1, "text": "Pin"},
-        {"row": 1, "col": 2, "row_span": 1, "col_span": 1, "text": "Port"},
-    ]
-})
+_VALID_REPAIR_JSON = json.dumps(
+    {
+        "cells": [
+            {"row": 1, "col": 1, "row_span": 1, "col_span": 1, "text": "Pin"},
+            {"row": 1, "col": 2, "row_span": 1, "col_span": 1, "text": "Port"},
+        ]
+    }
+)
 
 
 @pytest.fixture
@@ -104,11 +108,14 @@ def test_parse_repair_response_accepts_well_formed_json():
     assert proposed[0]["text"] == "Pin"
 
 
-@pytest.mark.parametrize("wrapped", [
-    f"```json\n{_VALID_REPAIR_JSON}\n```",
-    f"```\n{_VALID_REPAIR_JSON}\n```",
-    f"  ```json\n{_VALID_REPAIR_JSON}\n```  ",
-])
+@pytest.mark.parametrize(
+    "wrapped",
+    [
+        f"```json\n{_VALID_REPAIR_JSON}\n```",
+        f"```\n{_VALID_REPAIR_JSON}\n```",
+        f"  ```json\n{_VALID_REPAIR_JSON}\n```  ",
+    ],
+)
 def test_parse_repair_response_unwraps_markdown_code_fences(wrapped: str):
     """Despite "Respond with JSON only, no prose", Claude (Haiku especially)
     routinely wraps structured output in a fenced code block — a cosmetic
@@ -118,13 +125,16 @@ def test_parse_repair_response_unwraps_markdown_code_fences(wrapped: str):
     assert len(proposed) == 2
 
 
-@pytest.mark.parametrize("raw", [
-    "not json at all",
-    json.dumps({"wrong_key": []}),
-    json.dumps({"cells": "not a list"}),
-    json.dumps({"cells": [{"row": 1, "col": 1}]}),  # missing required fields
-    json.dumps({"cells": [[1, 1, 1, 1, "Pin"]]}),  # not a dict
-])
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "not json at all",
+        json.dumps({"wrong_key": []}),
+        json.dumps({"cells": "not a list"}),
+        json.dumps({"cells": [{"row": 1, "col": 1}]}),  # missing required fields
+        json.dumps({"cells": [[1, 1, 1, 1, "Pin"]]}),  # not a dict
+    ],
+)
 def test_parse_repair_response_rejects_malformed_shapes(raw: str):
     assert _parse_repair_response(raw) is None
 
@@ -140,16 +150,15 @@ def _data_cells() -> list[dict[str, Any]]:
 
 def test_validate_accepts_exact_tiling():
     proposed = json.loads(_VALID_REPAIR_JSON)["cells"]
-    assert validate_header_grid(
-        proposed, header_rows=1, column_count=2, data_cells=_data_cells()
-    ) is None
+    assert (
+        validate_header_grid(proposed, header_rows=1, column_count=2, data_cells=_data_cells())
+        is None
+    )
 
 
 def test_validate_rejects_gap_in_tiling():
     proposed = [{"row": 1, "col": 1, "row_span": 1, "col_span": 1, "text": "Pin"}]
-    reason = validate_header_grid(
-        proposed, header_rows=1, column_count=2, data_cells=_data_cells()
-    )
+    reason = validate_header_grid(proposed, header_rows=1, column_count=2, data_cells=_data_cells())
     assert reason is not None
     assert "not fully covered" in reason
 
@@ -159,9 +168,7 @@ def test_validate_rejects_overlap_in_tiling():
         {"row": 1, "col": 1, "row_span": 1, "col_span": 2, "text": "Pin"},
         {"row": 1, "col": 2, "row_span": 1, "col_span": 1, "text": "Port"},
     ]
-    reason = validate_header_grid(
-        proposed, header_rows=1, column_count=2, data_cells=_data_cells()
-    )
+    reason = validate_header_grid(proposed, header_rows=1, column_count=2, data_cells=_data_cells())
     assert reason is not None
     assert "overlaps" in reason
 
@@ -171,9 +178,7 @@ def test_validate_rejects_non_positive_span():
         {"row": 1, "col": 1, "row_span": 0, "col_span": 1, "text": "Pin"},
         {"row": 1, "col": 2, "row_span": 1, "col_span": 1, "text": "Port"},
     ]
-    reason = validate_header_grid(
-        proposed, header_rows=1, column_count=2, data_cells=_data_cells()
-    )
+    reason = validate_header_grid(proposed, header_rows=1, column_count=2, data_cells=_data_cells())
     assert reason is not None
     assert "non-positive" in reason
 
@@ -183,9 +188,7 @@ def test_validate_rejects_cell_outside_band():
         {"row": 1, "col": 1, "row_span": 1, "col_span": 1, "text": "Pin"},
         {"row": 1, "col": 2, "row_span": 1, "col_span": 2, "text": "Port"},
     ]
-    reason = validate_header_grid(
-        proposed, header_rows=1, column_count=2, data_cells=_data_cells()
-    )
+    reason = validate_header_grid(proposed, header_rows=1, column_count=2, data_cells=_data_cells())
     assert reason is not None
     assert "extends outside" in reason
 
@@ -197,9 +200,7 @@ def test_validate_accepts_legitimate_spans():
         {"row": 2, "col": 2, "row_span": 1, "col_span": 1, "text": "B"},
     ]
     data = [_cell(3, 1, "x"), _cell(3, 2, "y")]
-    assert validate_header_grid(
-        proposed, header_rows=2, column_count=2, data_cells=data
-    ) is None
+    assert validate_header_grid(proposed, header_rows=2, column_count=2, data_cells=data) is None
 
 
 def test_validate_rejects_still_garbled_proposal():
@@ -207,13 +208,10 @@ def test_validate_rejects_still_garbled_proposal():
     long text repeated, i.e. it didn't actually fix anything."""
     garbled = "Grouped Signal Values 0x0 0x1 0x2"
     proposed = [
-        {"row": 1, "col": c, "row_span": 1, "col_span": 1, "text": garbled}
-        for c in (1, 2, 3)
+        {"row": 1, "col": c, "row_span": 1, "col_span": 1, "text": garbled} for c in (1, 2, 3)
     ]
     data = [_cell(2, c, f"v{c}") for c in (1, 2, 3)]
-    reason = validate_header_grid(
-        proposed, header_rows=1, column_count=3, data_cells=data
-    )
+    reason = validate_header_grid(proposed, header_rows=1, column_count=3, data_cells=data)
     assert reason is not None
     assert "still garbled" in reason
 
@@ -226,9 +224,7 @@ def test_validate_rejects_proposal_that_recreates_fused_data_row():
         {"row": 1, "col": 2, "row_span": 1, "col_span": 1, "text": "PZ01"},
     ]
     data = [_cell(2, 1, "30"), _cell(2, 2, "PZ01")]
-    reason = validate_header_grid(
-        proposed, header_rows=1, column_count=2, data_cells=data
-    )
+    reason = validate_header_grid(proposed, header_rows=1, column_count=2, data_cells=data)
     assert reason is not None
     assert "duplicates data values" in reason
 
@@ -242,9 +238,7 @@ def test_validate_allows_short_overlap_with_data_row():
         {"row": 1, "col": 2, "row_span": 1, "col_span": 1, "text": "-"},
     ]
     data = [_cell(2, 1, "ok"), _cell(2, 2, "-")]
-    assert validate_header_grid(
-        proposed, header_rows=1, column_count=2, data_cells=data
-    ) is None
+    assert validate_header_grid(proposed, header_rows=1, column_count=2, data_cells=data) is None
 
 
 # ---------------------------------------------------------------------------
@@ -374,11 +368,13 @@ def test_repair_header_band_rejects_unparseable_response():
 def test_repair_header_band_rejects_structurally_inconsistent_response():
     """The model returns well-formed JSON, but it doesn't tile the H×C
     band — repair_header_band must reject it via validate_header_grid."""
-    incomplete = json.dumps({
-        "cells": [
-            {"row": 1, "col": 1, "row_span": 1, "col_span": 1, "text": "Pin"},
-        ]
-    })
+    incomplete = json.dumps(
+        {
+            "cells": [
+                {"row": 1, "col": 1, "row_span": 1, "col_span": 1, "text": "Pin"},
+            ]
+        }
+    )
     client = MagicMock()
     client.invoke_model.return_value = _mock_bedrock_response(incomplete)
     repairer = TableRepairer(client=client, max_concurrency=1, model_id="test-model")
@@ -399,6 +395,7 @@ def test_repairer_falls_back_to_description_model_id_when_unset(fake_client: Any
     description_model_id keeps the repairer usable out of the box, though the
     config docs note that default is tuned for cheap figure descriptions."""
     from datasheet_rag.config import get_settings
+
     settings = get_settings()
     assert settings.table_repair_model_id is None  # the documented default
 

@@ -18,8 +18,14 @@ from __future__ import annotations
 import hmac
 from dataclasses import dataclass
 from enum import IntEnum
+from typing import TYPE_CHECKING
 
 from datasheet_rag.store import lookup_api_key
+
+if TYPE_CHECKING:
+    import sqlite3
+
+    from datasheet_rag.config import Settings
 
 
 class Scope(IntEnum):
@@ -72,7 +78,7 @@ def _read_token_matches(token: str, expected: str) -> bool:
     return hmac.compare_digest(token.encode(), expected.encode())
 
 
-def auth_enabled(conn, settings) -> bool:
+def auth_enabled(conn: sqlite3.Connection, settings: Settings) -> bool:
     """True when any credential is configured (read token or any API key)."""
     if settings.effective_read_token():
         return True
@@ -81,7 +87,9 @@ def auth_enabled(conn, settings) -> bool:
     return count_api_keys(conn) > 0
 
 
-def resolve_context(conn, settings, token: str | None) -> KeyContext | None:
+def resolve_context(
+    conn: sqlite3.Connection, settings: Settings, token: str | None
+) -> KeyContext | None:
     """Resolve a presented bearer token to a :class:`KeyContext`, else ``None``."""
     if token is None:
         return None

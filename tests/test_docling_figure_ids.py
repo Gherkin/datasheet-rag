@@ -103,5 +103,7 @@ def test_formula_ids_use_their_own_counter() -> None:
         _item(DocItemLabel.PICTURE),
     ]
     assert _region_ids(items) == [
-        "docling_figure_1", "docling_formula_1", "docling_figure_2",
+        "docling_figure_1",
+        "docling_formula_1",
+        "docling_figure_2",
     ]

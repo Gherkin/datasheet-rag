@@ -50,9 +50,7 @@ def test_cache_round_trips_and_leaves_no_temp_files(pdf: Path, tmp_path: Path) -
     assert second[1].size == first[1].size
 
 
-def test_truncated_cached_page_is_discarded_and_re_rendered(
-    pdf: Path, tmp_path: Path
-) -> None:
+def test_truncated_cached_page_is_discarded_and_re_rendered(pdf: Path, tmp_path: Path) -> None:
     cache_dir = tmp_path / "render_cache"
     render_pdf_pages(pdf, dpi=72, pages=[1, 2], cache_dir=cache_dir)
 
@@ -75,9 +73,7 @@ def test_force_clears_the_whole_cache(pdf: Path, tmp_path: Path) -> None:
     stray.write_bytes(b"not a png at all")
 
     # Only page 1 is requested, but --force invalidates the entire cache.
-    pages = render_pdf_pages(
-        pdf, dpi=72, pages=[1], cache_dir=cache_dir, refresh_cache=True
-    )
+    pages = render_pdf_pages(pdf, dpi=72, pages=[1], cache_dir=cache_dir, refresh_cache=True)
 
     assert set(pages) == {1}
     assert not stray.exists()
@@ -85,9 +81,7 @@ def test_force_clears_the_whole_cache(pdf: Path, tmp_path: Path) -> None:
     Image.open(_cache_file(cache_dir, 1)).load()
 
 
-def test_render_failure_names_the_file_and_suggests_force(
-    pdf: Path, tmp_path: Path
-) -> None:
+def test_render_failure_names_the_file_and_suggests_force(pdf: Path, tmp_path: Path) -> None:
     with pytest.raises(PageRenderError) as excinfo:
         render_pdf_pages(pdf, dpi=72, pages=[99], cache_dir=tmp_path / "render_cache")
 
@@ -115,14 +109,14 @@ def test_extract_figures_force_refreshes_the_documents_cache(
     stray = _cache_file(cache_dir, 5, dpi=100)
     stray.write_bytes(b"\x89PNG\r\n\x1a\n truncated")
 
-    regions = [
-        FigureRegion(
-            block_id="b1", page=1, left=0.1, top=0.1, width=0.5, height=0.2
-        )
-    ]
+    regions = [FigureRegion(block_id="b1", page=1, left=0.1, top=0.1, width=0.5, height=0.2)]
     manifest = extract_figures_from_regions(
-        pdf, regions, doc_id,
-        output_dir=tmp_path / "figs", dpi=100, force=True,
+        pdf,
+        regions,
+        doc_id,
+        output_dir=tmp_path / "figs",
+        dpi=100,
+        force=True,
     )
 
     assert len(manifest.figures) == 1

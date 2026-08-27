@@ -91,13 +91,19 @@ def _cmd_tls_setup(args: argparse.Namespace) -> int:
 
     cert_dir = args.cert_dir
     cmd = [
-        certbot, "certonly",
-        "-d", args.domain,
-        "--config-dir", cert_dir,
-        "--work-dir", cert_dir,
-        "--logs-dir", cert_dir,
+        certbot,
+        "certonly",
+        "-d",
+        args.domain,
+        "--config-dir",
+        cert_dir,
+        "--work-dir",
+        cert_dir,
+        "--logs-dir",
+        cert_dir,
         "--agree-tos",
-        "-m", args.email,
+        "-m",
+        args.email,
     ]
     if args.cf_token:
         # Automated DNS-01 via the Cloudflare plugin — no copy-paste.
@@ -109,7 +115,8 @@ def _cmd_tls_setup(args: argparse.Namespace) -> int:
         cmd += [
             "--non-interactive",
             "--dns-cloudflare",
-            "--dns-cloudflare-credentials", creds,
+            "--dns-cloudflare-credentials",
+            creds,
         ]
     else:
         # Manual DNS-01: certbot prints the exact _acme-challenge TXT record
@@ -159,9 +166,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Cloudflare API token for fully-automated DNS-01 (skips copy-paste)",
     )
-    ts.add_argument(
-        "--print-only", action="store_true", help="print the command without running"
-    )
+    ts.add_argument("--print-only", action="store_true", help="print the command without running")
     return p
 
 

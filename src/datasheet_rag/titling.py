@@ -56,6 +56,7 @@ class TitleInferer:
     def _get_client(self) -> Any:
         if self.client is None:
             from datasheet_rag.local_models import get_chat_client
+
             self.client = get_chat_client(kind="text", region=self.region)
         return self.client
 
@@ -80,11 +81,16 @@ class TitleInferer:
             accept="application/json",
         )
         payload = json.loads(response["body"].read())
-        title = "".join(
-            block.get("text", "")
-            for block in payload.get("content", [])
-            if isinstance(block, dict) and block.get("type") == "text"
-        ).strip().strip('"').strip()
+        title = (
+            "".join(
+                block.get("text", "")
+                for block in payload.get("content", [])
+                if isinstance(block, dict) and block.get("type") == "text"
+            )
+            .strip()
+            .strip('"')
+            .strip()
+        )
 
         if not title or title.upper() == "UNKNOWN":
             return None
@@ -94,8 +100,7 @@ class TitleInferer:
 def _first_page_text(conn: sqlite3.Connection, doc_id: str) -> str:
     """Concatenate MICRO-level chunk text from page 1, in document order."""
     rows = conn.execute(
-        "SELECT text, page_numbers FROM chunks "
-        "WHERE doc_id = ? AND level = ? ORDER BY rowid",
+        "SELECT text, page_numbers FROM chunks WHERE doc_id = ? AND level = ? ORDER BY rowid",
         (doc_id, int(ChunkLevel.MICRO)),
     ).fetchall()
 

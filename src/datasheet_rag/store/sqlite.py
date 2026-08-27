@@ -74,9 +74,7 @@ def resolve_figure_path(stored: str | None) -> Path | None:
     return p if p.is_absolute() else get_settings().figures_dir / p
 
 
-def figure_source_available(
-    figure_image_path: str | None, figure_s3_key: str | None
-) -> bool:
+def figure_source_available(figure_image_path: str | None, figure_s3_key: str | None) -> bool:
     """Whether a figure's bytes can actually be fetched *on this host*.
 
     A stored path is only a promise: the row can outlive the file (a store
@@ -244,9 +242,7 @@ def _prune_stale_chunks(cur: sqlite3.Cursor, doc_id: str, keep: set[str]) -> int
     """
     stale = [
         row[0]
-        for row in cur.execute(
-            "SELECT id FROM chunks WHERE doc_id = ?", (doc_id,)
-        ).fetchall()
+        for row in cur.execute("SELECT id FROM chunks WHERE doc_id = ?", (doc_id,)).fetchall()
         if row[0] not in keep
     ]
     for start in range(0, len(stale), _PRUNE_BATCH):
@@ -536,10 +532,7 @@ def list_figure_chunks(
         sql += " AND project_id = ?"
         params.append(project_id)
     if only_with_image:
-        sql += (
-            " AND (COALESCE(figure_image_path, '') <> ''"
-            " OR COALESCE(figure_s3_key, '') <> '')"
-        )
+        sql += " AND (COALESCE(figure_image_path, '') <> '' OR COALESCE(figure_s3_key, '') <> '')"
     sql += " ORDER BY doc_id, rowid"
 
     rows = conn.execute(sql, params).fetchall()
@@ -652,9 +645,7 @@ def set_doc_title(
     if not force and title_rank(source) < title_rank(stored):
         return 0
 
-    cur = conn.execute(
-        "UPDATE chunks SET doc_title = ? WHERE doc_id = ?", (title, doc_id)
-    )
+    cur = conn.execute("UPDATE chunks SET doc_title = ? WHERE doc_id = ?", (title, doc_id))
     set_title_source(conn, doc_id, source)  # commits both statements
     return cur.rowcount
 
@@ -672,7 +663,7 @@ def resolve_doc_id(conn: sqlite3.Connection, doc_id: str) -> str:
         "SELECT DISTINCT doc_id FROM chunks WHERE doc_id LIKE ? || '%'",
         (doc_id,),
     ).fetchall()
-    matches = [row["doc_id"] for row in rows]
+    matches: list[str] = [row["doc_id"] for row in rows]
 
     if len(matches) == 1:
         return matches[0]
@@ -731,13 +722,15 @@ def get_ingested_docs(
             except (ValueError, TypeError):
                 pass
 
-        docs.append({
-            "doc_id": doc_id,
-            "doc_title": titles.get(doc_id, "—"),
-            "chunk_count": row["chunk_count"],
-            "page_count": page_count,
-            "ingested_at": row["ingested_at"],
-        })
+        docs.append(
+            {
+                "doc_id": doc_id,
+                "doc_title": titles.get(doc_id, "—"),
+                "chunk_count": row["chunk_count"],
+                "page_count": page_count,
+                "ingested_at": row["ingested_at"],
+            }
+        )
     return docs
 
 

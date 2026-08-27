@@ -7,7 +7,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -23,6 +23,15 @@ def _default_rag_home() -> Path:
 
 
 _RAG_HOME_DEFAULT = _default_rag_home()
+
+# Storage paths that default to a fixed name under ``rag_home``. Kept as data
+# so the field validator below can resolve any of them from its field name.
+_STORAGE_DEFAULTS = {
+    "sqlite_db_path": "rag.sqlite",
+    "pdf_dir": "pdfs",
+    "figures_dir": "figures",
+    "output_dir": "cache",
+}
 
 
 class Settings(BaseSettings):
@@ -293,16 +302,18 @@ class Settings(BaseSettings):
     )
 
     # Local storage — all derived from rag_home unless explicitly overridden
-    output_dir: Path | None = Field(
-        default=None,
+    output_dir: Path = Field(
+        default=None,  # resolved by _resolve_storage_path
+        validate_default=True,
         description=(
             "Cache for intermediate ingestion artefacts (blocks/chunk-graph "
             "JSON, figure manifests) — safe to delete; regenerated on demand "
             "(or with --force). Defaults to ``<rag_home>/cache``."
         ),
     )
-    sqlite_db_path: Path | None = Field(
-        default=None,
+    sqlite_db_path: Path = Field(
+        default=None,  # resolved by _resolve_storage_path
+        validate_default=True,
         description=(
             "Path to the SQLite database file holding chunks + vectors. "
             "Defaults to ``<rag_home>/rag.sqlite`` — one shared db across "
@@ -310,35 +321,47 @@ class Settings(BaseSettings):
             "tests or intentionally-isolated databases."
         ),
     )
-    pdf_dir: Path | None = Field(
-        default=None,
+    pdf_dir: Path = Field(
+        default=None,  # resolved by _resolve_storage_path
+        validate_default=True,
         description=(
             "Directory holding source PDFs, named ``<doc_id>.pdf`` (doc_id "
             "is a content hash, so the filename doubles as the lookup key — "
             "no scanning required). Defaults to ``<rag_home>/pdfs``."
         ),
     )
-    figures_dir: Path | None = Field(
-        default=None,
+    figures_dir: Path = Field(
+        default=None,  # resolved by _resolve_storage_path
+        validate_default=True,
         description=(
             "Directory holding cropped figure images, one subdirectory per "
             "doc_id. Defaults to ``<rag_home>/figures``."
         ),
     )
 
-    @model_validator(mode="after")
-    def _derive_storage_paths(self) -> Settings:
-        """Fill unset storage paths from ``rag_home`` so every command — CLI
-        or MCP — shares one local store with zero configuration."""
-        if self.sqlite_db_path is None:
-            self.sqlite_db_path = self.rag_home / "rag.sqlite"
-        if self.pdf_dir is None:
-            self.pdf_dir = self.rag_home / "pdfs"
-        if self.figures_dir is None:
-            self.figures_dir = self.rag_home / "figures"
-        if self.output_dir is None:
-            self.output_dir = self.rag_home / "cache"
-        return self
+    @field_validator(*_STORAGE_DEFAULTS, mode="before")
+    @classmethod
+    def _resolve_storage_path(cls, v: Any, info: ValidationInfo) -> Any:
+        """Fill an unset storage path from ``rag_home`` so every command — CLI
+        or MCP — shares one local store with zero configuration.
+
+        Unset covers three spellings: absent, an explicit ``None``, and a blank
+        string (Claude Desktop's .mcpb config substitutes ``${user_config.X}``
+        with an empty string when X is left blank in the UI, which would
+        otherwise turn ``figures_dir`` into ``Path('.')``).
+
+        Resolving here rather than in an after-validator is what lets the four
+        fields be declared as plain ``Path``: callers never have to re-prove
+        that a path the model guarantees is set.
+        """
+        if v is not None and not (isinstance(v, str) and not v.strip()):
+            return v
+        # rag_home is declared first, so it is already in info.data — unless it
+        # failed its own validation, in which case fall back to the default
+        # and let pydantic report the real error.
+        home = info.data.get("rag_home", _RAG_HOME_DEFAULT)
+        assert info.field_name is not None
+        return Path(home) / _STORAGE_DEFAULTS[info.field_name]
 
     # Bedrock embedding
     embedding_model_id: str = Field(
@@ -392,7 +415,7 @@ class Settings(BaseSettings):
     description_concurrency: int = Field(
         default=4,
         description="Concurrent vision API calls. Lower than embeddings — "
-                    "vision is slower and rate-limits are tighter.",
+        "vision is slower and rate-limits are tighter.",
     )
 
     # Table-structure repair (Bedrock Claude vision — see
@@ -428,28 +451,47 @@ class Settings(BaseSettings):
     table_repair_concurrency: int = Field(
         default=2,
         description="Concurrent table-repair API calls. Lower than figure "
-                    "description — larger payloads (image + full cell list), "
-                    "slower responses, and this is an opt-in maintenance "
-                    "path (rag repair tables), not an ingest hot-path knob.",
+        "description — larger payloads (image + full cell list), "
+        "slower responses, and this is an opt-in maintenance "
+        "path (rag repair tables), not an ingest hot-path knob.",
     )
 
     @field_validator(
-        "figures_dir", "pdf_dir", "output_dir", "sqlite_db_path", "default_project_id",
-        "server_url", "server_token", "s3_bucket",
+        "default_project_id",
+        "server_url",
+        "server_token",
+        "s3_bucket",
         mode="before",
     )
     @classmethod
     def _blank_string_means_unset(cls, v: Any) -> Any:
         """Treat empty/whitespace env values as 'use the field default'.
 
-        Claude Desktop's .mcpb config substitutes ``${user_config.X}`` with
-        an empty string when X is left blank in the UI, which would
-        otherwise clobber sensible defaults (e.g. turn ``figures_dir`` into
-        ``Path('.')``).
+        Claude Desktop's .mcpb config substitutes ``${user_config.X}`` with an
+        empty string when X is left blank in the UI, which would otherwise
+        clobber sensible defaults. The storage paths need the same treatment
+        and get it in :meth:`_resolve_storage_path`.
         """
         if isinstance(v, str) and v.strip() == "":
             return None
         return v
+
+    def require_s3_bucket(self) -> str:
+        """Return ``s3_bucket``, or explain that it has to be configured.
+
+        S3 is opt-in (see the field description), so every code path that
+        actually reaches S3 has to establish that a bucket exists. Doing it
+        here gives one actionable message instead of boto3's
+        ``ParamValidationError: Invalid type for parameter Bucket``.
+        """
+        if not self.s3_bucket:
+            raise RuntimeError(
+                "This operation needs S3, but no bucket is configured — set "
+                "RAG_S3_BUCKET. S3 is only required for the Textract backend "
+                "and for explicit --upload flags; the default local workflow "
+                "(Docling, local storage) never touches it."
+            )
+        return self.s3_bucket
 
     def effective_read_token(self) -> str | None:
         """Resolve the shared read token: file mount > read_token > legacy token."""
@@ -494,4 +536,4 @@ class Settings(BaseSettings):
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     """Return cached settings singleton."""
-    return Settings()  # type: ignore[call-arg]
+    return Settings()

@@ -11,7 +11,7 @@ import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastapi import (
     Depends,
@@ -49,6 +49,12 @@ from datasheet_rag.store import (
     list_audit,
     revoke_api_key,
 )
+
+if TYPE_CHECKING:
+    # Runtime import stays inside the ingest endpoint: pulling the pipeline in
+    # at module scope would drag docling (and torch behind it) into every
+    # server process, including ones that only ever serve reads.
+    from datasheet_rag.ingest_pipeline import ProgressEvent
 
 # Vectors are always None post-retrieval; never ship them.
 _CHUNK_EXCLUDE = {"content_embedding", "context_embedding"}
@@ -163,9 +169,7 @@ def build_app() -> FastAPI:
 
     @app.exception_handler(RagServerError)
     async def _rag_err(_: Any, exc: RagServerError) -> JSONResponse:
-        return JSONResponse(
-            status_code=exc.status_code or 500, content={"detail": exc.detail}
-        )
+        return JSONResponse(status_code=exc.status_code or 500, content={"detail": exc.detail})
 
     @app.exception_handler(FigureUnavailableError)
     async def _fig_unavailable(_: Any, exc: FigureUnavailableError) -> JSONResponse:
@@ -195,7 +199,7 @@ def build_app() -> FastAPI:
 
     # -- search ----------------------------------------------------------
     @app.post("/search", dependencies=dep)
-    def search(req: SearchRequest, be: LocalBackend = Depends(get_backend)) -> dict:
+    def search(req: SearchRequest, be: LocalBackend = Depends(get_backend)) -> dict[str, Any]:
         results = be.search(req.query, mode=req.mode, k=req.k, filters=req.filters)  # type: ignore[arg-type]
         return {"results": [_result_json(r) for r in results]}
 
@@ -205,11 +209,11 @@ def build_app() -> FastAPI:
         doc_id: str | None = None,
         project_id: str | None = None,
         be: LocalBackend = Depends(get_backend),
-    ) -> dict:
+    ) -> dict[str, Any]:
         return {"count": be.count_chunks(doc_id=doc_id, project_id=project_id)}
 
     @app.get("/chunks/{chunk_id}/children", dependencies=dep)
-    def chunk_children(chunk_id: str, be: LocalBackend = Depends(get_backend)) -> dict:
+    def chunk_children(chunk_id: str, be: LocalBackend = Depends(get_backend)) -> dict[str, Any]:
         return {"chunks": [_chunk_json(c) for c in be.get_children(chunk_id)]}
 
     @app.get("/chunks/{chunk_id}", dependencies=dep)
@@ -223,16 +227,16 @@ def build_app() -> FastAPI:
     @app.get("/documents/ingested", dependencies=dep)
     def documents_ingested(
         project_id: str | None = None, be: LocalBackend = Depends(get_backend)
-    ) -> dict:
+    ) -> dict[str, Any]:
         docs = be.get_ingested_docs(project_id=project_id)
         return {"documents": [d.model_dump(mode="json") for d in docs]}
 
     @app.get("/documents/titles", dependencies=dep)
-    def documents_titles(be: LocalBackend = Depends(get_backend)) -> dict:
+    def documents_titles(be: LocalBackend = Depends(get_backend)) -> dict[str, Any]:
         return {"titles": be.get_doc_titles()}
 
     @app.get("/documents/resolve/{doc_id}", dependencies=dep)
-    def documents_resolve(doc_id: str, be: LocalBackend = Depends(get_backend)) -> dict:
+    def documents_resolve(doc_id: str, be: LocalBackend = Depends(get_backend)) -> dict[str, Any]:
         return {"doc_id": be.resolve_doc_id(doc_id)}
 
     @app.get("/documents/{doc_id}/pdf", dependencies=dep)
@@ -244,9 +248,7 @@ def build_app() -> FastAPI:
         return Response(content=data, media_type="application/pdf")
 
     @app.get("/documents/{doc_id}/metadata", dependencies=dep)
-    def document_metadata(
-        doc_id: str, be: LocalBackend = Depends(get_backend)
-    ) -> Response:
+    def document_metadata(doc_id: str, be: LocalBackend = Depends(get_backend)) -> Response:
         md = be.get_metadata(doc_id)
         if md is None:
             return Response(status_code=204)
@@ -255,36 +257,44 @@ def build_app() -> FastAPI:
     @app.patch("/documents/{doc_id}/metadata", dependencies=ingest_dep)
     def document_set_metadata(
         doc_id: str, patch: MetadataPatch, be: LocalBackend = Depends(get_backend)
-    ) -> dict:
+    ) -> dict[str, Any]:
         return be.set_metadata(doc_id, patch).model_dump(mode="json")
 
     @app.put("/documents/{doc_id}/title", dependencies=ingest_dep)
     def document_set_title(
         doc_id: str, body: TitleBody, be: LocalBackend = Depends(get_backend)
-    ) -> dict:
+    ) -> dict[str, Any]:
         return {"updated": be.set_doc_title(doc_id, body.title)}
 
     @app.post("/documents/{doc_id}/apply-metadata", dependencies=ingest_dep)
     def document_apply_metadata(
         doc_id: str, be: LocalBackend = Depends(get_backend)
-    ) -> dict:
+    ) -> dict[str, Any]:
         return {"updated": be.apply_metadata_to_chunks(doc_id)}
 
     @app.delete("/documents/{doc_id}", dependencies=ingest_dep)
     def document_delete(
         doc_id: str, request: Request, be: LocalBackend = Depends(get_backend)
-    ) -> dict:
+    ) -> dict[str, Any]:
         try:
             deleted = be.delete_doc(doc_id)
         except Exception as exc:
             audit(
-                request, be, action="delete_doc", status="error",
-                doc_id=doc_id, error=str(exc),
+                request,
+                be,
+                action="delete_doc",
+                status="error",
+                doc_id=doc_id,
+                error=str(exc),
             )
             raise
         audit(
-            request, be, action="delete_doc", status="ok",
-            doc_id=doc_id, detail={"deleted": deleted},
+            request,
+            be,
+            action="delete_doc",
+            status="ok",
+            doc_id=doc_id,
+            detail={"deleted": deleted},
         )
         return {"deleted": deleted}
 
@@ -295,7 +305,7 @@ def build_app() -> FastAPI:
         mpn: str | None = None,
         manufacturer: str | None = None,
         be: LocalBackend = Depends(get_backend),
-    ) -> dict:
+    ) -> dict[str, Any]:
         docs = be.list_documents(
             project_id=project_id,
             group_name=group_name,
@@ -311,7 +321,7 @@ def build_app() -> FastAPI:
         group_name: str | None = None,
         mpn: str | None = None,
         be: LocalBackend = Depends(get_backend),
-    ) -> dict:
+    ) -> dict[str, Any]:
         docs = be.list_docs(project_id=project_id, group_name=group_name, mpn=mpn)
         return {"documents": [d.model_dump(mode="json") for d in docs]}
 
@@ -321,7 +331,7 @@ def build_app() -> FastAPI:
         project_id: str | None = None,
         doc_id: str | None = None,
         be: LocalBackend = Depends(get_backend),
-    ) -> dict:
+    ) -> dict[str, Any]:
         return be.stats(project_id=project_id, doc_id=doc_id).model_dump(mode="json")
 
     # -- figures ---------------------------------------------------------
@@ -331,14 +341,14 @@ def build_app() -> FastAPI:
         project_id: str | None = None,
         only_with_image: bool = True,
         be: LocalBackend = Depends(get_backend),
-    ) -> dict:
+    ) -> dict[str, Any]:
         chunks = be.list_figure_chunks(
             doc_id=doc_id, project_id=project_id, only_with_image=only_with_image
         )
         return {"chunks": [_chunk_json(c) for c in chunks]}
 
     @app.get("/figures/{chunk_id}/bytes", dependencies=dep)
-    def figure_bytes(chunk_id: str, be: LocalBackend = Depends(get_backend)) -> dict:
+    def figure_bytes(chunk_id: str, be: LocalBackend = Depends(get_backend)) -> dict[str, Any]:
         return be.get_figure_bytes(chunk_id).model_dump(mode="json")
 
     @app.put("/figures/{chunk_id}/description", dependencies=ingest_dep)
@@ -346,7 +356,7 @@ def build_app() -> FastAPI:
         chunk_id: str,
         body: FigureDescriptionBody,
         be: LocalBackend = Depends(get_backend),
-    ) -> dict:
+    ) -> dict[str, Any]:
         updated = be.update_figure_description(
             chunk_id, body.description, update_context_text=body.update_context_text
         )
@@ -357,7 +367,7 @@ def build_app() -> FastAPI:
         body: DescribeFiguresBody,
         request: Request,
         be: LocalBackend = Depends(get_backend),
-    ) -> dict:
+    ) -> dict[str, Any]:
         try:
             descriptions, stats = be.describe_figures(
                 doc_id=body.doc_id,
@@ -369,13 +379,23 @@ def build_app() -> FastAPI:
             )
         except Exception as exc:
             audit(
-                request, be, action="describe_figures", status="error",
-                doc_id=body.doc_id, project_id=body.project_id, error=str(exc),
+                request,
+                be,
+                action="describe_figures",
+                status="error",
+                doc_id=body.doc_id,
+                project_id=body.project_id,
+                error=str(exc),
             )
             raise
         audit(
-            request, be, action="describe_figures", status="ok",
-            doc_id=body.doc_id, project_id=body.project_id, detail=stats,
+            request,
+            be,
+            action="describe_figures",
+            status="ok",
+            doc_id=body.doc_id,
+            project_id=body.project_id,
+            detail=stats,
         )
         return {"descriptions": descriptions, "stats": stats}
 
@@ -385,7 +405,7 @@ def build_app() -> FastAPI:
         body: InferTitleBody,
         request: Request,
         be: LocalBackend = Depends(get_backend),
-    ) -> dict:
+    ) -> dict[str, Any]:
         try:
             title = be.infer_title(
                 doc_id,
@@ -395,13 +415,21 @@ def build_app() -> FastAPI:
             )
         except Exception as exc:
             audit(
-                request, be, action="infer_title", status="error",
-                doc_id=doc_id, error=str(exc),
+                request,
+                be,
+                action="infer_title",
+                status="error",
+                doc_id=doc_id,
+                error=str(exc),
             )
             raise
         audit(
-            request, be, action="infer_title", status="ok",
-            doc_id=doc_id, detail={"title": title, "dry_run": body.dry_run},
+            request,
+            be,
+            action="infer_title",
+            status="ok",
+            doc_id=doc_id,
+            detail={"title": title, "dry_run": body.dry_run},
         )
         return {"title": title}
 
@@ -412,7 +440,7 @@ def build_app() -> FastAPI:
         payload: UploadFile = File(...),
         figures: list[UploadFile] = File(default=[]),
         be: LocalBackend = Depends(get_backend),
-    ) -> dict:
+    ) -> dict[str, Any]:
         data = json.loads((await payload.read()).decode())
         graph = ChunkGraph.model_validate(data["graph"])
         fig_uploads: dict[str, tuple[bytes, str]] = {}
@@ -420,11 +448,7 @@ def build_app() -> FastAPI:
             name = f.filename or ""
             chunk_id, _, ext = name.rpartition(".")
             fig_uploads[chunk_id] = (await f.read(), ext or "png")
-        metadata = (
-            MetadataPatch.model_validate(data["metadata"])
-            if data.get("metadata")
-            else None
-        )
+        metadata = MetadataPatch.model_validate(data["metadata"]) if data.get("metadata") else None
         try:
             result = be.ingest_chunk_graph(
                 graph,
@@ -439,13 +463,21 @@ def build_app() -> FastAPI:
             )
         except Exception as exc:
             audit(
-                request, be, action="ingest", status="error",
-                project_id=data.get("project_id"), error=str(exc),
+                request,
+                be,
+                action="ingest",
+                status="error",
+                project_id=data.get("project_id"),
+                error=str(exc),
             )
             raise
         audit(
-            request, be, action="ingest", status="ok",
-            doc_id=result.doc_id, project_id=data.get("project_id"),
+            request,
+            be,
+            action="ingest",
+            status="ok",
+            doc_id=result.doc_id,
+            project_id=data.get("project_id"),
             detail={
                 "inserted": result.inserted,
                 "pruned": result.pruned,
@@ -483,10 +515,10 @@ def build_app() -> FastAPI:
         tmp_path = Path(tmp.name)
 
         loop = asyncio.get_running_loop()
-        queue: asyncio.Queue = asyncio.Queue()
+        queue: asyncio.Queue[tuple[str, dict[str, Any]]] = asyncio.Queue()
         max_step = {"n": 0}
 
-        def on_progress(ev) -> None:
+        def on_progress(ev: ProgressEvent) -> None:
             max_step["n"] = max(max_step["n"], ev.step)
             loop.call_soon_threadsafe(queue.put_nowait, ("progress", ev.to_dict()))
 
@@ -510,9 +542,7 @@ def build_app() -> FastAPI:
                 embed_step = {"kind": "step", "text": "Embed & store", "step": max_step["n"] + 1}
                 loop.call_soon_threadsafe(queue.put_nowait, ("progress", embed_step))
                 metadata = (
-                    MetadataPatch.model_validate(opts["metadata"])
-                    if opts.get("metadata")
-                    else None
+                    MetadataPatch.model_validate(opts["metadata"]) if opts.get("metadata") else None
                 )
                 result = be.ingest_chunk_graph(
                     parsed.graph,
@@ -528,16 +558,17 @@ def build_app() -> FastAPI:
                     queue.put_nowait, ("result", result.model_dump(mode="json"))
                 )
             except Exception as exc:  # surfaced to the client as an error event
-                loop.call_soon_threadsafe(
-                    queue.put_nowait, ("error", {"detail": str(exc)})
-                )
+                loop.call_soon_threadsafe(queue.put_nowait, ("error", {"detail": str(exc)}))
             finally:
-                loop.call_soon_threadsafe(queue.put_nowait, ("__done__", None))
+                # Empty payload rather than None: the sentinel is recognised
+                # by its kind, and keeping one payload type off the queue
+                # saves every reader a None check it would never hit.
+                loop.call_soon_threadsafe(queue.put_nowait, ("__done__", {}))
 
-        async def event_gen():
+        async def event_gen() -> AsyncIterator[str]:
             fut = loop.run_in_executor(None, worker)
             status = "ok"
-            result_doc: dict | None = None
+            result_doc: dict[str, Any] | None = None
             error_detail: str | None = None
             try:
                 while True:
@@ -558,7 +589,10 @@ def build_app() -> FastAPI:
                 tmp_path.unlink(missing_ok=True)
                 if status == "ok" and result_doc is not None:
                     audit(
-                        request, be, action="ingest", status="ok",
+                        request,
+                        be,
+                        action="ingest",
+                        status="ok",
                         doc_id=result_doc.get("doc_id"),
                         project_id=opts.get("project_id"),
                         detail={
@@ -569,8 +603,12 @@ def build_app() -> FastAPI:
                     )
                 else:
                     audit(
-                        request, be, action="ingest", status="error",
-                        project_id=opts.get("project_id"), error=error_detail,
+                        request,
+                        be,
+                        action="ingest",
+                        status="error",
+                        project_id=opts.get("project_id"),
+                        error=error_detail,
                     )
 
         return StreamingResponse(event_gen(), media_type="text/event-stream")
@@ -579,14 +617,14 @@ def build_app() -> FastAPI:
     @app.post("/admin/keys", dependencies=admin_dep)
     def admin_create_key(
         body: CreateKeyBody, be: LocalBackend = Depends(get_backend)
-    ) -> dict:
+    ) -> dict[str, Any]:
         with be.write_lock:
             rec, token = create_api_key(be.conn, label=body.label, scopes=body.scopes)
         # Plaintext token returned exactly once; never stored or shown again.
         return {"id": rec.id, "label": rec.label, "scopes": rec.scopes, "token": token}
 
     @app.get("/admin/keys", dependencies=admin_dep)
-    def admin_list_keys(be: LocalBackend = Depends(get_backend)) -> dict:
+    def admin_list_keys(be: LocalBackend = Depends(get_backend)) -> dict[str, Any]:
         keys = list_api_keys(be.conn)
         return {
             "keys": [
@@ -602,7 +640,7 @@ def build_app() -> FastAPI:
         }
 
     @app.delete("/admin/keys/{key_id}", dependencies=admin_dep)
-    def admin_revoke_key(key_id: str, be: LocalBackend = Depends(get_backend)) -> dict:
+    def admin_revoke_key(key_id: str, be: LocalBackend = Depends(get_backend)) -> dict[str, Any]:
         with be.write_lock:
             revoked = revoke_api_key(be.conn, key_id)
         if not revoked:
@@ -615,7 +653,7 @@ def build_app() -> FastAPI:
         since: str | None = None,
         limit: int = 200,
         be: LocalBackend = Depends(get_backend),
-    ) -> dict:
+    ) -> dict[str, Any]:
         return {"entries": list_audit(be.conn, doc_id=doc_id, since=since, limit=limit)}
 
     return app

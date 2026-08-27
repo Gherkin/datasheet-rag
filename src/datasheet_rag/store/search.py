@@ -241,7 +241,7 @@ def keyword_search(
         where_sql, extra_params = filters._where_clause()
 
     # chunk_id → (bm25_sum, hit_count, last_row)
-    accumulator: dict[str, tuple[float, int, object]] = {}
+    accumulator: dict[str, tuple[float, int, sqlite3.Row]] = {}
 
     for kw in keywords:
         escaped = f'"{kw.replace(chr(34), chr(34) * 2)}"'
@@ -268,7 +268,7 @@ def keyword_search(
                 accumulator[chunk_id] = (bm25, 1, row)
 
     n_kw = len(keywords)
-    scored: list[tuple[str, float, object]] = []
+    scored: list[tuple[str, float, sqlite3.Row]] = []
     for chunk_id, (bm25_sum, hit_count, row) in accumulator.items():
         coverage = hit_count / n_kw
         score = bm25_sum * (coverage**coverage_exponent)
@@ -320,7 +320,9 @@ def hybrid_search(
     over_fetch = max(k * 4, 40)
 
     vec_results = vector_search(conn, query_embedding, k=over_fetch, filters=filters)
-    kw_results = keyword_search(conn, query_text, k=over_fetch, filters=filters, coverage_exponent=coverage_exponent)
+    kw_results = keyword_search(
+        conn, query_text, k=over_fetch, filters=filters, coverage_exponent=coverage_exponent
+    )
 
     ranks: dict[str, dict[str, int | None]] = {}
     for i, r in enumerate(vec_results, start=1):
@@ -331,12 +333,13 @@ def hybrid_search(
         ranks[r.chunk_id]["kw_rank"] = i
 
     fused: list[tuple[str, float]] = []
-    for chunk_id, r in ranks.items():
+    for chunk_id, rank in ranks.items():
         score = 0.0
-        if r["vec_rank"] is not None:
-            score += vector_weight / (rrf_k + r["vec_rank"])
-        if r["kw_rank"] is not None:
-            score += keyword_weight / (rrf_k + r["kw_rank"])
+        vec_rank, kw_rank = rank["vec_rank"], rank["kw_rank"]
+        if vec_rank is not None:
+            score += vector_weight / (rrf_k + vec_rank)
+        if kw_rank is not None:
+            score += keyword_weight / (rrf_k + kw_rank)
         fused.append((chunk_id, score))
 
     fused.sort(key=lambda x: x[1], reverse=True)

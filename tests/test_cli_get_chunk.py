@@ -73,8 +73,11 @@ def db_path(tmp_path: Path) -> Path:
     parent = _chunk(DOC_A, 0, "Power supply thermal overview.", level=ChunkLevel.MESO)
     prev_c = _chunk(DOC_A, 1, "Widget operates below 40C ambient.", parent_id=parent.id)
     mid = _chunk(
-        DOC_A, 2, "The gizmo derates above 85C junction temperature.",
-        parent_id=parent.id, prev_id=prev_c.id,
+        DOC_A,
+        2,
+        "The gizmo derates above 85C junction temperature.",
+        parent_id=parent.id,
+        prev_id=prev_c.id,
     )
     next_c = _chunk(DOC_A, 3, "Cooling fan engages at 70C.", parent_id=parent.id, prev_id=mid.id)
     prev_c.next_id = mid.id
@@ -164,8 +167,11 @@ def test_inspect_figures_chunk_id_round_trips_through_get_chunk(db_path: Path) -
     image = db_path.parent / "fake-figure.png"
     image.write_bytes(b"\x89PNGFAKE")
     fig = _chunk(
-        DOC_A, 4, "See figure for thermal curve.",
-        layout_type=LayoutType.FIGURE, figure_caption="Fig 1: Thermal derating curve",
+        DOC_A,
+        4,
+        "See figure for thermal curve.",
+        layout_type=LayoutType.FIGURE,
+        figure_caption="Fig 1: Thermal derating curve",
         figure_image_path=str(image),
     )
     conn = connect(db_path, embedding_dim=get_settings().embedding_dimensions)
@@ -186,8 +192,11 @@ def test_inspect_figures_chunk_id_round_trips_through_get_chunk(db_path: Path) -
 def test_inspect_figures_flags_chunks_whose_image_is_gone(db_path: Path) -> None:
     """A figure row whose file vanished must not be advertised (GH #41)."""
     fig = _chunk(
-        DOC_A, 5, "See figure for the block diagram.",
-        layout_type=LayoutType.FIGURE, figure_caption="Fig 2: Block diagram",
+        DOC_A,
+        5,
+        "See figure for the block diagram.",
+        layout_type=LayoutType.FIGURE,
+        figure_caption="Fig 2: Block diagram",
         figure_image_path=str(db_path.parent / "not-here.png"),
     )
     conn = connect(db_path, embedding_dim=get_settings().embedding_dimensions)

@@ -9,7 +9,7 @@ import re
 import socket
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar
 
 import click
 from rich.console import Console
@@ -18,8 +18,16 @@ from rich.table import Table
 from datasheet_rag.config import get_settings
 
 if TYPE_CHECKING:
+    import sqlite3
+
+    from datasheet_rag.backend import RagBackend
+    from datasheet_rag.backend.base import RagServerError, SearchMode
     from datasheet_rag.chunking.layout_parser import DocumentOutline
     from datasheet_rag.costs import CostEstimate
+    from datasheet_rag.eval.ablation import IndexVariant
+    from datasheet_rag.eval.harness import RunReport
+    from datasheet_rag.ingest_pipeline import ProgressEvent
+    from datasheet_rag.models.chunk import Chunk
 
 console = Console()
 
@@ -29,7 +37,7 @@ console = Console()
 SHORT_DOC_ID_LEN = 12
 
 
-def _resolve_doc_id(conn, doc_id: str) -> str:
+def _resolve_doc_id(conn: sqlite3.Connection, doc_id: str) -> str:
     """CLI wrapper around the **store-backed** `resolve_doc_id`: turns
     ambiguity/misses into ClickException.
 
@@ -148,7 +156,7 @@ def _doc_input(arg: str, suffix: str) -> tuple[str, Path]:
     return doc_id, _cache_path(doc_id, suffix)
 
 
-def _backend_for(db_path: Path | None = None):
+def _backend_for(db_path: Path | None = None) -> RagBackend:
     """Return the backend a command should use.
 
     ``--db <path>`` always means "this specific local sqlite file" so it
@@ -222,7 +230,7 @@ def _require_local_db(db_path: Path | None) -> Path:
     return get_settings().sqlite_db_path
 
 
-def _friendly_server_error(e) -> click.ClickException:
+def _friendly_server_error(e: RagServerError) -> click.ClickException:
     """Turn a RagServerError into an actionable CLI message (esp. auth)."""
     code = getattr(e, "status_code", None)
     if code == 401:
@@ -238,7 +246,7 @@ def _friendly_server_error(e) -> click.ClickException:
     return click.ClickException(str(e))
 
 
-def _backend_resolve(be, doc_id: str) -> str:
+def _backend_resolve(be: RagBackend, doc_id: str) -> str:
     """Resolve a doc_id prefix via the backend, turning errors into ClickException."""
     from datasheet_rag.backend import RagServerError
 
@@ -256,10 +264,10 @@ def _short_chunk_id(chunk_id: str, doc_id: str) -> str:
     `:L{level}:{index}` suffix intact so it round-trips through
     `_resolve_chunk_id`.
     """
-    return doc_id[:SHORT_DOC_ID_LEN] + chunk_id[len(doc_id):]
+    return doc_id[:SHORT_DOC_ID_LEN] + chunk_id[len(doc_id) :]
 
 
-def _resolve_chunk_id(be, chunk_id: str) -> str:
+def _resolve_chunk_id(be: RagBackend, chunk_id: str) -> str:
     """Resolve a chunk_id whose doc_id portion may be abbreviated (as
     printed by `rag search` / `rag inspect figures`) to its full form.
 
@@ -302,7 +310,7 @@ def _db_option(fn: _F) -> _F:
         type=click.Path(path_type=Path),
         default=None,
         help="SQLite store to read/write (default: settings.sqlite_db_path, "
-             "normally ~/.rag/rag.sqlite).",
+        "normally ~/.rag/rag.sqlite).",
     )(fn)
 
 
@@ -318,7 +326,7 @@ class OrderedGroup(click.Group):
     is actually reached makes `rag --help` readable top-to-bottom.
     """
 
-    def __init__(self, *args, order: list[str] | None = None, **kwargs) -> None:
+    def __init__(self, *args: Any, order: list[str] | None = None, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._order = order or []
 
@@ -333,8 +341,16 @@ class OrderedGroup(click.Group):
     cls=OrderedGroup,
     context_settings={"show_default": True},
     order=[
-        "ingest", "metadata", "search", "list", "get",
-        "inspect", "config", "repair", "delete", "admin",
+        "ingest",
+        "metadata",
+        "search",
+        "list",
+        "get",
+        "inspect",
+        "config",
+        "repair",
+        "delete",
+        "admin",
     ],
 )
 @click.pass_context
@@ -434,8 +450,7 @@ def config_init(force: bool) -> None:
         if token:
             chosen["RAG_SERVER_TOKEN"] = token
         console.print(
-            "[dim]Embeddings run on the server in remote mode — no local "
-            "model config needed.[/]"
+            "[dim]Embeddings run on the server in remote mode — no local model config needed.[/]"
         )
     else:
         backend = click.prompt(
@@ -515,24 +530,49 @@ def repair_group() -> None:
 
 @cli.command("list", short_help="List ingested documents.")
 @_db_option
-@click.option("--project-id", default=None,
-              help="Restrict to a project (default: scoped by .rag.toml if present).")
-@click.option("--global", "-g", "is_global", is_flag=True,
-              help="Show every project, ignoring any .rag.toml scoping.")
+@click.option(
+    "--project-id",
+    default=None,
+    help="Restrict to a project (default: scoped by .rag.toml if present).",
+)
+@click.option(
+    "--global",
+    "-g",
+    "is_global",
+    is_flag=True,
+    help="Show every project, ignoring any .rag.toml scoping.",
+)
 @click.option("--group", "group_name", default=None, help="Only show documents in this group.")
 @click.option("--mpn", default=None, help="Only show documents with this part number.")
-@click.option("--tag", "tags", multiple=True,
-              help="Only show documents that have this tag (repeatable — "
-                   "with multiple --tag, a document must have all of them).")
-@click.option("--attr", "attrs", multiple=True, metavar="KEY=VALUE",
-              help="Only show documents whose attributes contain this "
-                   "key=value pair (repeatable, all must match).")
-@click.option("--wide", "-w", is_flag=True,
-              help="Show the sidecar columns (project, group, mpn, manufacturer, "
-                   "subsystem, tags) in place of the chunk/page/ingest columns. "
-                   "Implied whenever a filter is given.")
-@click.option("--s3", "show_s3", is_flag=True,
-              help="List raw S3 uploads instead (debug — includes documents not yet ingested).")
+@click.option(
+    "--tag",
+    "tags",
+    multiple=True,
+    help="Only show documents that have this tag (repeatable — "
+    "with multiple --tag, a document must have all of them).",
+)
+@click.option(
+    "--attr",
+    "attrs",
+    multiple=True,
+    metavar="KEY=VALUE",
+    help="Only show documents whose attributes contain this "
+    "key=value pair (repeatable, all must match).",
+)
+@click.option(
+    "--wide",
+    "-w",
+    is_flag=True,
+    help="Show the sidecar columns (project, group, mpn, manufacturer, "
+    "subsystem, tags) in place of the chunk/page/ingest columns. "
+    "Implied whenever a filter is given.",
+)
+@click.option(
+    "--s3",
+    "show_s3",
+    is_flag=True,
+    help="List raw S3 uploads instead (debug — includes documents not yet ingested).",
+)
 def list_docs(
     db_path: Path | None,
     project_id: str | None,
@@ -552,21 +592,22 @@ def list_docs(
     narrow the listing to documents whose sidecar row matches.
     """
     from datasheet_rag.project_config import resolve_cli_project_id
+
     project_id = resolve_cli_project_id(project_id, is_global=is_global)
 
     if show_s3:
         from datasheet_rag.storage import list_documents
 
-        docs = list_documents()
-        if not docs:
+        s3_docs = list_documents()
+        if not s3_docs:
             console.print("[yellow]No documents found in S3.[/]")
             return
 
         table = Table(title="S3 Uploads")
         table.add_column("doc_id", style="cyan")
         table.add_column("S3 Prefix")
-        for doc in docs:
-            table.add_row(doc["doc_id"], doc["prefix"])
+        for s3_doc in s3_docs:
+            table.add_row(s3_doc["doc_id"], s3_doc["prefix"])
         console.print(table)
         return
 
@@ -574,9 +615,7 @@ def list_docs(
     for item in attrs:
         key, sep, value = item.partition("=")
         if not sep or not key:
-            raise click.BadParameter(
-                f"--attr expects KEY=VALUE, got {item!r}", param_hint="--attr"
-            )
+            raise click.BadParameter(f"--attr expects KEY=VALUE, got {item!r}", param_hint="--attr")
         attr_filters[key] = value
 
     filtering = bool(group_name or mpn or tags or attr_filters)
@@ -589,8 +628,7 @@ def list_docs(
     # sidecar and belongs in the default view.
     try:
         meta_by_id = {
-            m.doc_id: m
-            for m in be.list_docs(project_id=project_id, group_name=group_name, mpn=mpn)
+            m.doc_id: m for m in be.list_docs(project_id=project_id, group_name=group_name, mpn=mpn)
         }
     except Exception:
         meta_by_id = {}
@@ -598,7 +636,8 @@ def list_docs(
     if filtering:
         wanted_tags = set(tags)
         docs = [
-            d for d in docs
+            d
+            for d in docs
             if (m := meta_by_id.get(d.doc_id)) is not None
             and wanted_tags.issubset(set(m.tags))
             and all(m.attributes.get(k) == v for k, v in attr_filters.items())
@@ -608,8 +647,10 @@ def list_docs(
         if filtering:
             console.print("[yellow]No ingested documents match those filters.[/]")
         else:
-            console.print("[yellow]No ingested documents found.[/] Run [cyan]rag ingest[/] first "
-                          "(or pass --s3 to see raw uploads).")
+            console.print(
+                "[yellow]No ingested documents found.[/] Run [cyan]rag ingest[/] first "
+                "(or pass --s3 to see raw uploads)."
+            )
         return
 
     # The two views answer different questions — ingest health vs. cataloguing
@@ -618,9 +659,9 @@ def list_docs(
     # terminal, where Rich squeezes every cell down to nothing.
     show_meta = wide or filtering
     stale_ids = {
-        d.doc_id for d in docs
-        if (m := meta_by_id.get(d.doc_id)) is not None
-        and m.attributes.get(_STALE_ATTR)
+        d.doc_id
+        for d in docs
+        if (m := meta_by_id.get(d.doc_id)) is not None and m.attributes.get(_STALE_ATTR)
     }
 
     table = Table(title="Ingested Documents")
@@ -669,10 +710,18 @@ def list_docs(
 
 
 @inspect_group.command("stats", short_help="Show chunk counts by zoom level.")
-@click.option("--project-id", default=None,
-              help="Restrict to a project (default: scoped by .rag.toml if present).")
-@click.option("--global", "-g", "is_global", is_flag=True,
-              help="Show stats across every project, ignoring any .rag.toml scoping.")
+@click.option(
+    "--project-id",
+    default=None,
+    help="Restrict to a project (default: scoped by .rag.toml if present).",
+)
+@click.option(
+    "--global",
+    "-g",
+    "is_global",
+    is_flag=True,
+    help="Show stats across every project, ignoring any .rag.toml scoping.",
+)
 @click.option("--doc-id", default=None, help="Restrict to a single document.")
 @_db_option
 def stats_cmd(
@@ -786,7 +835,9 @@ def _local_ips() -> list[str]:
     try:
         out = subprocess.run(
             ["ip", "-4", "-o", "addr", "show"],
-            capture_output=True, text=True, timeout=2,
+            capture_output=True,
+            text=True,
+            timeout=2,
         ).stdout
         for line in out.splitlines():
             parts = line.split()
@@ -801,17 +852,28 @@ def _local_ips() -> list[str]:
 
 @get_group.command("doc", short_help="Fetch a document's source PDF.")
 @click.argument("doc_id", type=str)
-@click.option("-o", "--output", "output_path", type=click.Path(path_type=Path), default=None,
-              help="Destination file or directory (default: ./<short_doc_id>.pdf). "
-                   "Ignored with --host.")
-@click.option("--host", is_flag=True,
-              help="Serve the document instead of downloading it — starts the local "
-                   "PDF.js viewer and prints browser URLs (see below).")
+@click.option(
+    "-o",
+    "--output",
+    "output_path",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Destination file or directory (default: ./<short_doc_id>.pdf). Ignored with --host.",
+)
+@click.option(
+    "--host",
+    is_flag=True,
+    help="Serve the document instead of downloading it — starts the local "
+    "PDF.js viewer and prints browser URLs (see below).",
+)
 @click.option("--page", default=1, type=int, help="1-based page to open to (--host only).")
-@click.option("--launch/--no-launch", default=True,
-              help="With --host, open the 127.0.0.1 URL in your default browser "
-                   "(skip it if you're connecting from a different machine). "
-                   "No effect without --host.")
+@click.option(
+    "--launch/--no-launch",
+    default=True,
+    help="With --host, open the 127.0.0.1 URL in your default browser "
+    "(skip it if you're connecting from a different machine). "
+    "No effect without --host.",
+)
 @_db_option
 def get_doc_cmd(
     doc_id: str,
@@ -855,15 +917,18 @@ def get_doc_cmd(
 
         console.print("[green]PDF viewer running — pick whichever URL your browser can reach:[/]")
         for ip in _local_ips():
-            console.print(
-                f"  http://{ip}:{port}/viewer/{doc_id}#page={page}", soft_wrap=True
-            )
+            console.print(f"  http://{ip}:{port}/viewer/{doc_id}#page={page}", soft_wrap=True)
 
         if launch:
             webbrowser.open(local_url)
-            console.print("[dim]Opened the 127.0.0.1 link in your default browser "
-                          "(use --no-launch to skip this if you're connecting remotely).[/]")
-        console.print("[dim]Serving from this process — keep it running to keep the link alive. Ctrl+C to stop.[/]")
+            console.print(
+                "[dim]Opened the 127.0.0.1 link in your default browser "
+                "(use --no-launch to skip this if you're connecting remotely).[/]"
+            )
+        console.print(
+            "[dim]Serving from this process — keep it running to keep the link "
+            "alive. Ctrl+C to stop.[/]"
+        )
 
         try:
             while True:
@@ -897,12 +962,23 @@ def get_doc_cmd(
 @get_group.command("page", short_help="Render a PDF page to a PNG.")
 @click.argument("doc_id", type=str)
 @click.argument("page_arg", metavar="PAGE", type=int, required=False)
-@click.option("--page", "page_opt", type=int, default=None,
-              help="1-based page number (alternative to the positional PAGE argument).")
-@click.option("--output", "-o", "output_path", type=click.Path(path_type=Path), default=None,
-              help="Where to save the image. Defaults to a name derived from the "
-                   "doc_id and page in the current directory. If a directory, the "
-                   "default filename is placed inside it.")
+@click.option(
+    "--page",
+    "page_opt",
+    type=int,
+    default=None,
+    help="1-based page number (alternative to the positional PAGE argument).",
+)
+@click.option(
+    "--output",
+    "-o",
+    "output_path",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Where to save the image. Defaults to a name derived from the "
+    "doc_id and page in the current directory. If a directory, the "
+    "default filename is placed inside it.",
+)
 @click.option("--dpi", default=150, type=int, help="Render DPI for the page image.")
 @_db_option
 def get_page_cmd(
@@ -922,9 +998,7 @@ def get_page_cmd(
     viewer the MCP `show_pdf` tool uses).
     """
     if page_arg is not None and page_opt is not None:
-        raise click.UsageError(
-            "Pass PAGE either positionally or via --page, not both."
-        )
+        raise click.UsageError("Pass PAGE either positionally or via --page, not both.")
     page = page_arg if page_arg is not None else page_opt
     if page is None:
         raise click.UsageError("PAGE is required — pass it positionally or via --page.")
@@ -969,7 +1043,9 @@ def get_page_cmd(
 @cli.command("delete", short_help="Permanently delete a document.")
 @click.argument("doc_id", type=str)
 @_db_option
-@click.option("--dry-run", is_flag=True, help="Show what would be deleted without deleting anything.")
+@click.option(
+    "--dry-run", is_flag=True, help="Show what would be deleted without deleting anything."
+)
 @click.option("-y", "--yes", "assume_yes", is_flag=True, help="Skip the confirmation prompt.")
 def delete_doc_cmd(doc_id: str, db_path: Path | None, dry_run: bool, assume_yes: bool) -> None:
     """Permanently delete a document.
@@ -1014,8 +1090,13 @@ def delete_doc_cmd(doc_id: str, db_path: Path | None, dry_run: bool, assume_yes:
 
 @get_group.command("text", short_help="Dump a document's extracted text.")
 @click.argument("doc_id", type=str)
-@click.option("--output", "-o", type=click.Path(path_type=Path), default=None,
-              help="Write the text to this file (default: print it to stdout).")
+@click.option(
+    "--output",
+    "-o",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Write the text to this file (default: print it to stdout).",
+)
 def get_text_cmd(doc_id: str, output: Path | None) -> None:
     """Dump a document's extracted text in reading order.
 
@@ -1120,11 +1201,19 @@ def _load_outline(arg: str) -> tuple[str, DocumentOutline]:
     return doc_id, parse_textract_blocks(data, doc_id=doc_id)
 
 
+class _FlaggedTable(NamedTuple):
+    """One table the header detectors judged untrustworthy, for --list-flagged."""
+
+    page: int
+    caption: str
+    reason: str
+
+
 # Rows of the section/layout listing to show before truncating (unless --full).
 _INSPECT_LAYOUT_PREVIEW = 30
 
 
-def _inspect_textract_layout(blocks: list, full: bool = False) -> None:
+def _inspect_textract_layout(blocks: list[dict[str, Any]], full: bool = False) -> None:
     """Render the block-type summary and layout hierarchy for Textract output."""
     from datasheet_rag.textract import extract_layout_elements
 
@@ -1159,7 +1248,7 @@ def _inspect_textract_layout(blocks: list, full: bool = False) -> None:
             )
 
 
-def _inspect_docling_layout(outline, full: bool = False) -> None:
+def _inspect_docling_layout(outline: DocumentOutline, full: bool = False) -> None:
     """Render the element-type summary and section hierarchy for Docling output."""
     summary = outline.summary()
 
@@ -1190,18 +1279,20 @@ def _inspect_docling_layout(outline, full: bool = False) -> None:
                 else f"p{section.page_start}-{section.page_end}"
             )
             title = (section.title or "(untitled)")[:80]
-            console.print(
-                f"{indent}{title}  [dim]{pages}, {section.element_count} elements[/]"
-            )
+            console.print(f"{indent}{title}  [dim]{pages}, {section.element_count} elements[/]")
         if len(flat) > len(shown):
             console.print(f"  … and {len(flat) - len(shown)} more (pass --full to show all)")
 
 
 @inspect_group.command("layout", short_help="Summarise a document's parsed layout.")
 @click.argument("doc_id", type=str)
-@click.option("--full", is_flag=True, default=False,
-              help="Show the entire section/layout listing instead of the first "
-                   f"{_INSPECT_LAYOUT_PREVIEW} rows.")
+@click.option(
+    "--full",
+    is_flag=True,
+    default=False,
+    help="Show the entire section/layout listing instead of the first "
+    f"{_INSPECT_LAYOUT_PREVIEW} rows.",
+)
 def inspect_layout(doc_id: str, full: bool) -> None:
     """Show a summary of the parsed layout structure for a document.
 
@@ -1240,7 +1331,7 @@ def inspect_layout(doc_id: str, full: bool) -> None:
     type=click.Path(exists=True, path_type=Path),
     default=None,
     help="Figure manifest JSON to fold in (default: the manifest ingest "
-         "cached for this document, so re-chunking keeps its figures).",
+    "cached for this document, so re-chunking keeps its figures).",
 )
 @click.option("--micro-tokens", default=128, type=int, help="Max tokens per MICRO chunk.")
 @click.option("--meso-tokens", default=512, type=int, help="Max tokens per MESO chunk.")
@@ -1250,8 +1341,13 @@ def inspect_layout(doc_id: str, full: bool) -> None:
     default="extractive",
     help="Summarization mode for MACRO chunks.",
 )
-@click.option("--output", "-o", type=click.Path(path_type=Path), default=None,
-              help="Where to write the chunk graph (default: the cached {doc_id}_chunks.json).")
+@click.option(
+    "--output",
+    "-o",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Where to write the chunk graph (default: the cached {doc_id}_chunks.json).",
+)
 def chunk_cmd(
     doc_id: str,
     figures_manifest: Path | None,
@@ -1333,7 +1429,9 @@ def chunk_cmd(
     if macros:
         console.print("\n[bold]Chapter Summaries:[/]")
         for m in macros:
-            console.print(f"\n[cyan]{m.metadata.chapter_title}[/] (pages {m.metadata.page_numbers})")
+            console.print(
+                f"\n[cyan]{m.metadata.chapter_title}[/] (pages {m.metadata.page_numbers})"
+            )
             if m.text:
                 preview = m.text[:300] + "…" if len(m.text) > 300 else m.text
                 console.print(f"  {preview}")
@@ -1389,10 +1487,12 @@ def embed(
     console.print(f"Loading chunk graph from [cyan]{chunks_json}[/]…")
     graph = load_chunk_graph(chunks_json)
     stats = graph.stats()
-    console.print(f"  {stats['total_chunks']} chunks "
-                  f"(MACRO {stats['by_level']['MACRO']}, "
-                  f"MESO {stats['by_level']['MESO']}, "
-                  f"MICRO {stats['by_level']['MICRO']})")
+    console.print(
+        f"  {stats['total_chunks']} chunks "
+        f"(MACRO {stats['by_level']['MACRO']}, "
+        f"MESO {stats['by_level']['MESO']}, "
+        f"MICRO {stats['by_level']['MICRO']})"
+    )
 
     be = _backend_for(db_path)
 
@@ -1431,23 +1531,42 @@ def embed(
 
 @cli.command(short_help="Search the RAG store.")
 @click.argument("query", type=str)
-@click.option("--mode", type=click.Choice(["hybrid", "vector", "keyword"]),
-              default="hybrid", help="Retrieval mode.")
+@click.option(
+    "--mode",
+    type=click.Choice(["hybrid", "vector", "keyword"]),
+    default="hybrid",
+    help="Retrieval mode.",
+)
 @click.option("-k", "top_k", default=10, type=int, help="Number of results.")
 @_db_option
-@click.option("--project-id", default=None,
-              help="Restrict to a project (default: scoped by .rag.toml if present).")
-@click.option("--global", "-g", "is_global", is_flag=True,
-              help="Search every project, ignoring any .rag.toml scoping.")
+@click.option(
+    "--project-id",
+    default=None,
+    help="Restrict to a project (default: scoped by .rag.toml if present).",
+)
+@click.option(
+    "--global",
+    "-g",
+    "is_global",
+    is_flag=True,
+    help="Search every project, ignoring any .rag.toml scoping.",
+)
 @click.option("--group", "group_name", default=None, help="Restrict to a group.")
 @click.option("--doc-id", "doc_ids", multiple=True, help="Restrict to one or more doc IDs.")
-@click.option("--level", type=click.Choice(["macro", "meso", "micro"]),
-              default=None, help="Restrict to a single zoom level.")
-@click.option("--show-context/--no-show-context", default=False,
-              help="Show context_text (full embedding-ready blob) instead of raw text.")
+@click.option(
+    "--level",
+    type=click.Choice(["macro", "meso", "micro"]),
+    default=None,
+    help="Restrict to a single zoom level.",
+)
+@click.option(
+    "--show-context/--no-show-context",
+    default=False,
+    help="Show context_text (full embedding-ready blob) instead of raw text.",
+)
 def search(
     query: str,
-    mode: str,
+    mode: SearchMode,
     top_k: int,
     db_path: Path | None,
     project_id: str | None,
@@ -1471,8 +1590,11 @@ def search(
 
     level_enum = None
     if level:
-        level_enum = {"macro": ChunkLevel.MACRO, "meso": ChunkLevel.MESO,
-                      "micro": ChunkLevel.MICRO}[level]
+        level_enum = {
+            "macro": ChunkLevel.MACRO,
+            "meso": ChunkLevel.MESO,
+            "micro": ChunkLevel.MICRO,
+        }[level]
 
     filters = SearchFilters(
         doc_ids=resolved_doc_ids if resolved_doc_ids else None,
@@ -1567,14 +1689,13 @@ def _next_steps(doc_id: str | None, *, rechunk: bool) -> None:
         )
 
 
-def _print_chunk_detail(chunk, *, show_context: bool = False) -> None:
+def _print_chunk_detail(chunk: Chunk, *, show_context: bool = False) -> None:
     """Render one chunk's metadata + text — the CLI counterpart of the MCP
     server's ``_shape_chunk``."""
     from datasheet_rag.models.chunk import LayoutType
 
     pages = chunk.metadata.page_numbers
-    page = (str(pages[0]) if len(pages) == 1
-            else f"{pages[0]}-{pages[-1]}" if pages else "—")
+    page = str(pages[0]) if len(pages) == 1 else f"{pages[0]}-{pages[-1]}" if pages else "—"
 
     console.print(f"[bold cyan]{chunk.id}[/]")
     console.print(f"  level:   {chunk.level.name}")
@@ -1599,11 +1720,17 @@ def _print_chunk_detail(chunk, *, show_context: bool = False) -> None:
 
 @get_group.command("chunk", short_help="Fetch one chunk by ID.")
 @click.argument("chunk_id", type=str)
-@click.option("--neighbors/--no-neighbors", default=False,
-              help="Also print the parent/prev/next chunks (mirrors the MCP "
-                   "get_chunk tool's include_neighbors option).")
-@click.option("--show-context/--no-show-context", default=False,
-              help="Print context_text (embedding-ready blob) instead of raw text.")
+@click.option(
+    "--neighbors/--no-neighbors",
+    default=False,
+    help="Also print the parent/prev/next chunks (mirrors the MCP "
+    "get_chunk tool's include_neighbors option).",
+)
+@click.option(
+    "--show-context/--no-show-context",
+    default=False,
+    help="Print context_text (embedding-ready blob) instead of raw text.",
+)
 @_db_option
 def get_chunk_cmd(
     chunk_id: str,
@@ -1675,15 +1802,27 @@ def _warn_unusable_figures(unusable: list[Any], listed: bool) -> None:
 
 @inspect_group.command("figures", short_help="List figure chunks in the store.")
 @click.option("--doc-id", default=None, help="Restrict to a single document.")
-@click.option("--project-id", default=None,
-              help="Restrict to a project (default: scoped by .rag.toml if present).")
-@click.option("--global", "-g", "is_global", is_flag=True,
-              help="List figures across every project, ignoring any .rag.toml scoping.")
+@click.option(
+    "--project-id",
+    default=None,
+    help="Restrict to a project (default: scoped by .rag.toml if present).",
+)
+@click.option(
+    "--global",
+    "-g",
+    "is_global",
+    is_flag=True,
+    help="List figures across every project, ignoring any .rag.toml scoping.",
+)
 @_db_option
-@click.option("--missing-description-only", is_flag=True,
-              help="Only show figure chunks whose figure_description is empty.")
-@click.option("--include-unusable", is_flag=True,
-              help="Also list figure chunks whose image cannot be served.")
+@click.option(
+    "--missing-description-only",
+    is_flag=True,
+    help="Only show figure chunks whose figure_description is empty.",
+)
+@click.option(
+    "--include-unusable", is_flag=True, help="Also list figure chunks whose image cannot be served."
+)
 def list_figures_cmd(
     doc_id: str | None,
     project_id: str | None,
@@ -1705,9 +1844,7 @@ def list_figures_cmd(
     be = _backend_for(db_path)
     if doc_id:
         doc_id = _backend_resolve(be, doc_id)
-    figs = be.list_figure_chunks(
-        doc_id=doc_id, project_id=project_id, only_with_image=False
-    )
+    figs = be.list_figure_chunks(doc_id=doc_id, project_id=project_id, only_with_image=False)
     unusable = [c for c in figs if not c.figure_available]
     if not include_unusable:
         figs = [c for c in figs if c.figure_available]
@@ -1729,8 +1866,7 @@ def list_figures_cmd(
 
     for c in figs:
         pages = c.metadata.page_numbers
-        page = (str(pages[0]) if len(pages) == 1
-                else f"{pages[0]}-{pages[-1]}" if pages else "")
+        page = str(pages[0]) if len(pages) == 1 else f"{pages[0]}-{pages[-1]}" if pages else ""
         if c.figure_available:
             src = "local" if c.figure_image_path else "s3"
         else:
@@ -1749,10 +1885,16 @@ def list_figures_cmd(
 
 @get_group.command("fig", short_help="Fetch a figure chunk's image.")
 @click.argument("chunk_id", type=str)
-@click.option("--output", "-o", "output_path", type=click.Path(path_type=Path), default=None,
-              help="Where to save the image. Defaults to a name derived from the "
-                   "chunk_id in the current directory. If a directory, the default "
-                   "filename is placed inside it.")
+@click.option(
+    "--output",
+    "-o",
+    "output_path",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Where to save the image. Defaults to a name derived from the "
+    "chunk_id in the current directory. If a directory, the default "
+    "filename is placed inside it.",
+)
 @_db_option
 def get_figure_cmd(chunk_id: str, output_path: Path | None, db_path: Path | None) -> None:
     """Fetch a figure chunk's image and save it to disk.
@@ -1807,14 +1949,16 @@ def get_figure_cmd(chunk_id: str, output_path: Path | None, db_path: Path | None
 @repair_group.command("figures", short_help="Describe figures with a vision LLM.")
 @click.option("--doc-id", default=None, help="Restrict to a single document.")
 @click.option("--project-id", default=None, help="Restrict to a single project.")
-@click.option("--missing-only/--all", default=True,
-              help="Skip figures that already have a description.")
-@click.option("--limit", default=None, type=int,
-              help="Stop after this many figures (cost guard).")
-@click.option("--model", "model_id", default=None,
-              help="Override settings.description_model_id for this run.")
-@click.option("--dry-run", is_flag=True,
-              help="Generate descriptions and print them but do not persist.")
+@click.option(
+    "--missing-only/--all", default=True, help="Skip figures that already have a description."
+)
+@click.option("--limit", default=None, type=int, help="Stop after this many figures (cost guard).")
+@click.option(
+    "--model", "model_id", default=None, help="Override settings.description_model_id for this run."
+)
+@click.option(
+    "--dry-run", is_flag=True, help="Generate descriptions and print them but do not persist."
+)
 @_db_option
 @click.option("--verbose/--quiet", default=True, help="Print per-figure progress.")
 def describe_figures_cmd(
@@ -1878,7 +2022,9 @@ def describe_figures_cmd(
 # ---------------------------------------------------------------------------
 
 
-def _relink_plan(conn, doc_id: str) -> tuple[list[tuple[str, Path, str]], list[str]]:
+def _relink_plan(
+    conn: sqlite3.Connection, doc_id: str
+) -> tuple[list[tuple[str, Path, str]], list[str]]:
     """Match a document's cropped figures on disk to its figure chunks.
 
     Returns ``(plan, notes)``: ``plan`` is ``(chunk_id, image_path, caption)``
@@ -1914,7 +2060,7 @@ def _relink_plan(conn, doc_id: str) -> tuple[list[tuple[str, Path, str]], list[s
         return [], [f"no manifest at {manifest_path} — re-ingest the PDF to re-crop"]
 
     manifest = _json.loads(manifest_path.read_text())
-    by_page: dict[int, list[dict]] = {}
+    by_page: dict[int, list[dict[str, Any]]] = {}
     for fig in manifest.get("figures", []):
         # Formulas are their own element type and never become figure chunks.
         if "formula" in (fig.get("block_id") or ""):
@@ -1935,8 +2081,7 @@ def _relink_plan(conn, doc_id: str) -> tuple[list[tuple[str, Path, str]], list[s
 
     chunks_by_page: dict[int, list[Any]] = {}
     for row in conn.execute(
-        "SELECT * FROM chunks WHERE doc_id = ? AND layout_type = ? AND level = ? "
-        "ORDER BY rowid",
+        "SELECT * FROM chunks WHERE doc_id = ? AND layout_type = ? AND level = ? ORDER BY rowid",
         (doc_id, LayoutType.FIGURE.value, int(ChunkLevel.MICRO)),
     ).fetchall():
         pages = json.loads(row["page_numbers"] or "[]")
@@ -1973,8 +2118,9 @@ def _relink_plan(conn, doc_id: str) -> tuple[list[tuple[str, Path, str]], list[s
 
 @repair_group.command("figure-links", short_help="Reattach cropped images to figure chunks.")
 @click.option("--doc-id", default=None, help="Restrict to a single document.")
-@click.option("--apply", "do_apply", is_flag=True,
-              help="Write the links (default: report what would change).")
+@click.option(
+    "--apply", "do_apply", is_flag=True, help="Write the links (default: report what would change)."
+)
 @_db_option
 def relink_figures_cmd(doc_id: str | None, do_apply: bool, db_path: Path | None) -> None:
     """Reattach cropped figure images to figure chunks that lost their link.
@@ -2066,8 +2212,7 @@ def relink_figures_cmd(doc_id: str | None, do_apply: bool, db_path: Path | None)
 
 
 @repair_group.command("fts", short_help="Rebuild the keyword (BM25) search index.")
-@click.option("--check", is_flag=True,
-              help="Report coverage and exit without writing.")
+@click.option("--check", is_flag=True, help="Report coverage and exit without writing.")
 @_db_option
 def repair_fts_cmd(check: bool, db_path: Path | None) -> None:
     """Rebuild `chunk_fts`, the FTS5 index behind keyword and hybrid search.
@@ -2167,29 +2312,45 @@ def _print_cost_table(cost: CostEstimate, heading: str = "Estimated AWS cost") -
 @click.option("--mpn", default=None, help="Manufacturer part number, e.g. STM32H743VIT6.")
 @click.option("--manufacturer", default=None, help="Manufacturer name, e.g. STMicroelectronics.")
 @click.option("--subsystem", default=None, help="e.g. power, rf, mcu.")
-@click.option("--doc-type", default=None,
-              help="datasheet | reference-manual | errata | app-note | …")
-@click.option("--tag", "tags", multiple=True,
-              help="Free-text tag for this document, e.g. --tag mcu --tag "
-                   "reviewed (repeatable). Sets the sidecar's whole tag list "
-                   "for this ingest. Change it later without a re-ingest via "
-                   "`rag metadata <doc-id> --tag ...`; for arbitrary "
-                   "key=value tagging use `rag metadata <doc-id> --attr key=value` "
-                   "instead.")
-@click.option("--skip-figures", is_flag=True,
-              help="Skip figure extraction and description. Figures still "
-                   "become (caption-only) chunks that `show_figure` cannot "
-                   "serve — see `rag repair figure-links`.")
-@click.option("--upload-figures/--no-upload-figures", default=False,
-              help="Also upload extracted figures to S3. Figures live locally "
-                   "under ~/.rag/figures/, which is what MCP reads from; "
-                   "uploading is only useful for sharing a store across machines.")
-@click.option("--skip-describe", is_flag=True, help="Skip AI figure description (but still extract).")
-@click.option("--infer-title", is_flag=True,
-              help="If the document has no usable title after chunking, infer one "
-                   "with a small Bedrock Claude call against the first page "
-                   "(one extra LLM call; off by default — see `rag repair titles` "
-                   "to backfill existing documents).")
+@click.option(
+    "--doc-type", default=None, help="datasheet | reference-manual | errata | app-note | …"
+)
+@click.option(
+    "--tag",
+    "tags",
+    multiple=True,
+    help="Free-text tag for this document, e.g. --tag mcu --tag "
+    "reviewed (repeatable). Sets the sidecar's whole tag list "
+    "for this ingest. Change it later without a re-ingest via "
+    "`rag metadata <doc-id> --tag ...`; for arbitrary "
+    "key=value tagging use `rag metadata <doc-id> --attr key=value` "
+    "instead.",
+)
+@click.option(
+    "--skip-figures",
+    is_flag=True,
+    help="Skip figure extraction and description. Figures still "
+    "become (caption-only) chunks that `show_figure` cannot "
+    "serve — see `rag repair figure-links`.",
+)
+@click.option(
+    "--upload-figures/--no-upload-figures",
+    default=False,
+    help="Also upload extracted figures to S3. Figures live locally "
+    "under ~/.rag/figures/, which is what MCP reads from; "
+    "uploading is only useful for sharing a store across machines.",
+)
+@click.option(
+    "--skip-describe", is_flag=True, help="Skip AI figure description (but still extract)."
+)
+@click.option(
+    "--infer-title",
+    is_flag=True,
+    help="If the document has no usable title after chunking, infer one "
+    "with a small Bedrock Claude call against the first page "
+    "(one extra LLM call; off by default — see `rag repair titles` "
+    "to backfill existing documents).",
+)
 @click.option("--dpi", default=300, type=int, help="Render DPI for figure extraction.")
 @click.option("--micro-tokens", default=128, type=int, help="Max tokens per MICRO chunk.")
 @click.option("--meso-tokens", default=512, type=int, help="Max tokens per MESO chunk.")
@@ -2207,8 +2368,9 @@ def _print_cost_table(cost: CostEstimate, heading: str = "Estimated AWS cost") -
         "can be estimated, since the rest of the pipeline depends on its output."
     ),
 )
-@click.option("--force", is_flag=True,
-              help="Ignore cached blocks/chunks/rendered pages and redo all steps.")
+@click.option(
+    "--force", is_flag=True, help="Ignore cached blocks/chunks/rendered pages and redo all steps."
+)
 @click.option(
     "--local-parse",
     is_flag=True,
@@ -2288,13 +2450,28 @@ def ingest(
     skipped unless --force is given, and --show-cost prints a combined
     estimate across all of them in addition to each document's breakdown.
     """
-    common = dict(
-        project_id=project_id, group_name=group_name, mpn=mpn, manufacturer=manufacturer,
-        subsystem=subsystem, doc_type=doc_type, tags=tags, skip_figures=skip_figures,
-        upload_figures=upload_figures, skip_describe=skip_describe, infer_title=infer_title,
-        dpi=dpi, micro_tokens=micro_tokens, meso_tokens=meso_tokens, db_path=db_path,
-        dry_run=dry_run, show_cost=show_cost, force=force, local_parse=local_parse,
-        backend=backend, accurate_tables=accurate_tables,
+    common: dict[str, Any] = dict(
+        project_id=project_id,
+        group_name=group_name,
+        mpn=mpn,
+        manufacturer=manufacturer,
+        subsystem=subsystem,
+        doc_type=doc_type,
+        tags=tags,
+        skip_figures=skip_figures,
+        upload_figures=upload_figures,
+        skip_describe=skip_describe,
+        infer_title=infer_title,
+        dpi=dpi,
+        micro_tokens=micro_tokens,
+        meso_tokens=meso_tokens,
+        db_path=db_path,
+        dry_run=dry_run,
+        show_cost=show_cost,
+        force=force,
+        local_parse=local_parse,
+        backend=backend,
+        accurate_tables=accurate_tables,
     )
 
     if not pdf_path.is_dir():
@@ -2352,11 +2529,13 @@ def ingest(
             by_label.setdefault(item.label, []).append(item)
         merged = CostEstimate(notes=total_cost.notes)
         for label, line_items in by_label.items():
-            merged.items.append(CostLineItem(
-                label=label,
-                detail=f"summed across {len(line_items)} documents",
-                usd=sum(li.usd for li in line_items),
-            ))
+            merged.items.append(
+                CostLineItem(
+                    label=label,
+                    detail=f"summed across {len(line_items)} documents",
+                    usd=sum(li.usd for li in line_items),
+                )
+            )
         _print_cost_table(
             merged,
             heading=(
@@ -2413,6 +2592,7 @@ def _ingest_one(
         estimate_title_inference_cost,
     )
     from datasheet_rag.project_config import get_project_config_for
+
     proj_cfg = get_project_config_for(pdf_path.parent)
     if proj_cfg is not None:
         project_id = project_id or proj_cfg.project_id
@@ -2426,8 +2606,7 @@ def _ingest_one(
     if show_cost:
         dry_run = True
         console.print(
-            "[yellow]--show-cost: estimating AWS spend, skipping priced "
-            "Bedrock/Textract calls.[/]"
+            "[yellow]--show-cost: estimating AWS spend, skipping priced Bedrock/Textract calls.[/]"
         )
 
     settings = get_settings()
@@ -2447,7 +2626,7 @@ def _ingest_one(
     # for the streamed progress of a remote raw-PDF upload.
     step_state = {"n": 0}
 
-    def _progress(ev) -> None:
+    def _progress(ev: ProgressEvent) -> None:
         if ev.kind == "step":
             step_state["n"] = ev.step
             console.rule(f"[bold cyan]Step {ev.step} — {ev.text}[/]")
@@ -2579,7 +2758,7 @@ def _ingest_one(
     if db_path is not None:
         from datasheet_rag.backend import LocalBackend
 
-        backend_obj = LocalBackend(db_path)
+        backend_obj: RagBackend = LocalBackend(db_path)
     else:
         backend_obj = get_backend()
 
@@ -2659,16 +2838,20 @@ def _parse_page_range(spec: str) -> tuple[int, int]:
 @repair_group.command("reconvert", short_help="Re-run Docling table recognition (Docling only).")
 @click.argument("pdf_path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option(
-    "--pages", "pages_spec", required=True,
+    "--pages",
+    "pages_spec",
+    required=True,
     help="1-based inclusive page range to re-run, e.g. '36' or '36-40'.",
 )
 @click.option("--doc-id", default=None, help="Override the content-hash doc_id.")
 @click.option(
-    "--accurate-tables/--fast-tables", default=True,
+    "--accurate-tables/--fast-tables",
+    default=True,
     help="Table mode for the re-run (accurate is the point of this command).",
 )
 @click.option(
-    "--dry-run", is_flag=True,
+    "--dry-run",
+    is_flag=True,
     help="Show what would change without patching the cached outline or invalidating chunks.",
 )
 def reconvert_tables_cmd(
@@ -2766,9 +2949,9 @@ def reconvert_tables_cmd(
             f"and retry if that looks wrong)."
         )
 
-    matched = [e for e in report if e["matched"]]
-    fixed_garbled = [e for e in matched if e["old_garbled"] and not e["new_garbled"]]
-    still_garbled = [e for e in matched if e["new_garbled"]]
+    matched_entries = [e for e in report if e["matched"]]
+    fixed_garbled = [e for e in matched_entries if e["old_garbled"] and not e["new_garbled"]]
+    still_garbled = [e for e in matched_entries if e["new_garbled"]]
     if fixed_garbled:
         console.print(f"[green]{len(fixed_garbled)} garbled header(s) fixed by this re-run.[/]")
     if still_garbled:
@@ -2792,20 +2975,22 @@ def reconvert_tables_cmd(
 
     if chunks_path.exists():
         chunks_path.unlink()
-        console.print(
-            f"[green]Invalidated cached chunk graph[/] → removed [cyan]{chunks_path}[/]"
-        )
+        console.print(f"[green]Invalidated cached chunk graph[/] → removed [cyan]{chunks_path}[/]")
     _next_steps(did, rechunk=True)
 
 
 @inspect_group.command("tables", short_help="Report tables that parsed badly.")
 @click.argument("doc_id", type=str)
 @click.option(
-    "--list-flagged", is_flag=True,
+    "--list-flagged",
+    is_flag=True,
     help="Print every flagged table (page, caption, reason) instead of just the summary counts.",
 )
 @click.option(
-    "--sample", "sample_n", type=int, default=0,
+    "--sample",
+    "sample_n",
+    type=int,
+    default=0,
     help=(
         "Print the rendered text of N randomly-sampled flagged tables AND N "
         "randomly-sampled non-flagged tables, for manual eyeballing — a "
@@ -2859,7 +3044,7 @@ def table_structure_sweep_cmd(doc_id: str, list_flagged: bool, sample_n: int) ->
         console.print(f"[yellow]No cached tables found for doc_id={did}.[/]")
         return
 
-    flagged: list[dict[str, object]] = []
+    flagged: list[_FlaggedTable] = []
     # Parallel (element, reason | None) record — feeds --sample below without
     # re-running the detectors over the whole corpus a second time.
     judged: list[tuple[ContentElement, str | None]] = []
@@ -2879,7 +3064,7 @@ def table_structure_sweep_cmd(doc_id: str, list_flagged: bool, sample_n: int) ->
         elif fused is not None:
             reason = f"fused ({fused})"
         if reason is not None:
-            flagged.append({"page": el.page, "caption": el.table_title, "reason": reason})
+            flagged.append(_FlaggedTable(el.page, el.table_title, reason))
         judged.append((el, reason))
 
     total = len(tables)
@@ -2906,7 +3091,7 @@ def table_structure_sweep_cmd(doc_id: str, list_flagged: bool, sample_n: int) ->
         detail.add_column("Caption")
         detail.add_column("Reason")
         for entry in flagged:
-            detail.add_row(str(entry["page"]), (entry["caption"][:60] or "—"), entry["reason"])
+            detail.add_row(str(entry.page), entry.caption[:60] or "—", entry.reason)
         console.print(detail)
     elif flagged:
         console.print(
@@ -2949,11 +3134,14 @@ _MAX_HEADER_FRACTION = 0.3
 @repair_group.command("tables", short_help="LLM-repair tables flagged untrustworthy.")
 @click.argument("doc_id", type=str)
 @click.option(
-    "--limit", type=int, default=None,
+    "--limit",
+    type=int,
+    default=None,
     help="Repair at most N flagged tables (omit to repair all of them).",
 )
 @click.option(
-    "--model-id", default=None,
+    "--model-id",
+    default=None,
     help=(
         "Override the Bedrock model ID for this run. Defaults to "
         "table_repair_model_id, falling back to description_model_id "
@@ -2963,11 +3151,13 @@ _MAX_HEADER_FRACTION = 0.3
 )
 @click.option("--dpi", type=int, default=200, help="Render DPI for table crops.")
 @click.option(
-    "--force", is_flag=True,
+    "--force",
+    is_flag=True,
     help="Re-repair tables that already have a cached table_repaired_cells.",
 )
 @click.option(
-    "--dry-run", is_flag=True,
+    "--dry-run",
+    is_flag=True,
     help="List the tables that would be repaired without calling Bedrock or touching the cache.",
 )
 @click.option("-v", "--verbose", is_flag=True, help="Print rejection reasons as they happen.")
@@ -3174,9 +3364,7 @@ def repair_tables_cmd(
 
     if chunks_path.exists():
         chunks_path.unlink()
-        console.print(
-            f"[green]Invalidated cached chunk graph[/] → removed [cyan]{chunks_path}[/]"
-        )
+        console.print(f"[green]Invalidated cached chunk graph[/] → removed [cyan]{chunks_path}[/]")
     _next_steps(did, rechunk=True)
 
 
@@ -3187,38 +3375,69 @@ def repair_tables_cmd(
 
 @cli.command("metadata", short_help="Show or set doc-level metadata.")
 @click.argument("doc_id", type=str)
-@click.option("--title", "doc_title", default=None,
-              help="Override doc_title on every chunk row. Recorded as a manual "
-                   "title, so re-ingesting the document won't overwrite it.")
+@click.option(
+    "--title",
+    "doc_title",
+    default=None,
+    help="Override doc_title on every chunk row. Recorded as a manual "
+    "title, so re-ingesting the document won't overwrite it.",
+)
 @click.option("--project-id", default=None, help="Set the document's project ID.")
 @click.option("--group", "group_name", default=None, help="Set the document's group name.")
-@click.option("--mpn", default=None,
-              help="Manufacturer part number, e.g. STM32H743VIT6. Replaces the current value.")
-@click.option("--mpn-alias", "mpn_aliases", multiple=True,
-              help="Add an MPN alias without replacing existing ones (repeatable).")
-@click.option("--manufacturer", default=None,
-              help="Manufacturer name, e.g. STMicroelectronics. Replaces the current value.")
+@click.option(
+    "--mpn",
+    default=None,
+    help="Manufacturer part number, e.g. STM32H743VIT6. Replaces the current value.",
+)
+@click.option(
+    "--mpn-alias",
+    "mpn_aliases",
+    multiple=True,
+    help="Add an MPN alias without replacing existing ones (repeatable).",
+)
+@click.option(
+    "--manufacturer",
+    default=None,
+    help="Manufacturer name, e.g. STMicroelectronics. Replaces the current value.",
+)
 @click.option("--subsystem", default=None, help="e.g. power, rf, mcu.")
-@click.option("--doc-type", default=None,
-              help="datasheet | reference-manual | errata | app-note | …")
-@click.option("--tag", "tags", multiple=True,
-              help="Repeatable — e.g. --tag mcu --tag reviewed. REPLACES the "
-                   "document's whole tag list wholesale (not additive): the "
-                   "set of --tag flags you pass *becomes* the full list. "
-                   "Omit --tag to leave existing tags untouched; pass "
-                   "--clear-tags to wipe them without setting new ones.")
-@click.option("--clear-tags", is_flag=True,
-              help="Remove all tags. Ignored if --tag is also given.")
-@click.option("--attr", "attrs", multiple=True, metavar="KEY=VALUE",
-              help="Arbitrary key=value tag, repeatable, e.g. --attr "
-                   "revision=B --attr reviewed_by=hector. Unlike --tag, "
-                   "attributes are merged key-by-key: existing keys not "
-                   "mentioned are left alone. Use --unset-attr to remove one.")
-@click.option("--unset-attr", "unset_attrs", multiple=True, metavar="KEY",
-              help="Remove a single attribute key (repeatable).")
+@click.option(
+    "--doc-type", default=None, help="datasheet | reference-manual | errata | app-note | …"
+)
+@click.option(
+    "--tag",
+    "tags",
+    multiple=True,
+    help="Repeatable — e.g. --tag mcu --tag reviewed. REPLACES the "
+    "document's whole tag list wholesale (not additive): the "
+    "set of --tag flags you pass *becomes* the full list. "
+    "Omit --tag to leave existing tags untouched; pass "
+    "--clear-tags to wipe them without setting new ones.",
+)
+@click.option("--clear-tags", is_flag=True, help="Remove all tags. Ignored if --tag is also given.")
+@click.option(
+    "--attr",
+    "attrs",
+    multiple=True,
+    metavar="KEY=VALUE",
+    help="Arbitrary key=value tag, repeatable, e.g. --attr "
+    "revision=B --attr reviewed_by=hector. Unlike --tag, "
+    "attributes are merged key-by-key: existing keys not "
+    "mentioned are left alone. Use --unset-attr to remove one.",
+)
+@click.option(
+    "--unset-attr",
+    "unset_attrs",
+    multiple=True,
+    metavar="KEY",
+    help="Remove a single attribute key (repeatable).",
+)
 @_db_option
-@click.option("--apply-to-chunks/--no-apply-to-chunks", default=True,
-              help="Propagate project_id and group_name into the chunks table.")
+@click.option(
+    "--apply-to-chunks/--no-apply-to-chunks",
+    default=True,
+    help="Propagate project_id and group_name into the chunks table.",
+)
 def metadata_cmd(
     doc_id: str,
     doc_title: str | None,
@@ -3259,10 +3478,22 @@ def metadata_cmd(
     # Decide read-vs-write from what the user actually typed, before any
     # .rag.toml defaults get merged in below — otherwise a project config
     # would silently turn every `rag metadata <doc>` into a write.
-    is_read = not any((
-        doc_title, project_id, group_name, mpn, mpn_aliases, manufacturer,
-        subsystem, doc_type, tags, clear_tags, attrs, unset_attrs,
-    ))
+    is_read = not any(
+        (
+            doc_title,
+            project_id,
+            group_name,
+            mpn,
+            mpn_aliases,
+            manufacturer,
+            subsystem,
+            doc_type,
+            tags,
+            clear_tags,
+            attrs,
+            unset_attrs,
+        )
+    )
     if is_read:
         be = _backend_for(db_path)
         existing = be.get_metadata(be.resolve_doc_id(doc_id))
@@ -3286,9 +3517,7 @@ def metadata_cmd(
     for item in attrs:
         key, sep, value = item.partition("=")
         if not sep or not key:
-            raise click.BadParameter(
-                f"--attr expects KEY=VALUE, got {item!r}", param_hint="--attr"
-            )
+            raise click.BadParameter(f"--attr expects KEY=VALUE, got {item!r}", param_hint="--attr")
         attributes[key] = value
     for key in unset_attrs:
         attributes[key] = None
@@ -3326,8 +3555,11 @@ def metadata_cmd(
     meta = be.set_metadata(
         doc_id,
         MetadataPatch(
-            project_id=project_id, group_name=group_name,
-            mpn=mpn, manufacturer=manufacturer, subsystem=subsystem,
+            project_id=project_id,
+            group_name=group_name,
+            mpn=mpn,
+            manufacturer=manufacturer,
+            subsystem=subsystem,
             doc_type=doc_type,
             tags=new_tags,
             attributes=attributes or None,
@@ -3350,13 +3582,16 @@ _BLANK_TITLES = (None, "", "—")
 
 @repair_group.command("titles", short_help="Backfill missing document titles.")
 @click.option("--doc-id", default=None, help="Restrict to a single document.")
-@click.option("--force", is_flag=True,
-              help="Re-infer even for documents that already have a title "
-                   "(needed to replace generic titles like 'Contents').")
-@click.option("--model", "model_id", default=None,
-              help="Override settings.description_model_id for this run.")
-@click.option("--dry-run", is_flag=True,
-              help="Infer and print titles but do not persist them.")
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Re-infer even for documents that already have a title "
+    "(needed to replace generic titles like 'Contents').",
+)
+@click.option(
+    "--model", "model_id", default=None, help="Override settings.description_model_id for this run."
+)
+@click.option("--dry-run", is_flag=True, help="Infer and print titles but do not persist them.")
 @_db_option
 def fix_titles_cmd(
     doc_id: str | None,
@@ -3402,7 +3637,9 @@ def fix_titles_cmd(
         console.print("[yellow]No documents need a title fix.[/]")
         return
 
-    console.print(f"Inferring titles for {len(docs)} document(s) (LLM runs server-side in remote mode)…")
+    console.print(
+        f"Inferring titles for {len(docs)} document(s) (LLM runs server-side in remote mode)…"
+    )
 
     for d in docs:
         short_id = d.doc_id[:SHORT_DOC_ID_LEN]
@@ -3418,9 +3655,7 @@ def fix_titles_cmd(
                 f"({current!r}); pass --force to replace it"
             )
             continue
-        title = be.infer_title(
-            d.doc_id, model_id=model_id, dry_run=dry_run, force=force
-        )
+        title = be.infer_title(d.doc_id, model_id=model_id, dry_run=dry_run, force=force)
         if title is None:
             console.print(f"  [yellow]could not infer[/] {short_id} (was: {current!r})")
             continue
@@ -3471,7 +3706,7 @@ def _render_report_table(report: object) -> None:
     console.print(table)
 
 
-def _render_matrix_table(reports: list, headline_k: int) -> None:
+def _render_matrix_table(reports: list[RunReport], headline_k: int) -> None:
     """Print a comparison across configs: overall + per-category hit@k."""
     from datasheet_rag.eval.dataset import CATEGORIES
 
@@ -3507,8 +3742,14 @@ def _render_matrix_table(reports: list, headline_k: int) -> None:
 @click.option("--project-id", default=None, help="Restrict sampling to one project.")
 @click.option("--model", "model_id", default=None, help="Bedrock model ID for generation.")
 @click.option("--seed", default=0, type=int, help="Sampling seed (reproducible).")
-@click.option("--output", "-o", "out_path", type=click.Path(path_type=Path),
-              default=Path("eval/golden.jsonl"), help="Output JSONL path.")
+@click.option(
+    "--output",
+    "-o",
+    "out_path",
+    type=click.Path(path_type=Path),
+    default=Path("eval/golden.jsonl"),
+    help="Output JSONL path.",
+)
 @click.option("--append", is_flag=True, help="Append to the output file instead of overwriting.")
 @click.option("--verbose/--quiet", default=True, help="Print per-item progress.")
 def eval_generate(
@@ -3552,23 +3793,51 @@ def eval_generate(
 
 @eval_group.command("run", short_help="Score one search config against the set.")
 @_db_option
-@click.option("--set", "set_path", type=click.Path(exists=True, path_type=Path),
-              default=Path("eval/golden.jsonl"), help="Golden set JSONL.")
-@click.option("--mode", type=click.Choice(["hybrid", "vector", "keyword"]), default="hybrid",
-              help="Retrieval mode to score.")
+@click.option(
+    "--set",
+    "set_path",
+    type=click.Path(exists=True, path_type=Path),
+    default=Path("eval/golden.jsonl"),
+    help="Golden set JSONL.",
+)
+@click.option(
+    "--mode",
+    type=click.Choice(["hybrid", "vector", "keyword"]),
+    default="hybrid",
+    help="Retrieval mode to score.",
+)
 @click.option("-k", "top_k", default=5, type=int, help="Headline k (nDCG cutoff).")
-@click.option("--level", type=click.Choice(["macro", "meso", "micro"]), default=None,
-              help="Restrict retrieval to one zoom level (default: all three).")
-@click.option("--rrf-k", default=60, type=int,
-              help="Reciprocal-rank-fusion constant merging the two rankings.")
-@click.option("--vector-weight", default=1.0, type=float,
-              help="Weight on the vector ranking during fusion.")
-@click.option("--keyword-weight", default=1.0, type=float,
-              help="Weight on the keyword ranking during fusion.")
-@click.option("--trace", "trace_path", type=click.Path(path_type=Path), default=None,
-              help="Append per-query JSONL traces here.")
-@click.option("--json-out", type=click.Path(path_type=Path), default=None,
-              help="Write the full report JSON here.")
+@click.option(
+    "--level",
+    type=click.Choice(["macro", "meso", "micro"]),
+    default=None,
+    help="Restrict retrieval to one zoom level (default: all three).",
+)
+@click.option(
+    "--rrf-k",
+    default=60,
+    type=int,
+    help="Reciprocal-rank-fusion constant merging the two rankings.",
+)
+@click.option(
+    "--vector-weight", default=1.0, type=float, help="Weight on the vector ranking during fusion."
+)
+@click.option(
+    "--keyword-weight", default=1.0, type=float, help="Weight on the keyword ranking during fusion."
+)
+@click.option(
+    "--trace",
+    "trace_path",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Append per-query JSONL traces here.",
+)
+@click.option(
+    "--json-out",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Write the full report JSON here.",
+)
 def eval_run(
     db_path: Path | None,
     set_path: Path,
@@ -3615,24 +3884,50 @@ def eval_run(
 
 @eval_group.command("ablate", short_help="Run the ablation matrix.")
 @_db_option
-@click.option("--set", "set_path", type=click.Path(exists=True, path_type=Path),
-              default=Path("eval/golden.jsonl"), help="Golden set JSONL.")
+@click.option(
+    "--set",
+    "set_path",
+    type=click.Path(exists=True, path_type=Path),
+    default=Path("eval/golden.jsonl"),
+    help="Golden set JSONL.",
+)
 @click.option("-k", "top_k", default=5, type=int, help="Headline k for the comparison.")
-@click.option("--trace", "trace_path", type=click.Path(path_type=Path), default=None,
-              help="Append per-query JSONL traces here.")
-@click.option("--json-out", type=click.Path(path_type=Path), default=None,
-              help="Write the full report matrix here as JSON.")
-@click.option("--index-ablation",
-              type=click.Choice(["context-vs-raw", "figure-desc", "macro-summarizer"]),
-              default=None, help="Heavy re-embedding ablation (incurs Bedrock cost).")
-@click.option("--variant-db", type=click.Path(path_type=Path),
-              default=Path("test-project/output/rag-variant.sqlite"),
-              help="Where to build the variant store for an index ablation.")
+@click.option(
+    "--trace",
+    "trace_path",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Append per-query JSONL traces here.",
+)
+@click.option(
+    "--json-out",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Write the full report matrix here as JSON.",
+)
+@click.option(
+    "--index-ablation",
+    type=click.Choice(["context-vs-raw", "figure-desc", "macro-summarizer"]),
+    default=None,
+    help="Heavy re-embedding ablation (incurs Bedrock cost).",
+)
+@click.option(
+    "--variant-db",
+    type=click.Path(path_type=Path),
+    default=Path("test-project/output/rag-variant.sqlite"),
+    help="Where to build the variant store for an index ablation.",
+)
 @click.option("--limit", default=None, type=int, help="Cap chunks re-embedded (index ablation).")
-@click.option("--doc-id", default=None,
-              help="Document to re-summarize (required for --index-ablation macro-summarizer).")
-@click.option("--summarizer-model", default="anthropic.claude-3-haiku-20240307-v1:0",
-              help="Bedrock model id for the macro-summarizer ablation.")
+@click.option(
+    "--doc-id",
+    default=None,
+    help="Document to re-summarize (required for --index-ablation macro-summarizer).",
+)
+@click.option(
+    "--summarizer-model",
+    default="anthropic.claude-3-haiku-20240307-v1:0",
+    help="Bedrock model id for the macro-summarizer ablation.",
+)
 @click.option("--verbose/--quiet", default=True, help="Print per-config progress.")
 def eval_ablate(
     db_path: Path | None,
@@ -3665,8 +3960,11 @@ def eval_ablate(
 
     if index_ablation is None:
         reports = run_matrix(
-            conn, eval_set, default_matrix(base_k=top_k),
-            embedder=embedder, trace_path=trace_path,
+            conn,
+            eval_set,
+            default_matrix(base_k=top_k),
+            embedder=embedder,
+            trace_path=trace_path,
         )
         conn.close()
         _render_matrix_table(reports, headline_k=top_k)
@@ -3689,10 +3987,16 @@ def eval_ablate(
             f"and re-embedding — this calls Bedrock Claude per chapter."
         )
         summarizer = AbstractiveSummarizer(
-            model_id=summarizer_model, region=_get_settings().aws_region,
+            model_id=summarizer_model,
+            region=_get_settings().aws_region,
         )
         variant_conn = build_macro_summarizer_variant_store(
-            conn, variant_db, doc_id, summarizer, embedder, verbose=verbose,
+            conn,
+            variant_db,
+            doc_id,
+            summarizer,
+            embedder,
+            verbose=verbose,
         )
 
         # The variant store only contains doc_id's chunks (by design — see
@@ -3700,11 +4004,17 @@ def eval_ablate(
         # docs would score 0 by construction. Scope the eval set to match.
         scoped_set = EvalSet(items=[i for i in eval_set.items if i.doc_id == doc_id])
 
-        base_cfg = RunConfig(mode="hybrid", k=top_k, level="macro", label="baseline (extractive macro)")
-        var_cfg = RunConfig(mode="hybrid", k=top_k, level="macro", label="variant (abstractive macro)")
+        base_cfg = RunConfig(
+            mode="hybrid", k=top_k, level="macro", label="baseline (extractive macro)"
+        )
+        var_cfg = RunConfig(
+            mode="hybrid", k=top_k, level="macro", label="variant (abstractive macro)"
+        )
 
         base_report = run_eval(conn, scoped_set, base_cfg, embedder=embedder, trace_path=trace_path)
-        var_report = run_eval(variant_conn, scoped_set, var_cfg, embedder=embedder, trace_path=trace_path)
+        var_report = run_eval(
+            variant_conn, scoped_set, var_cfg, embedder=embedder, trace_path=trace_path
+        )
         conn.close()
         variant_conn.close()
 
@@ -3723,14 +4033,18 @@ def eval_ablate(
         return
 
     # Index ablation: baseline (current store) vs variant (re-embedded).
-    variant = "raw_text" if index_ablation == "context-vs-raw" else "no_figure_desc"
+    variant: IndexVariant = "raw_text" if index_ablation == "context-vs-raw" else "no_figure_desc"
     console.print(
         f"[yellow]Index ablation[/] '{index_ablation}': building variant store "
         f"(variant={variant}) — this re-embeds and incurs Bedrock cost."
     )
     variant_conn = build_variant_store(
-        conn, variant_db, variant, embedder,  # type: ignore[arg-type]
-        limit=limit, verbose=verbose,
+        conn,
+        variant_db,
+        variant,
+        embedder,
+        limit=limit,
+        verbose=verbose,
     )
 
     base_cfg = RunConfig(mode="hybrid", k=top_k, label="baseline (context_text)")
@@ -3748,7 +4062,7 @@ def eval_ablate(
         _dump_reports_json(reports, json_out)
 
 
-def _dump_reports_json(reports: list, path: Path) -> None:
+def _dump_reports_json(reports: list[RunReport], path: Path) -> None:
     import json as _json
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -3761,12 +4075,18 @@ def _dump_reports_json(reports: list, path: Path) -> None:
 
 @eval_group.command("review", short_help="Hand-review the golden set in a web app.")
 @_db_option
-@click.option("--set", "set_path", type=click.Path(exists=True, path_type=Path),
-              default=Path("eval/golden.jsonl"), help="Golden set JSONL to review.")
+@click.option(
+    "--set",
+    "set_path",
+    type=click.Path(exists=True, path_type=Path),
+    default=Path("eval/golden.jsonl"),
+    help="Golden set JSONL to review.",
+)
 @click.option("--port", default=0, type=int, help="Port (0 = pick a free one).")
 @click.option("-k", "top_k", default=5, type=int, help="Retrieval results to preview per item.")
-@click.option("--open/--no-open", "open_browser", default=True,
-              help="Open the review page in a browser.")
+@click.option(
+    "--open/--no-open", "open_browser", default=True, help="Open the review page in a browser."
+)
 def eval_review(
     db_path: Path | None,
     set_path: Path,
@@ -3785,7 +4105,7 @@ def eval_review(
 # ---------------------------------------------------------------------------
 
 
-def _admin_request(method: str, path: str, *, token: str | None, **kwargs):
+def _admin_request(method: str, path: str, *, token: str | None, **kwargs: Any) -> dict[str, Any]:
     """Call an admin endpoint on the configured remote server.
 
     Admin operates over HTTP against RAG_SERVER_URL (managing the *server's*
@@ -3806,8 +4126,11 @@ def _admin_request(method: str, path: str, *, token: str | None, **kwargs):
     headers = {"Authorization": f"Bearer {bearer}"} if bearer else {}
     try:
         resp = httpx.request(
-            method, base.rstrip("/") + path, headers=headers,
-            timeout=settings.server_timeout, **kwargs,
+            method,
+            base.rstrip("/") + path,
+            headers=headers,
+            timeout=settings.server_timeout,
+            **kwargs,
         )
     except httpx.HTTPError as exc:
         raise click.ClickException(f"could not reach {base}: {exc}") from exc
@@ -3819,7 +4142,8 @@ def _admin_request(method: str, path: str, *, token: str | None, **kwargs):
         raise click.ClickException(f"404: {resp.json().get('detail', resp.text)}")
     if resp.status_code >= 400:
         raise click.ClickException(f"{resp.status_code}: {resp.text}")
-    return resp.json()
+    body: dict[str, Any] = resp.json()
+    return body
 
 
 @cli.group(short_help="Administer a remote RAG server.")
@@ -3840,19 +4164,25 @@ def key() -> None:
 @key.command("create", short_help="Mint a key (token shown once).")
 @click.option("--label", required=True, help="Client identity for the key (shown in audit).")
 @click.option(
-    "--scope", "scopes", multiple=True,
-    type=click.Choice(["read", "ingest", "admin"]), default=("ingest",),
+    "--scope",
+    "scopes",
+    multiple=True,
+    type=click.Choice(["read", "ingest", "admin"]),
+    default=("ingest",),
     help="Scope(s) for the key (repeatable). Default: ingest.",
 )
 @click.option("--token", default=None, help="Admin token (default: RAG_SERVER_TOKEN).")
 def key_create(label: str, scopes: tuple[str, ...], token: str | None) -> None:
     """Mint a key. The plaintext token is shown ONCE — copy it now."""
     data = _admin_request(
-        "POST", "/admin/keys", token=token,
+        "POST",
+        "/admin/keys",
+        token=token,
         json={"label": label, "scopes": list(scopes)},
     )
-    console.print(f"[green]Created[/] key '{data['label']}' "
-                  f"(id={data['id']}, scopes={data['scopes']})")
+    console.print(
+        f"[green]Created[/] key '{data['label']}' (id={data['id']}, scopes={data['scopes']})"
+    )
     console.print("\n[bold]Token (shown once — store it now):[/]\n")
     console.print(f"  {data['token']}\n")
 
@@ -3871,7 +4201,9 @@ def key_list(token: str | None) -> None:
         table.add_column(col)
     for k in keys:
         table.add_row(
-            k["id"], k["label"], ",".join(k["scopes"]),
+            k["id"],
+            k["label"],
+            ",".join(k["scopes"]),
             k.get("created_at") or "—",
             "[red]revoked[/]" if k.get("revoked_at") else "—",
         )
@@ -3894,7 +4226,7 @@ def key_revoke(key_id: str, token: str | None) -> None:
 @click.option("--token", default=None, help="Admin token (default: RAG_SERVER_TOKEN).")
 def audit_cmd(doc_id: str | None, since: str | None, limit: int, token: str | None) -> None:
     """Show the ingest-path audit trail."""
-    params = {"limit": limit}
+    params: dict[str, Any] = {"limit": limit}
     if doc_id:
         params["doc_id"] = doc_id
     if since:
@@ -3909,8 +4241,11 @@ def audit_cmd(doc_id: str | None, since: str | None, limit: int, token: str | No
         table.add_column(col, overflow="fold")
     for e in entries:
         table.add_row(
-            (e.get("ts") or "")[:19], e.get("action") or "", e.get("status") or "",
-            e.get("key_label") or "—", e.get("client_ip") or "—",
+            (e.get("ts") or "")[:19],
+            e.get("action") or "",
+            e.get("status") or "",
+            e.get("key_label") or "—",
+            e.get("client_ip") or "—",
             (e.get("doc_id") or "—")[:12],
             e.get("detail_json") or (e.get("error") or "—"),
         )
