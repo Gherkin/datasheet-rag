@@ -16,7 +16,8 @@
 # is deliberately absent: multi-GB torch wheels, every import of it in src/ is
 # lazy and guarded, and pyproject's mypy overrides already account for it.
 #
-# The suite is fully mocked: no AWS credentials, no network, a few seconds.
+# The suite is fully mocked — no AWS credentials, no network, a few seconds —
+# but it is not free of *system* dependencies: see the poppler step below.
 #
 # Lint and type-check run once on the default Python; only the tests span the
 # matrix, since that is where a version difference actually shows up.
@@ -95,6 +96,15 @@ jobs:
           enable-cache: true
           cache-dependency-glob: uv.lock
           python-version: ${{ matrix.python-version }}
+
+      - name: Install poppler
+        # pdf2image is a wrapper around poppler's pdftoppm/pdfinfo *binaries*,
+        # not a self-contained wheel — `rag get page` and the figure renderer
+        # both go through it, and eight tests in tests/test_cli_get_page.py
+        # exercise that path for real. Same package the Dockerfile installs.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends poppler-utils
 
       - name: Install
         # --python repeats what setup-uv already pinned, so the interpreter

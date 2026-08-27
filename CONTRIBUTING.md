@@ -27,6 +27,22 @@ leaves it out.
 For what the extras mean in a *user* install rather than a dev one, see the
 [README](README.md#installation).
 
+### One system dependency
+
+`pdf2image` wraps poppler's `pdftoppm` and `pdfinfo` *binaries* rather than
+bundling them, so page rendering needs poppler on your `PATH`. Without it,
+eight tests in `tests/test_cli_get_page.py` fail with `Unable to get page
+count. Is poppler installed and in PATH?`.
+
+```bash
+sudo apt-get install poppler-utils   # Debian/Ubuntu
+sudo pacman -S poppler               # Arch
+brew install poppler                 # macOS
+```
+
+It is the same package the Dockerfile installs, and CI installs it too — so if
+you add a test that renders a page, it will be exercised there.
+
 The tree also carries a `.git-blame-ignore-revs` for whole-tree mechanical
 rewrites. Enable it once per clone so `git blame` skips them:
 
