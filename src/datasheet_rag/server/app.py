@@ -285,7 +285,6 @@ def build_app() -> FastAPI:
     async def document_put_pdf(
         doc_id: str,
         payload: UploadFile = File(...),
-        be: LocalBackend = Depends(get_backend),
     ) -> dict[str, Any]:
         """Store a source PDF for a document ingested elsewhere (GH #43).
 
@@ -293,6 +292,9 @@ def build_app() -> FastAPI:
         PDF never passes through ``/ingest-pdf``. Without this the store would
         hold chunks whose source document nothing else on the network can
         fetch, and ``rag show`` / ``show_pdf`` would 404 for every other user.
+
+        Takes no backend: the PDF store is a directory, not a table. The scope
+        dependency has already opened the database to check the caller's key.
         """
         from datasheet_rag.storage import save_pdf_bytes
 
