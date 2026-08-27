@@ -2,13 +2,26 @@
 
 Every method maps to one request. Models round-trip as JSON via pydantic
 ``model_dump(mode="json")`` / ``model_validate``; figure and PDF bytes ride
-base64 (figures) or raw streaming (PDF). The server embeds query text, so
-this client never loads an embedding model.
+base64 (figures) or raw streaming (PDF).
+
+Where the *models* run is a setting (``RAG_COMPUTE``, GH #43):
+
+* ``server`` (default) — the client ships text, images and PDFs and the
+  server embeds, describes and titles. A thin client needs no torch.
+* ``client`` — this process runs every model and the server is only a
+  vector store: query vectors, chunk vectors, figure descriptions and
+  inferred titles all arrive precomputed. That is the setup for a GPU-less
+  server host with a GPU workstation in front of it.
+
+The branch lives here rather than in the CLI so both the CLI and the MCP
+server inherit it without knowing about it, and ``RagBackend`` stays a
+"what", not a "where".
 """
 
 from __future__ import annotations
 
 import json
+import sys
 from typing import TYPE_CHECKING, Any
 
 from datasheet_rag.backend.base import (
@@ -20,17 +33,19 @@ from datasheet_rag.backend.base import (
     SearchMode,
 )
 from datasheet_rag.backend.models import (
+    ChunkVectors,
     DocSummary,
     FigureBytes,
     IngestedDoc,
     IngestResult,
     MetadataPatch,
     StatsResult,
+    TitleContext,
 )
 from datasheet_rag.models.chunk import Chunk, ChunkGraph
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Mapping, Sequence
     from pathlib import Path
 
     import httpx
@@ -48,6 +63,7 @@ class RemoteBackend(RagBackend):
         *,
         token: str | None = None,
         timeout: float = 120.0,
+        compute: str = "server",
     ):
         import httpx
 
@@ -55,9 +71,93 @@ class RemoteBackend(RagBackend):
         if token:
             headers["Authorization"] = f"Bearer {token}"
         self._client = httpx.Client(base_url=base_url.rstrip("/"), timeout=timeout, headers=headers)
+        self._compute = compute
+        self._embedder: Any | None = None
+        self._embedding_checked = False
 
     def close(self) -> None:
         self._client.close()
+
+    # -- client-side compute -------------------------------------------
+    @property
+    def client_compute(self) -> bool:
+        """True when this process runs the models instead of the server."""
+        return self._compute == "client"
+
+    def _get_embedder(self) -> Any:
+        """Build (once) the in-process embedder, after checking it fits the store.
+
+        The check is the important half. Vectors from two different embedding
+        models are not comparable, so a client embedding with the wrong one
+        does not fail — it quietly writes rows that never match, and quietly
+        searches with a query the index cannot answer. ``/health`` reports what
+        the store expects, and a mismatch stops the run here.
+        """
+        if self._embedder is None:
+            self._assert_embedding_compatible()
+            from datasheet_rag.embedding import get_embedder
+
+            self._embedder = get_embedder()
+        return self._embedder
+
+    def _has_usable_title(self, graph: ChunkGraph) -> bool:
+        """Whether this document already has a title worth keeping.
+
+        Checks the graph the parser just produced, then the store — a
+        re-ingest can carry no title while the stored document has a curated
+        one, and inferring over that would be a call thrown away.
+        """
+        blank = (None, "", "—")
+        if any(c.metadata.doc_title not in blank for c in graph.chunks.values()):
+            return True
+        try:
+            return self.get_doc_titles().get(graph.doc_id) not in blank
+        except RagServerError:
+            return False
+
+    def _assert_embedding_compatible(self) -> None:
+        from datasheet_rag.config import get_settings
+
+        if self._embedding_checked:
+            return
+        try:
+            health = self._json("GET", "/health")
+        except RagServerError:
+            # Health is unauthenticated and cheap; if it cannot be reached the
+            # real call is about to fail with a better message anyway. Counts
+            # as checked: there is nothing more to learn by asking again.
+            self._embedding_checked = True
+            return
+        settings = get_settings()
+        # Note the flag is set only once the check *passes* — a mismatch has to
+        # keep raising, not pass silently on the second call in the process.
+        remote_dims = health.get("embedding_dimensions")
+        if remote_dims is not None and int(remote_dims) != settings.embedding_dimensions:
+            raise RagServerError(
+                0,
+                f"RAG_COMPUTE=client, but this machine embeds to "
+                f"{settings.embedding_dimensions} dimensions and the server's store "
+                f"holds {remote_dims}-dimensional vectors. Set "
+                f"RAG_EMBEDDING_DIMENSIONS (and the matching model) to the "
+                f"server's, or set RAG_COMPUTE=server to let it embed.",
+            )
+        remote_model = health.get("embedding_model")
+        local_model = (
+            settings.local_embedding_model
+            if settings.embedding_backend == "local"
+            else settings.embedding_model_id
+        )
+        if remote_model and remote_model != local_model:
+            # Same width, different model: still incomparable, but we cannot
+            # prove the ids mean different weights (an Ollama tag vs an HF repo
+            # id for the same model, say), so warn rather than refuse.
+            print(
+                f"rag: warning — RAG_COMPUTE=client embeds with {local_model!r} but "
+                f"the server's store was built with {remote_model!r}. Vectors from "
+                f"different models do not match; searches may return nothing useful.",
+                file=sys.stderr,
+            )
+        self._embedding_checked = True
 
     # -- helpers -------------------------------------------------------
     def _request(self, method: str, path: str, **kw: Any) -> httpx.Response:
@@ -94,12 +194,18 @@ class RemoteBackend(RagBackend):
         mode: SearchMode = "hybrid",
         k: int = 10,
         filters: SearchFilters | None = None,
+        query_vector: Sequence[float] | None = None,
     ) -> list[SearchResult]:
+        # Keyword search needs no vector at all; the other two modes get one
+        # from here rather than from the server when compute is client-side.
+        if query_vector is None and self.client_compute and mode != "keyword":
+            query_vector = self._get_embedder().embed_one(query)
         body = {
             "query": query,
             "mode": mode,
             "k": k,
             "filters": filters.model_dump(mode="json") if filters else None,
+            "query_vector": list(query_vector) if query_vector is not None else None,
         }
         data = self._json("POST", "/search", json=body)
         return [SearchResult.model_validate(r) for r in data["results"]]
@@ -146,8 +252,14 @@ class RemoteBackend(RagBackend):
         titles: dict[str, str] = self._json("GET", "/documents/titles")["titles"]
         return titles
 
-    def set_doc_title(self, doc_id: str, title: str) -> int:
-        data = self._json("PUT", f"/documents/{doc_id}/title", json={"title": title})
+    def set_doc_title(
+        self, doc_id: str, title: str, *, source: str = "manual", force: bool = False
+    ) -> int:
+        data = self._json(
+            "PUT",
+            f"/documents/{doc_id}/title",
+            json={"title": title, "source": source, "force": force},
+        )
         return int(data["updated"])
 
     def resolve_doc_id(self, doc_id: str) -> str:
@@ -230,6 +342,25 @@ class RemoteBackend(RagBackend):
         model_id: str | None = None,
         dry_run: bool = False,
     ) -> tuple[dict[str, str], dict[str, int]]:
+        if self.client_compute:
+            # Run the vision model here, reading each figure's pixels and
+            # neighbour text off the server one request at a time (GH #43).
+            from datasheet_rag.description import (
+                FigureDescriber,
+                describe_figures_via_backend,
+            )
+
+            describer = FigureDescriber(model_id=model_id, verbose=False)
+            descriptions = describe_figures_via_backend(
+                self,
+                doc_id=doc_id,
+                project_id=project_id,
+                missing_only=missing_only,
+                limit=limit,
+                describer=describer,
+                dry_run=dry_run,
+            )
+            return descriptions, describer.stats()
         data = self._json(
             "POST",
             "/figures/describe",
@@ -252,6 +383,16 @@ class RemoteBackend(RagBackend):
         dry_run: bool = False,
         force: bool = False,
     ) -> str | None:
+        if self.client_compute:
+            from datasheet_rag.titling import TitleInferer, infer_title_via_backend
+
+            return infer_title_via_backend(
+                self,
+                doc_id,
+                inferer=TitleInferer(model_id=model_id),
+                dry_run=dry_run,
+                force=force,
+            )
         data = self._json(
             "POST",
             f"/documents/{doc_id}/infer-title",
@@ -259,6 +400,9 @@ class RemoteBackend(RagBackend):
         )
         title: str | None = data["title"]
         return title
+
+    def get_title_context(self, doc_id: str) -> TitleContext:
+        return TitleContext.model_validate(self._json("GET", f"/documents/{doc_id}/title-context"))
 
     # -- source PDF ----------------------------------------------------
     def get_pdf_bytes(self, doc_id: str) -> bytes:
@@ -277,7 +421,35 @@ class RemoteBackend(RagBackend):
         describe_figures: bool = False,
         infer_title: bool = False,
         title_hints: dict[str, str] | None = None,
+        vectors: Mapping[str, Sequence[float]] | None = None,
+        inferred_title: str | None = None,
     ) -> IngestResult:
+        described_here = 0
+        if self.client_compute:
+            # Run every model here, in the order the text depends on: a figure
+            # description becomes part of the chunk's context_text, so it has
+            # to land before the embedding is taken (GH #43).
+            if describe_figures:
+                from datasheet_rag.description import describe_figures_in_graph
+
+                described_here = len(describe_figures_in_graph(graph))
+                describe_figures = False
+            if infer_title and inferred_title is None:
+                from datasheet_rag.titling import infer_title_from_graph
+
+                # Match the server's own guard before spending the call: it
+                # only infers for a document that has no usable title, and the
+                # answer would be discarded on arrival otherwise.
+                if not self._has_usable_title(graph):
+                    inferred_title = infer_title_from_graph(graph, title_hints=title_hints)
+                infer_title = False
+            if embed and vectors is None:
+                from datasheet_rag.embedding import embed_chunk_graph
+
+                vectors = embed_chunk_graph(graph, embedder=self._get_embedder())
+            if vectors is not None:
+                embed = False
+
         payload = {
             "graph": graph.model_dump(mode="json", exclude=_chunk_excludes(graph)),
             "project_id": project_id,
@@ -287,6 +459,14 @@ class RemoteBackend(RagBackend):
             "describe_figures": describe_figures,
             "infer_title": infer_title,
             "title_hints": title_hints,
+            "inferred_title": inferred_title,
+            # Packed as base64 float32 rather than JSON numbers: a datasheet's
+            # vectors are tens of megabytes spelled out in decimal.
+            "vectors": (
+                ChunkVectors.from_mapping(vectors).model_dump(mode="json")
+                if vectors is not None
+                else None
+            ),
         }
         files: list[tuple[str, tuple[str, bytes, str]]] = [
             ("payload", ("payload.json", json.dumps(payload).encode(), "application/json"))
@@ -295,7 +475,12 @@ class RemoteBackend(RagBackend):
             ext = (ext or "png").lstrip(".")
             files.append(("figures", (f"{chunk_id}.{ext}", img_bytes, f"image/{ext}")))
         data = self._json("POST", "/ingest", files=files)
-        return IngestResult.model_validate(data)
+        result = IngestResult.model_validate(data)
+        if described_here:
+            # The server described nothing — it only stored what arrived — so
+            # report what this process actually did.
+            result.described = described_here
+        return result
 
     def ingest_pdf(
         self,
@@ -329,6 +514,42 @@ class RemoteBackend(RagBackend):
         from datasheet_rag.ingest_pipeline import ProgressEvent
 
         pdf_path = Path(pdf_path)
+
+        if self.client_compute:
+            # Nothing about this document should touch the server's CPU: parse
+            # here, describe/title/embed here, and upload the finished graph
+            # plus its crops (GH #43).
+            from datasheet_rag.ingest_pipeline import (
+                collect_figure_uploads,
+                parse_pdf_to_graph,
+            )
+
+            parsed = parse_pdf_to_graph(
+                pdf_path,
+                doc_id=doc_id,
+                backend=backend,
+                skip_figures=skip_figures,
+                upload_figures=upload_figures,
+                dpi=dpi,
+                micro_tokens=micro_tokens,
+                meso_tokens=meso_tokens,
+                accurate_tables=accurate_tables,
+                force=force,
+                progress=progress,
+            )
+            uploads, _missing = ({}, []) if skip_figures else collect_figure_uploads(parsed.graph)
+            return self.ingest_chunk_graph(
+                parsed.graph,
+                figures=uploads or None,
+                project_id=project_id,
+                group_name=group_name,
+                metadata=metadata,
+                embed=True,
+                describe_figures=not skip_figures and not skip_describe,
+                infer_title=infer_title,
+                title_hints=parsed.title_hints or None,
+            )
+
         options = {
             "doc_id": doc_id,
             "project_id": project_id,

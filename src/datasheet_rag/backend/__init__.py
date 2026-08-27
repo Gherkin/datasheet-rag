@@ -22,16 +22,19 @@ from datasheet_rag.backend.base import (
 )
 from datasheet_rag.backend.local import LocalBackend
 from datasheet_rag.backend.models import (
+    ChunkVectors,
     DocSummary,
     FigureBytes,
     IngestedDoc,
     IngestResult,
     MetadataPatch,
     StatsResult,
+    TitleContext,
 )
 from datasheet_rag.config import get_settings
 
 __all__ = [
+    "ChunkVectors",
     "DocSummary",
     "FigureBytes",
     "FigureUnavailableError",
@@ -43,16 +46,32 @@ __all__ = [
     "RagServerError",
     "RemoteIngestError",
     "StatsResult",
+    "TitleContext",
     "backend_mode",
+    "compute_mode",
+    "emit_client_compute_notice",
     "get_backend",
 ]
 
 _notice_emitted = False
+_compute_notice_emitted = False
 
 
 def backend_mode() -> str:
     """Return 'remote' when a server URL is configured, else 'local'."""
     return "remote" if get_settings().server_url else "local"
+
+
+def compute_mode() -> str:
+    """Return 'client' when this process runs the models itself, else 'server'.
+
+    Always 'client' in local mode — there is no server to hand work to. In
+    remote mode it follows ``RAG_COMPUTE`` (GH #43).
+    """
+    settings = get_settings()
+    if not settings.server_url:
+        return "client"
+    return settings.compute
 
 
 def emit_local_notice(*, force: bool = False) -> None:
@@ -75,6 +94,24 @@ def emit_local_notice(*, force: bool = False) -> None:
     )
 
 
+def emit_client_compute_notice() -> None:
+    """Print a one-line reminder that the models are running here, not on the server.
+
+    Remote mode normally means "the server does the heavy lifting", so the
+    inverse is worth stating once per process — it explains both the startup
+    latency and the GPU load (GH #43).
+    """
+    global _compute_notice_emitted
+    if _compute_notice_emitted or compute_mode() != "client" or backend_mode() != "remote":
+        return
+    _compute_notice_emitted = True
+    print(
+        "rag: RAG_COMPUTE=client — parsing, embeddings, figure descriptions and "
+        "titles run on this machine; the server only stores the results.",
+        file=sys.stderr,
+    )
+
+
 @lru_cache(maxsize=1)
 def get_backend() -> RagBackend:
     """Return the configured backend (cached for the process)."""
@@ -86,6 +123,7 @@ def get_backend() -> RagBackend:
             settings.server_url,
             token=settings.server_token,
             timeout=settings.server_timeout,
+            compute=settings.compute,
         )
     emit_local_notice()
     return LocalBackend()

@@ -30,6 +30,7 @@ from pydantic import BaseModel
 from datasheet_rag.backend.base import FigureUnavailableError, RagServerError
 from datasheet_rag.backend.local import LocalBackend
 from datasheet_rag.backend.models import (
+    ChunkVectors,
     MetadataPatch,
 )
 from datasheet_rag.config import get_settings
@@ -48,6 +49,7 @@ from datasheet_rag.store import (
     list_api_keys,
     list_audit,
     revoke_api_key,
+    stored_embedding_dim,
 )
 
 if TYPE_CHECKING:
@@ -86,10 +88,15 @@ class SearchRequest(BaseModel):
     mode: str = "hybrid"
     k: int = 10
     filters: SearchFilters | None = None
+    # Set by a client that embeds its own queries (RAG_COMPUTE=client, GH #43).
+    # The text is still sent — hybrid keyword matching needs it.
+    query_vector: list[float] | None = None
 
 
 class TitleBody(BaseModel):
     title: str
+    source: str = "manual"
+    force: bool = False
 
 
 class FigureDescriptionBody(BaseModel):
@@ -187,20 +194,37 @@ def build_app() -> FastAPI:
 
     # -- health (unauthenticated) ----------------------------------------
     @app.get("/health")
-    def health() -> dict[str, Any]:
+    def health(be: LocalBackend = Depends(get_backend)) -> dict[str, Any]:
         # Unauthenticated — keep the body minimal (no filesystem paths or
         # other internal detail that could aid an attacker).
         s = get_settings()
+        # The store's own width, not this process's config: that is what a
+        # client-supplied vector actually has to match (GH #43). Falls back to
+        # the setting for a database too old to record one.
+        dims = stored_embedding_dim(be.conn) or s.embedding_dimensions
         return {
             "status": "ok",
             "embedding_backend": s.embedding_backend,
-            "embedding_dimensions": s.embedding_dimensions,
+            "embedding_dimensions": dims,
+            # Model identity, so a client that embeds its own vectors can check
+            # they will be comparable with the store's (GH #43). Not a secret:
+            # it is a public model name, and a client cannot use the store
+            # correctly without it.
+            "embedding_model": (
+                s.local_embedding_model if s.embedding_backend == "local" else s.embedding_model_id
+            ),
         }
 
     # -- search ----------------------------------------------------------
     @app.post("/search", dependencies=dep)
     def search(req: SearchRequest, be: LocalBackend = Depends(get_backend)) -> dict[str, Any]:
-        results = be.search(req.query, mode=req.mode, k=req.k, filters=req.filters)  # type: ignore[arg-type]
+        results = be.search(
+            req.query,
+            mode=req.mode,  # type: ignore[arg-type]
+            k=req.k,
+            filters=req.filters,
+            query_vector=req.query_vector,
+        )
         return {"results": [_result_json(r) for r in results]}
 
     # -- chunks ----------------------------------------------------------
@@ -264,7 +288,9 @@ def build_app() -> FastAPI:
     def document_set_title(
         doc_id: str, body: TitleBody, be: LocalBackend = Depends(get_backend)
     ) -> dict[str, Any]:
-        return {"updated": be.set_doc_title(doc_id, body.title)}
+        return {
+            "updated": be.set_doc_title(doc_id, body.title, source=body.source, force=body.force)
+        }
 
     @app.post("/documents/{doc_id}/apply-metadata", dependencies=ingest_dep)
     def document_apply_metadata(
@@ -399,6 +425,13 @@ def build_app() -> FastAPI:
         )
         return {"descriptions": descriptions, "stats": stats}
 
+    @app.get("/documents/{doc_id}/title-context", dependencies=dep)
+    def document_title_context(
+        doc_id: str, be: LocalBackend = Depends(get_backend)
+    ) -> dict[str, Any]:
+        """The store-side half of a title inference, for a client that runs the LLM."""
+        return be.get_title_context(doc_id).model_dump(mode="json")
+
     @app.post("/documents/{doc_id}/infer-title", dependencies=ingest_dep)
     def document_infer_title(
         doc_id: str,
@@ -449,6 +482,13 @@ def build_app() -> FastAPI:
             chunk_id, _, ext = name.rpartition(".")
             fig_uploads[chunk_id] = (await f.read(), ext or "png")
         metadata = MetadataPatch.model_validate(data["metadata"]) if data.get("metadata") else None
+        # A client that embedded for itself sends the vectors along (GH #43);
+        # unpacking them here is what keeps this server off an embedding model.
+        vectors = (
+            ChunkVectors.model_validate(data["vectors"]).to_mapping()
+            if data.get("vectors")
+            else None
+        )
         try:
             result = be.ingest_chunk_graph(
                 graph,
@@ -460,6 +500,8 @@ def build_app() -> FastAPI:
                 describe_figures=data.get("describe_figures", False),
                 infer_title=data.get("infer_title", False),
                 title_hints=data.get("title_hints"),
+                vectors=vectors,
+                inferred_title=data.get("inferred_title"),
             )
         except Exception as exc:
             audit(
@@ -483,6 +525,7 @@ def build_app() -> FastAPI:
                 "pruned": result.pruned,
                 "described": result.described,
                 "embed": data.get("embed", True),
+                "client_vectors": len(vectors) if vectors else 0,
                 "figures": len(fig_uploads),
             },
         )

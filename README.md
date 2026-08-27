@@ -129,6 +129,57 @@ docker run -d --name rag-server -p 8080:8080 --gpus all \
 The first start downloads bge-m3 (~2GB) into the volume. It is cached there, so
 only the first run pays for it.
 
+#### Where the models run: `RAG_COMPUTE`
+
+By default the server does all the work — parsing, embeddings, figure
+descriptions, title inference — and a client needs nothing but the base
+install. That is the right split when the server is the machine with the GPU.
+
+If it isn't, invert it. Set `RAG_COMPUTE=client` **on the client** and the
+server becomes purely a vector store: your workstation parses the PDF, embeds
+the chunks, describes the figures and infers the title, then uploads the
+finished graph plus its vectors. The server never loads a model, so it runs
+happily on a NAS or a small VPS — the `:cpu` image with no Bedrock credentials
+is enough.
+
+```bash
+# On the client (the machine with the GPU):
+export RAG_SERVER_URL=http://rag.internal:8080
+export RAG_COMPUTE=client
+export RAG_EMBEDDING_BACKEND=local     # this machine now needs the model config
+export RAG_LOCAL_EMBEDDING_MODEL=BAAI/bge-m3
+export RAG_EMBEDDING_DIMENSIONS=1024
+```
+
+The client needs the extras for whatever it now runs — `docling` to parse,
+`local-hf` for local models, `aws` for Bedrock:
+
+```bash
+pip install "datasheet-rag[docling,local-hf] @ git+https://github.com/Gherkin/datasheet-rag.git"
+```
+
+It applies to every command that would otherwise reach a model, not just
+ingest: `rag search` embeds the query locally, `rag repair figures` runs the
+vision model locally against figures it pulls from the server, and `rag repair
+titles` does the same for the text model. The MCP server inherits it too.
+Override it for one command with `rag --compute client|server ...`.
+
+**Both ends must agree on the embedding model.** Vectors from two different
+models are not comparable, so a client that embeds with the wrong one writes
+rows that never match. The client checks the server's `/health` before its
+first embedding and refuses outright on a dimension mismatch (warning, but
+continuing, if only the model *name* differs). `RAG_COMPUTE` has no effect in
+local mode, where everything already runs locally.
+
+| | `RAG_COMPUTE=server` (default) | `RAG_COMPUTE=client` |
+| --- | --- | --- |
+| PDF parse (Docling/Textract) | server | client |
+| Chunk + query embeddings | server | client |
+| Figure descriptions (vision) | server | client |
+| Title inference (text) | server | client |
+| Database, PDFs, figure crops | server | server |
+| Client needs models installed | no | yes |
+
 #### Auth
 
 Reads are open until you set a read token or create an API key. To lock the
@@ -141,7 +192,7 @@ docker run --rm -v rag-data:/data ghcr.io/gherkin/datasheet-rag:cpu \
   create-key --label bootstrap --scope admin
 ```
 
-Clients then point at it with `export RAG_SERVER_URL=http://<host>:8080`.
+Clients then point at it with `export RAG_SERVER_URL=http://<host>:8080` — and, if the server has no GPU, `export RAG_COMPUTE=client` (see above).
 
 #### Bind mounts
 

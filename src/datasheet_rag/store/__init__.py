@@ -39,6 +39,7 @@ from datasheet_rag.store.schema import (
     fts_status,
     init_schema,
     rebuild_fts,
+    stored_embedding_dim,
 )
 from datasheet_rag.store.search import (
     SearchFilters,
@@ -90,6 +91,7 @@ __all__ = [
     "fts_status",
     "init_schema",
     "rebuild_fts",
+    "stored_embedding_dim",
     "InsertStats",
     "insert_chunk_graph",
     "insert_chunks",

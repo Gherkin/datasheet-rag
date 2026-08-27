@@ -10,6 +10,7 @@ that don't have a home yet (figure bytes, stats rollups, ingest payloads).
 from __future__ import annotations
 
 import base64
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -78,6 +79,10 @@ class FigureBytes(BaseModel):
     caption: str = ""
     description: str = ""
     citation: FigureCitation
+    # Neighbouring chunk text, shipped alongside the pixels so a client that
+    # runs the vision model itself (RAG_COMPUTE=client) gets the whole prompt
+    # in one round trip. Empty from a server too old to send it.
+    surrounding_text: str = ""
 
     @classmethod
     def from_bytes(
@@ -91,6 +96,7 @@ class FigureBytes(BaseModel):
         caption: str,
         description: str,
         citation: FigureCitation,
+        surrounding_text: str = "",
     ) -> FigureBytes:
         return cls(
             chunk_id=chunk_id,
@@ -101,6 +107,7 @@ class FigureBytes(BaseModel):
             caption=caption,
             description=description,
             citation=citation,
+            surrounding_text=surrounding_text,
         )
 
     def image_bytes(self) -> bytes:
@@ -141,3 +148,61 @@ class IngestResult(BaseModel):
     pruned: int = 0
     described: int = 0
     title: str | None = None
+
+
+class TitleContext(BaseModel):
+    """Everything a title inference needs from the store, minus the model call.
+
+    Split out so the LLM can run on a client while the store stays remote
+    (``RAG_COMPUTE=client``, GH #43): reading page-1 text and the provenance is
+    cheap SQL that belongs wherever the database is, and only the inference
+    itself is worth moving.
+    """
+
+    doc_id: str
+    first_page_text: str = ""
+    attributes: dict[str, Any] = Field(default_factory=dict)
+    title_source: str = ""
+
+
+class ChunkVectors(BaseModel):
+    """Embedding vectors for a chunk graph, in the store's own wire format.
+
+    Vectors are float32 in sqlite, and a datasheet's worth of them is tens of
+    megabytes as JSON numbers. Packing them as one base64 float32 buffer keeps
+    a client-side embed (``RAG_COMPUTE=client``) roughly a quarter of that
+    size, and lands them in exactly the layout ``vec0`` expects.
+    """
+
+    dim: int
+    ids: list[str]
+    data: str  # base64 of len(ids) * dim little-endian float32 values
+
+    @classmethod
+    def from_mapping(cls, vectors: Mapping[str, Sequence[float]]) -> ChunkVectors:
+        import numpy as np
+
+        ids = list(vectors)
+        if not ids:
+            return cls(dim=0, ids=[], data="")
+        matrix = np.asarray([vectors[i] for i in ids], dtype=np.float32)
+        return cls(
+            dim=int(matrix.shape[1]),
+            ids=ids,
+            data=base64.b64encode(matrix.tobytes()).decode(),
+        )
+
+    def to_mapping(self) -> dict[str, list[float]]:
+        import numpy as np
+
+        if not self.ids:
+            return {}
+        flat = np.frombuffer(base64.b64decode(self.data), dtype=np.float32)
+        expected = len(self.ids) * self.dim
+        if flat.size != expected:
+            raise ValueError(
+                f"vector payload is {flat.size} float32 values, expected "
+                f"{expected} ({len(self.ids)} chunks x {self.dim} dimensions)"
+            )
+        matrix = flat.reshape(len(self.ids), self.dim)
+        return {cid: matrix[i].tolist() for i, cid in enumerate(self.ids)}

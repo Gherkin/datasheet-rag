@@ -14,12 +14,13 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Iterable
 from typing import Any
 
 from rich.console import Console
 
 from datasheet_rag.config import get_settings
-from datasheet_rag.models.chunk import ChunkLevel
+from datasheet_rag.models.chunk import Chunk, ChunkGraph, ChunkLevel
 
 console = Console()
 
@@ -97,7 +98,7 @@ class TitleInferer:
         return title
 
 
-def _first_page_text(conn: sqlite3.Connection, doc_id: str) -> str:
+def first_page_text(conn: sqlite3.Connection, doc_id: str) -> str:
     """Concatenate MICRO-level chunk text from page 1, in document order."""
     rows = conn.execute(
         "SELECT text, page_numbers FROM chunks WHERE doc_id = ? AND level = ? ORDER BY rowid",
@@ -162,19 +163,13 @@ def infer_and_backfill_title(
     if not force and title_rank("inferred") < title_rank(get_title_source(conn, doc_id)):
         return None
 
-    text = _first_page_text(conn, doc_id)
+    meta = get_metadata(conn, doc_id)
+    text = build_title_prompt(
+        first_page_text(conn, doc_id),
+        meta.attributes if meta else {},
+    )
     if not text:
         return None
-
-    meta = get_metadata(conn, doc_id)
-    attributes = meta.attributes if meta else {}
-    hints = []
-    if attributes.get("running_header"):
-        hints.append(f"Running page header (appears on every page): {attributes['running_header']}")
-    if attributes.get("pdf_meta_title"):
-        hints.append(f"PDF embedded title metadata: {attributes['pdf_meta_title']}")
-    if hints:
-        text = "\n".join(hints) + "\n\n" + text
 
     inferer = inferer or TitleInferer()
     title = inferer.infer(text)
@@ -184,4 +179,99 @@ def infer_and_backfill_title(
     if not dry_run:
         set_doc_title(conn, doc_id, title, source="inferred", force=force)
 
+    return title
+
+
+def build_title_prompt(first_page_text: str, attributes: dict[str, Any] | None) -> str:
+    """Prefix the first page's text with whatever hints the sidecar carries.
+
+    Returns "" when there is no first-page text to work with, which callers
+    read as "nothing to infer from" — the hints alone are too thin to spend a
+    model call on.
+    """
+    if not first_page_text:
+        return ""
+    hints = []
+    attributes = attributes or {}
+    if attributes.get("running_header"):
+        hints.append(f"Running page header (appears on every page): {attributes['running_header']}")
+    if attributes.get("pdf_meta_title"):
+        hints.append(f"PDF embedded title metadata: {attributes['pdf_meta_title']}")
+    if not hints:
+        return first_page_text
+    return "\n".join(hints) + "\n\n" + first_page_text
+
+
+def first_page_text_from_chunks(chunks: Iterable[Chunk]) -> str:
+    """Concatenate page-1 MICRO chunk text, in the order given.
+
+    The in-memory twin of :func:`first_page_text`, for callers holding a
+    freshly parsed graph rather than a store.
+    """
+    fragments: list[str] = []
+    total = 0
+    for chunk in chunks:
+        if int(chunk.level) != int(ChunkLevel.MICRO):
+            continue
+        if 1 not in chunk.metadata.page_numbers:
+            continue
+        text = (chunk.text or "").strip()
+        if not text:
+            continue
+        fragments.append(text)
+        total += len(text)
+        if total >= _FIRST_PAGE_CHAR_LIMIT:
+            break
+    return "\n".join(fragments)
+
+
+def infer_title_from_graph(
+    graph: ChunkGraph,
+    *,
+    title_hints: dict[str, str] | None = None,
+    inferer: TitleInferer | None = None,
+) -> str | None:
+    """Infer a title from a parsed graph, before anything has been stored.
+
+    Used when the model runs on the client but the store is remote
+    (``RAG_COMPUTE=client``, GH #43): everything the store-backed path reads
+    out of sqlite — page-1 text and the two hints ingest captures — is already
+    in hand here, so no provisional insert is needed to spend the call.
+    """
+    text = build_title_prompt(
+        first_page_text_from_chunks(graph.chunks.values()), dict(title_hints or {})
+    )
+    if not text:
+        return None
+    return (inferer or TitleInferer()).infer(text)
+
+
+def infer_title_via_backend(
+    backend: Any,
+    doc_id: str,
+    *,
+    inferer: TitleInferer | None = None,
+    dry_run: bool = False,
+    force: bool = False,
+) -> str | None:
+    """:func:`infer_and_backfill_title`, driven through a backend.
+
+    The provenance check and the page-1 text both come from the store over
+    ``get_title_context``; only the model call happens here. Returns None
+    without spending it when a hand-set title outranks an inferred one, matching
+    the store-backed path.
+    """
+    from datasheet_rag.store.metadata import title_rank
+
+    context = backend.get_title_context(doc_id)
+    if not force and title_rank("inferred") < title_rank(context.title_source):
+        return None
+    text = build_title_prompt(context.first_page_text, context.attributes)
+    if not text:
+        return None
+    title = (inferer or TitleInferer()).infer(text)
+    if not title:
+        return None
+    if not dry_run:
+        backend.set_doc_title(doc_id, title, source="inferred", force=force)
     return title

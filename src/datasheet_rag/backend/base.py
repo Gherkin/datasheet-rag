@@ -16,7 +16,7 @@ SQL, so ``RemoteBackend`` can serve every operation over JSON.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Literal
 
@@ -27,6 +27,7 @@ from datasheet_rag.backend.models import (
     IngestResult,
     MetadataPatch,
     StatsResult,
+    TitleContext,
 )
 from datasheet_rag.ingest_pipeline import ProgressCallback
 from datasheet_rag.models.chunk import Chunk, ChunkGraph
@@ -50,7 +51,16 @@ class RagBackend(ABC):
         mode: SearchMode = "hybrid",
         k: int = 10,
         filters: SearchFilters | None = None,
-    ) -> list[SearchResult]: ...
+        query_vector: Sequence[float] | None = None,
+    ) -> list[SearchResult]:
+        """Search the store, embedding ``query`` unless a vector is supplied.
+
+        ``query_vector`` short-circuits the embedding step for the vector and
+        hybrid modes — the caller has already embedded the text itself. That is
+        how a client with a GPU searches a store held by a GPU-less server
+        (``RAG_COMPUTE=client``, GH #43); the text is still sent, since hybrid
+        keyword matching needs it.
+        """
 
     # ---- chunk reads ----
     @abstractmethod
@@ -80,7 +90,15 @@ class RagBackend(ABC):
     def get_doc_titles(self) -> dict[str, str]: ...
 
     @abstractmethod
-    def set_doc_title(self, doc_id: str, title: str) -> int: ...
+    def set_doc_title(
+        self, doc_id: str, title: str, *, source: str = "manual", force: bool = False
+    ) -> int:
+        """Set a document's title, recording where it came from.
+
+        ``source`` decides whether the write lands: a title ranking below the
+        provenance already on record is refused and returns 0 (see
+        :mod:`datasheet_rag.store.metadata`). ``force`` overrules that.
+        """
 
     @abstractmethod
     def resolve_doc_id(self, doc_id: str) -> str: ...
@@ -159,6 +177,15 @@ class RagBackend(ABC):
         inferred one (i.e. a human set it), unless ``force``.
         """
 
+    @abstractmethod
+    def get_title_context(self, doc_id: str) -> TitleContext:
+        """Return the store-side inputs for a title inference, without inferring.
+
+        Page-1 text, the ingest-time hints and the current title provenance —
+        the cheap half of :func:`~datasheet_rag.titling.infer_and_backfill_title`,
+        so a client can run the expensive half itself (GH #43).
+        """
+
     # ---- source PDF ----
     @abstractmethod
     def get_pdf_bytes(self, doc_id: str) -> bytes: ...
@@ -177,7 +204,17 @@ class RagBackend(ABC):
         describe_figures: bool = False,
         infer_title: bool = False,
         title_hints: dict[str, str] | None = None,
-    ) -> IngestResult: ...
+        vectors: Mapping[str, Sequence[float]] | None = None,
+        inferred_title: str | None = None,
+    ) -> IngestResult:
+        """Store a parsed graph, embedding / describing / titling as asked.
+
+        ``vectors`` supplies embeddings the caller already computed, which
+        makes ``embed`` a no-op — the client-side compute path (GH #43) uses it
+        so the store never has to load an embedding model. ``inferred_title``
+        does the same for the title LLM: the caller supplies the answer and the
+        store just records it, provenance checks included.
+        """
 
     @abstractmethod
     def ingest_pdf(

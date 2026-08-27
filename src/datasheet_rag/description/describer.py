@@ -27,15 +27,16 @@ import json
 import sqlite3
 import time
 from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from rich.console import Console
 from tenacity import Retrying, retry_if_exception, stop_after_attempt, wait_exponential
 
 from datasheet_rag.aws import s3_client
 from datasheet_rag.config import get_settings
-from datasheet_rag.models.chunk import Chunk, LayoutType
+from datasheet_rag.models.chunk import Chunk, ChunkGraph, LayoutType
 from datasheet_rag.store import resolve_figure_path
 
 console = Console()
@@ -157,7 +158,7 @@ def _load_figure_bytes(chunk: Chunk) -> tuple[bytes, str]:
 _NEIGHBOR_CHAR_LIMIT = 400
 
 
-def _surrounding_text_from_store(
+def surrounding_text_for(
     conn: sqlite3.Connection,
     chunk: Chunk,
     *,
@@ -175,6 +176,88 @@ def _surrounding_text_from_store(
         if row and row["text"]:
             fragments.append(row["text"][:char_limit])
     return " [...] ".join(fragments)
+
+
+# ---------------------------------------------------------------------------
+# Figure sources — where a describer reads pixels and neighbour text from
+# ---------------------------------------------------------------------------
+#
+# The vision call is the expensive part; fetching its inputs is not. Splitting
+# them apart is what lets the model run somewhere other than where the store
+# lives (GH #43): a client with a GPU can describe figures held by a GPU-less
+# server, reading each image over HTTP, and the ingest path can describe a
+# freshly parsed graph before it is uploaded at all.
+
+
+@dataclass(frozen=True)
+class FigureInputs:
+    """Everything the vision call needs about one figure, fetched together."""
+
+    image_bytes: bytes
+    image_format: str
+    surrounding_text: str = ""
+
+
+class FigureSource(Protocol):
+    """Supplies the inputs a figure description needs, one chunk at a time."""
+
+    def inputs(self, chunk: Chunk) -> FigureInputs: ...
+
+
+class StoreFigureSource:
+    """Read from a local sqlite store: crops on disk (or S3), neighbours in SQL."""
+
+    def __init__(self, conn: sqlite3.Connection):
+        self._conn = conn
+
+    def inputs(self, chunk: Chunk) -> FigureInputs:
+        image_bytes, fmt = _load_figure_bytes(chunk)
+        return FigureInputs(image_bytes, fmt, surrounding_text_for(self._conn, chunk))
+
+
+class GraphFigureSource:
+    """Read from an in-memory :class:`ChunkGraph` — the ingest-time source.
+
+    Both inputs are already on this machine right after a parse: the crops sit
+    under ``figures_dir`` and the neighbours are in the graph. Using this
+    avoids the provisional insert the store-backed path needs before it can
+    see either.
+    """
+
+    def __init__(self, graph: ChunkGraph):
+        self._graph = graph
+
+    def inputs(self, chunk: Chunk) -> FigureInputs:
+        image_bytes, fmt = _load_figure_bytes(chunk)
+        fragments: list[str] = []
+        for nid in (chunk.prev_id, chunk.next_id):
+            neighbour = self._graph.chunks.get(nid) if nid else None
+            if neighbour is not None and neighbour.text:
+                fragments.append(neighbour.text[:_NEIGHBOR_CHAR_LIMIT])
+        return FigureInputs(image_bytes, fmt, " [...] ".join(fragments))
+
+
+class BackendFigureSource:
+    """Read from a :class:`~datasheet_rag.backend.base.RagBackend`.
+
+    ``get_figure_bytes`` returns the image *and* the neighbour text in one
+    response, so describing N figures held by a remote server costs N round
+    trips rather than 3N.
+    """
+
+    def __init__(self, backend: Any):
+        self._backend = backend
+
+    def inputs(self, chunk: Chunk) -> FigureInputs:
+        fig = self._backend.get_figure_bytes(chunk.id)
+        return FigureInputs(fig.image_bytes(), fig.format, fig.surrounding_text or "")
+
+
+def _as_source(source: sqlite3.Connection | FigureSource) -> FigureSource:
+    """Accept a bare sqlite connection where a :class:`FigureSource` is expected."""
+    if isinstance(source, sqlite3.Connection):
+        return StoreFigureSource(source)
+    return source
 
 
 # ---------------------------------------------------------------------------
@@ -256,32 +339,36 @@ class FigureDescriber:
     def describe_chunk_in_context(
         self,
         chunk: Chunk,
-        conn: sqlite3.Connection,
+        source: sqlite3.Connection | FigureSource,
     ) -> str:
-        """Convenience: pull image + neighbours from the store, call Bedrock."""
+        """Convenience: pull image + neighbours from *source*, call the model.
+
+        *source* is a :class:`FigureSource` — a local store, an in-memory
+        graph, or a remote backend. A bare sqlite connection is accepted too
+        and wrapped in a :class:`StoreFigureSource`.
+        """
         if chunk.metadata.layout_type != LayoutType.FIGURE:
             raise ValueError(
                 f"chunk {chunk.id} is not a figure (layout_type={chunk.metadata.layout_type.value})"
             )
-        image_bytes, image_format = _load_figure_bytes(chunk)
-        surrounding = _surrounding_text_from_store(conn, chunk)
+        figure = _as_source(source).inputs(chunk)
         # TODO: dedupe consecutive identical levels — when chapter_title ==
         # section_title this emits "X > X" in the prompt. Collapse repeats.
         section_context = " > ".join(
             p for p in (chunk.metadata.chapter_title, chunk.metadata.section_title) if p
         )
         return self.describe_one(
-            image_bytes=image_bytes,
-            image_format=image_format,
+            image_bytes=figure.image_bytes,
+            image_format=figure.image_format,
             caption=chunk.figure_caption or "",
             section_context=section_context,
-            surrounding_text=surrounding,
+            surrounding_text=figure.surrounding_text,
         )
 
     def describe_chunks(
         self,
         chunks: Iterable[Chunk],
-        conn: sqlite3.Connection,
+        source: sqlite3.Connection | FigureSource,
     ) -> dict[str, str]:
         """Describe many chunks concurrently. Returns ``{chunk_id: description}``.
 
@@ -292,6 +379,7 @@ class FigureDescriber:
         targets = [c for c in chunks if c.metadata.layout_type == LayoutType.FIGURE]
         if not targets:
             return {}
+        figures = _as_source(source)
 
         # Resolve the client (and its credential chain) here, single-threaded —
         # concurrent first-use from the worker pool below races through
@@ -304,7 +392,7 @@ class FigureDescriber:
         def _one(c: Chunk) -> tuple[str, str | None]:
             for attempt in range(1, _DESCRIBE_MAX_ATTEMPTS + 1):
                 try:
-                    return c.id, self.describe_chunk_in_context(c, conn)
+                    return c.id, self.describe_chunk_in_context(c, figures)
                 except (FileNotFoundError, ValueError) as e:
                     # Permanent (missing image / not a figure) — don't retry.
                     console.print(f"[red]describe failed[/] for {c.id}: {e}")
@@ -388,6 +476,91 @@ class FigureDescriber:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Planning: which figures actually need a vision call
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DescriptionPlan:
+    """Which figures to describe, and where each answer has to be copied.
+
+    One image can back more than one chunk — a MESO wrapping a single figure
+    carries its MICRO's image (see ``chunking.splitter``). Describing each of
+    them would pay the vision call twice for identical pixels, so the plan
+    picks one representative per image and records the siblings its answer
+    fans out to.
+    """
+
+    to_describe: list[Chunk]
+    fanout: dict[str, list[str]]  # representative chunk id → sibling ids
+    reuse: dict[str, str]  # chunk id → description a sibling already had
+
+
+def plan_figure_descriptions(
+    chunks: Iterable[Chunk],
+    *,
+    missing_only: bool = True,
+    limit: int | None = None,
+) -> DescriptionPlan:
+    """Group figure chunks by image and decide which ones need a model call.
+
+    Pure list logic over chunks the caller already has, so it is shared by
+    every place a description run can start from: a local sqlite store, a
+    remote backend, or an in-memory graph mid-ingest.
+    """
+    groups: dict[str, list[Chunk]] = {}
+    for c in chunks:
+        key = c.figure_image_path or c.figure_s3_key or c.id
+        groups.setdefault(key, []).append(c)
+
+    reuse: dict[str, str] = {}
+    to_describe: list[Chunk] = []
+    fanout: dict[str, list[str]] = {}
+
+    for members in groups.values():
+        needing = [c for c in members if not c.figure_description] if missing_only else members
+        if not needing:
+            continue
+        # Only a missing_only run may take the shortcut of copying a
+        # description a sibling already has — an explicit --all run is asking
+        # for a fresh one.
+        existing = next((c.figure_description for c in members if c.figure_description), None)
+        if existing and missing_only:
+            for c in needing:
+                reuse[c.id] = existing
+            continue
+        rep = max(members, key=lambda c: int(c.level))
+        to_describe.append(rep)
+        fanout[rep.id] = [c.id for c in members if c.id != rep.id]
+
+    if limit is not None:
+        dropped = {c.id for c in to_describe[limit:]}
+        to_describe = to_describe[:limit]
+        for rep_id in dropped:
+            fanout.pop(rep_id, None)
+
+    return DescriptionPlan(to_describe=to_describe, fanout=fanout, reuse=reuse)
+
+
+def _run_description_plan(
+    plan: DescriptionPlan,
+    source: FigureSource,
+    *,
+    describer: FigureDescriber | None = None,
+) -> dict[str, str]:
+    """Execute a plan against *source*, fanning each answer out to its siblings."""
+    descriptions: dict[str, str] = dict(plan.reuse)
+    if plan.to_describe:
+        describer = describer or FigureDescriber()
+        fresh = describer.describe_chunks(plan.to_describe, source)
+        for rep_id, desc in fresh.items():
+            descriptions[rep_id] = desc
+            for sibling_id in plan.fanout.get(rep_id, []):
+                descriptions[sibling_id] = desc
+    return descriptions
+
+
 def describe_figures_in_store(
     conn: sqlite3.Connection,
     *,
@@ -418,51 +591,11 @@ def describe_figures_in_store(
     # without its figures). Reading it would fail per chunk; skip it instead.
     targets = [c for c in targets if c.figure_available]
 
-    # One image can back more than one chunk — a MESO wrapping a single figure
-    # carries its MICRO's image (see chunking.splitter). Describing each of
-    # them would pay the vision call twice for identical pixels, so group by
-    # image source, describe the finest-grained member once, and copy the
-    # answer to the rest.
-    groups: dict[str, list[Chunk]] = {}
-    for c in targets:
-        key = c.figure_image_path or c.figure_s3_key or c.id
-        groups.setdefault(key, []).append(c)
-
-    reuse: dict[str, str] = {}  # chunk_id → description already on hand
-    to_describe: list[Chunk] = []  # one representative per image
-    fanout: dict[str, list[str]] = {}  # representative id → siblings to copy to
-
-    for members in groups.values():
-        needing = [c for c in members if not c.figure_description] if missing_only else members
-        if not needing:
-            continue
-        # Only a missing_only run may take the shortcut of copying a
-        # description a sibling already has — an explicit --all run is asking
-        # for a fresh one.
-        existing = next((c.figure_description for c in members if c.figure_description), None)
-        if existing and missing_only:
-            for c in needing:
-                reuse[c.id] = existing
-            continue
-        rep = max(members, key=lambda c: int(c.level))
-        to_describe.append(rep)
-        fanout[rep.id] = [c.id for c in members if c.id != rep.id]
-
-    if limit is not None:
-        dropped = {c.id for c in to_describe[limit:]}
-        to_describe = to_describe[:limit]
-        for rep_id in dropped:
-            fanout.pop(rep_id, None)
-
-    descriptions: dict[str, str] = dict(reuse)
-    if to_describe:
-        describer = describer or FigureDescriber()
-        fresh = describer.describe_chunks(to_describe, conn)
-        for rep_id, desc in fresh.items():
-            descriptions[rep_id] = desc
-            for sibling_id in fanout.get(rep_id, []):
-                descriptions[sibling_id] = desc
-
+    descriptions = _run_description_plan(
+        plan_figure_descriptions(targets, missing_only=missing_only, limit=limit),
+        StoreFigureSource(conn),
+        describer=describer,
+    )
     if not descriptions:
         return {}
 
@@ -471,3 +604,79 @@ def describe_figures_in_store(
             update_figure_description(conn, chunk_id, desc)
 
     return descriptions
+
+
+def describe_figures_via_backend(
+    backend: Any,
+    *,
+    doc_id: str | None = None,
+    project_id: str | None = None,
+    missing_only: bool = True,
+    limit: int | None = None,
+    describer: FigureDescriber | None = None,
+    dry_run: bool = False,
+) -> dict[str, str]:
+    """:func:`describe_figures_in_store`, driven entirely through a backend.
+
+    Same contract, but every store access goes through
+    :class:`~datasheet_rag.backend.base.RagBackend` methods instead of SQL, so
+    the vision model runs in *this* process against a store that may live on
+    another host (``RAG_COMPUTE=client``, GH #43).
+    """
+    targets = backend.list_figure_chunks(doc_id=doc_id, project_id=project_id, only_with_image=True)
+    descriptions = _run_description_plan(
+        plan_figure_descriptions(targets, missing_only=missing_only, limit=limit),
+        BackendFigureSource(backend),
+        describer=describer,
+    )
+    if not dry_run:
+        for chunk_id, desc in descriptions.items():
+            backend.update_figure_description(chunk_id, desc)
+    return descriptions
+
+
+def describe_figures_in_graph(
+    graph: ChunkGraph,
+    *,
+    missing_only: bool = True,
+    limit: int | None = None,
+    describer: FigureDescriber | None = None,
+) -> dict[str, str]:
+    """Describe a freshly parsed graph's figures in memory, before it is stored.
+
+    The crops are already on this machine and the neighbours are in the graph,
+    so nothing has to be inserted first. Descriptions are folded into each
+    chunk's ``figure_description`` and ``context_text`` in place — the same
+    shape ``ingest_chunk_graph`` would otherwise have to do server-side after
+    a provisional insert.
+
+    Returns ``{chunk_id: description}`` for the chunks that were updated.
+    """
+    from datasheet_rag.store import figure_source_available
+
+    targets = [
+        c
+        for c in graph.chunks.values()
+        if c.metadata.layout_type == LayoutType.FIGURE
+        and figure_source_available(c.figure_image_path, c.figure_s3_key)
+    ]
+    descriptions = _run_description_plan(
+        plan_figure_descriptions(targets, missing_only=missing_only, limit=limit),
+        GraphFigureSource(graph),
+        describer=describer,
+    )
+    for chunk_id, desc in descriptions.items():
+        apply_description_to_chunk(graph.chunks[chunk_id], desc)
+    return descriptions
+
+
+def apply_description_to_chunk(chunk: Chunk, description: str) -> None:
+    """Fold *description* into a chunk's row field and its embedded context text.
+
+    Mirrors what ``store.update_figure_description`` does to a stored row, for
+    a chunk that is still in memory.
+    """
+    chunk.figure_description = description
+    tag = f"Description: {description}"
+    if tag not in (chunk.context_text or ""):
+        chunk.context_text = (chunk.context_text or chunk.text) + "\n" + tag

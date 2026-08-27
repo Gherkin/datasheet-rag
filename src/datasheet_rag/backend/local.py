@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from threading import Lock
 from typing import TYPE_CHECKING, Any
@@ -29,6 +30,7 @@ from datasheet_rag.backend.models import (
     IngestResult,
     MetadataPatch,
     StatsResult,
+    TitleContext,
 )
 from datasheet_rag.config import get_settings
 from datasheet_rag.models.chunk import Chunk, ChunkGraph, ChunkLevel, LayoutType
@@ -56,6 +58,7 @@ from datasheet_rag.store import (
     resolve_figure_path,
     set_doc_title,
     set_metadata,
+    stored_embedding_dim,
     to_relative_figure_path,
     update_figure_description,
     vector_search,
@@ -131,12 +134,27 @@ class LocalBackend(RagBackend):
         mode: SearchMode = "hybrid",
         k: int = 10,
         filters: SearchFilters | None = None,
+        query_vector: Sequence[float] | None = None,
     ) -> list[SearchResult]:
         if not query or not query.strip():
             raise ValueError("query must not be empty")
         conn = self._get_conn()
         if mode in ("vector", "hybrid"):
-            query_vec = self._get_embedder().embed_one(query)
+            # A caller-supplied vector means the embedding already happened
+            # elsewhere (a client with the GPU — GH #43). Check its width
+            # here: a wrong-sized vector is a silently wrong result set
+            # otherwise, and the fix is a config change, not a retry.
+            if query_vector is not None:
+                expected = stored_embedding_dim(conn)
+                if expected is not None and len(query_vector) != expected:
+                    raise ValueError(
+                        f"query_vector has {len(query_vector)} dimensions, but this "
+                        f"store's vectors are {expected}-dimensional — the client and "
+                        f"server are configured with different embedding models."
+                    )
+                query_vec = list(query_vector)
+            else:
+                query_vec = self._get_embedder().embed_one(query)
         if mode == "vector":
             return vector_search(conn, query_vec, k=k, filters=filters)
         if mode == "keyword":
@@ -249,10 +267,12 @@ class LocalBackend(RagBackend):
     def get_doc_titles(self) -> dict[str, str]:
         return get_doc_titles(self._get_conn())
 
-    def set_doc_title(self, doc_id: str, title: str) -> int:
+    def set_doc_title(
+        self, doc_id: str, title: str, *, source: str = "manual", force: bool = False
+    ) -> int:
         with self._write_lock:
             conn = self._get_conn()
-            n = set_doc_title(conn, doc_id, title)
+            n = set_doc_title(conn, doc_id, title, source=source, force=force)
             conn.commit()
             return n
 
@@ -358,6 +378,8 @@ class LocalBackend(RagBackend):
         )
 
     def get_figure_bytes(self, chunk_id: str) -> FigureBytes:
+        from datasheet_rag.description.describer import surrounding_text_for
+
         chunk = get_chunk(self._get_conn(), chunk_id)
         if chunk is None:
             raise ValueError(f"unknown chunk_id: {chunk_id}")
@@ -382,6 +404,9 @@ class LocalBackend(RagBackend):
                 section=chunk.metadata.section_title or "",
                 chapter=chunk.metadata.chapter_title or "",
             ),
+            # Shipped with the pixels so a client running the vision model
+            # itself needs one round trip per figure, not three (GH #43).
+            surrounding_text=surrounding_text_for(self._get_conn(), chunk),
         )
 
     def update_figure_description(
@@ -419,6 +444,19 @@ class LocalBackend(RagBackend):
                 dry_run=dry_run,
             )
         return descriptions, describer.stats()
+
+    def get_title_context(self, doc_id: str) -> TitleContext:
+        from datasheet_rag.store.metadata import get_title_source
+        from datasheet_rag.titling import first_page_text
+
+        conn = self._get_conn()
+        md = get_metadata(conn, doc_id)
+        return TitleContext(
+            doc_id=doc_id,
+            first_page_text=first_page_text(conn, doc_id),
+            attributes=dict(md.attributes) if md is not None else {},
+            title_source=get_title_source(conn, doc_id),
+        )
 
     def infer_title(
         self,
@@ -459,8 +497,23 @@ class LocalBackend(RagBackend):
         describe_figures: bool = False,
         infer_title: bool = False,
         title_hints: dict[str, str] | None = None,
+        vectors: Mapping[str, Sequence[float]] | None = None,
+        inferred_title: str | None = None,
     ) -> IngestResult:
         from datasheet_rag.embedding import embed_chunk_graph
+
+        # Vectors handed in were computed by the caller (RAG_COMPUTE=client,
+        # GH #43), so there is nothing left to embed here — and no embedding
+        # model to load, which is the whole point on a GPU-less host.
+        if vectors is not None:
+            if describe_figures:
+                raise ValueError(
+                    "vectors= and describe_figures= are mutually exclusive: a "
+                    "description written here would change the text the "
+                    "supplied vectors were computed from. Describe first, then "
+                    "embed, then send both."
+                )
+            embed = False
 
         did = graph.doc_id
         settings = get_settings()
@@ -516,11 +569,13 @@ class LocalBackend(RagBackend):
             if describe_figures:
                 from datasheet_rag.description import (
                     FigureDescriber,
+                    apply_description_to_chunk,
                     describe_figures_in_store,
                 )
 
-                embedder_tmp = self._get_embedder() if embed else None
-                vectors_tmp = embed_chunk_graph(graph, embedder=embedder_tmp) if embed else None
+                vectors_tmp = (
+                    embed_chunk_graph(graph, embedder=self._get_embedder()) if embed else vectors
+                )
                 pruned += insert_chunk_graph(
                     conn,
                     graph,
@@ -545,13 +600,9 @@ class LocalBackend(RagBackend):
                 ).fetchall():
                     chunk = graph.chunks.get(row["id"])
                     if chunk:
-                        chunk.figure_description = row["figure_description"]
-                        tag = f"Description: {row['figure_description']}"
-                        if tag not in (chunk.context_text or ""):
-                            chunk.context_text = (chunk.context_text or chunk.text) + "\n" + tag
+                        apply_description_to_chunk(chunk, row["figure_description"])
 
             # 3. Final embed + insert.
-            vectors = None
             if embed:
                 vectors = embed_chunk_graph(graph, embedder=self._get_embedder())
             # insert_chunk_graph prunes: this graph is the whole document,
@@ -586,10 +637,16 @@ class LocalBackend(RagBackend):
                 set_metadata(conn, did, attributes=dict(title_hints))
                 conn.commit()
 
-        # 5. Title inference (own transactions inside).
+        # 5. Title. Either the caller already inferred one (client-side
+        #    compute) and we only record it, or we infer it here.
         title = None
-        if infer_title:
-            current = self.get_doc_titles().get(did)
+        current = self.get_doc_titles().get(did) if (infer_title or inferred_title) else None
+        if inferred_title:
+            if current in (None, "", "—") and self.set_doc_title(
+                did, inferred_title, source="inferred"
+            ):
+                title = inferred_title
+        elif infer_title:
             if current in (None, "", "—"):
                 from datasheet_rag.titling import infer_and_backfill_title
 

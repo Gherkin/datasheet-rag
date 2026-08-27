@@ -174,31 +174,6 @@ def _backend_for(db_path: Path | None = None) -> RagBackend:
     return get_backend()
 
 
-def _collect_figure_uploads(graph: Any) -> tuple[dict[str, tuple[bytes, str]], list[str]]:
-    """Read every croppable figure in *graph* for upload to a remote server.
-
-    Returns ``(uploads, missing)`` where ``missing`` lists the chunk ids whose
-    recorded crop could not be read here. Paths go through
-    ``resolve_figure_path`` because a stored path may be relative to
-    ``figures_dir`` — treating one as a plain filesystem path resolves it
-    against the CWD, silently loses the crop, and leaves the server holding a
-    path it cannot serve (GH #41).
-    """
-    from datasheet_rag.store import resolve_figure_path
-
-    uploads: dict[str, tuple[bytes, str]] = {}
-    missing: list[str] = []
-    for c in graph.chunks.values():
-        if not c.figure_image_path:
-            continue
-        p = resolve_figure_path(c.figure_image_path)
-        if p is not None and p.is_file():
-            uploads[c.id] = (p.read_bytes(), p.suffix.lstrip(".") or "png")
-        else:
-            missing.append(c.id)
-    return uploads, missing
-
-
 def _warn_missing_figure_crops(missing: list[str], uploaded: int) -> None:
     """Say out loud that some figures will land in the store without an image."""
     if not missing:
@@ -355,16 +330,37 @@ class OrderedGroup(click.Group):
         "admin",
     ],
 )
+@click.option(
+    "--compute",
+    type=click.Choice(["server", "client"]),
+    default=None,
+    help=(
+        "Override RAG_COMPUTE for this command: where the models run in "
+        "remote mode. 'server' (the default) lets the RAG server parse, embed, "
+        "describe figures and infer titles; 'client' runs all of it here and "
+        "uses the server purely as a vector store — for a server host without "
+        "a GPU. No effect in local mode."
+    ),
+)
 @click.pass_context
-def cli(ctx: click.Context) -> None:
+def cli(ctx: click.Context, compute: str | None) -> None:
     """Datasheet RAG Pipeline — electronics datasheet ingestion."""
+    # Applied through the environment rather than passed down: every command
+    # resolves the backend from settings, so this is the one place that
+    # reaches all of them. Must land before anything builds a backend.
+    if compute is not None:
+        os.environ["RAG_COMPUTE"] = compute
+        get_settings.cache_clear()
+
     # Remind the user when they're using the local sqlite file rather than a
-    # shared server (printed to stderr, non-failing). Skipped for `config`,
-    # which is the group that sets the server up.
+    # shared server, or when a remote session is running the models locally
+    # (both printed to stderr, non-failing). Skipped for `config`, which is
+    # the group that sets the server up.
     if ctx.invoked_subcommand != "config":
-        from datasheet_rag.backend import emit_local_notice
+        from datasheet_rag.backend import emit_client_compute_notice, emit_local_notice
 
         emit_local_notice()
+        emit_client_compute_notice()
 
 
 # ---------------------------------------------------------------------------
@@ -452,8 +448,27 @@ def config_init(force: bool) -> None:
         if token:
             chosen["RAG_SERVER_TOKEN"] = token
         console.print(
-            "[dim]Embeddings run on the server in remote mode — no local model config needed.[/]"
+            "\n[dim]By default the server runs the models — parsing, embeddings, "
+            "figure descriptions and titles — so this machine needs no model "
+            "config at all. Choose 'client' instead if the server host has no "
+            "GPU and this one does: the server then only stores what you send "
+            "it, and this machine needs the model extras installed.[/]"
         )
+        compute = click.prompt(
+            "Where should the models run",
+            type=click.Choice(["server", "client"]),
+            default="server",
+        )
+        chosen["RAG_COMPUTE"] = compute
+        if compute == "client":
+            backend = click.prompt(
+                "Embedding backend (must match the server's store)",
+                type=click.Choice(["local", "bedrock"]),
+                default="local",
+            )
+            chosen["RAG_EMBEDDING_BACKEND"] = backend
+            if backend == "bedrock":
+                chosen["AWS_REGION"] = click.prompt("AWS region", default=settings.aws_region)
     else:
         backend = click.prompt(
             "Embedding backend", type=click.Choice(["local", "bedrock"]), default="local"
@@ -487,6 +502,7 @@ def config_init(force: bool) -> None:
     console.print(f"\n[green]Wrote[/] {config_path}")
     if server_url:
         console.print(f"  Mode: [cyan]remote[/] → {server_url}")
+        console.print(f"  Models run: [cyan]{chosen.get('RAG_COMPUTE', 'server')}[/]-side")
     else:
         console.print(f"  Mode: [cyan]local[/] → {settings.sqlite_db_path}")
     console.print("  Edit the file to tweak any other option (all are listed, commented).")
@@ -1596,12 +1612,14 @@ def embed(
     is also accepted in place of a doc_id.
 
     Embedding + insert run through the backend, so this writes to the remote
-    server (which embeds) when RAG_SERVER_URL is set, or the local sqlite
-    store otherwise. There is no dry run — embedding happens backend-side;
-    use `rag ingest --show-cost` to price a run without writing.
+    server when RAG_SERVER_URL is set, or the local sqlite store otherwise.
+    The embedding model itself runs on the server unless RAG_COMPUTE=client,
+    in which case it runs here and only the vectors are uploaded. There is no
+    dry run — use `rag ingest --show-cost` to price a run without writing.
     """
-    from datasheet_rag.backend import MetadataPatch, backend_mode
+    from datasheet_rag.backend import MetadataPatch, backend_mode, compute_mode
     from datasheet_rag.chunking.pipeline import load_chunk_graph
+    from datasheet_rag.ingest_pipeline import collect_figure_uploads
     from datasheet_rag.project_config import get_project_config
 
     _, chunks_json = _doc_input(doc_id, "_chunks.json")
@@ -1627,10 +1645,13 @@ def embed(
     # context_text can fold in any server-side descriptions.
     figures_upload: dict[str, tuple[bytes, str]] | None = None
     if backend_mode() == "remote" and db_path is None:
-        figures_upload, missing = _collect_figure_uploads(graph)
+        figures_upload, missing = collect_figure_uploads(graph)
         _warn_missing_figure_crops(missing, len(figures_upload))
 
-    console.print("Embedding & writing via the backend…")
+    console.print(
+        "Embedding & writing via the backend "
+        f"(the embedding model runs {'here' if compute_mode() == 'client' else 'on the server'})…"
+    )
     from datasheet_rag.backend import RagServerError
 
     try:
@@ -2117,7 +2138,10 @@ def describe_figures_cmd(
     if doc_id:
         doc_id = _backend_resolve(be, doc_id)
 
-    console.print("Describing figures via the backend (vision runs server-side in remote mode)…")
+    from datasheet_rag.backend import compute_mode
+
+    where = "on this machine" if compute_mode() == "client" else "on the server"
+    console.print(f"Describing figures via the backend (the vision model runs {where})…")
     descriptions, s = be.describe_figures(
         doc_id=doc_id,
         project_id=project_id,
@@ -2506,7 +2530,10 @@ def _print_cost_table(cost: CostEstimate, heading: str = "Estimated AWS cost") -
         "chunk graph, instead of uploading the raw PDF for the server to parse "
         "(the default). Needs the full Docling/Textract stack locally; useful "
         "for advanced/offline-parse workflows. Ignored in local mode; implied "
-        "by --dry-run and --show-cost (both are client-side estimation)."
+        "by --dry-run and --show-cost (both are client-side estimation) and by "
+        "RAG_COMPUTE=client. On its own it moves only the parse — embedding, "
+        "figure description and titling still run on the server; use "
+        "--compute client to move those too."
     ),
 )
 @click.option(
@@ -2742,12 +2769,18 @@ def _ingest_one(
     t0 = time.monotonic()
     cost = CostEstimate()
 
-    from datasheet_rag.backend import backend_mode
+    from datasheet_rag.backend import backend_mode, compute_mode
     from datasheet_rag.ingest_pipeline import (
         OcrRequiredError,
         ScannedPdfError,
+        collect_figure_uploads,
         parse_pdf_to_graph,
     )
+
+    # RAG_COMPUTE=client means nothing about this document should run on the
+    # server, parsing included — so it takes the same route as --local-parse
+    # and the backend handles the rest (GH #43).
+    local_parse = local_parse or compute_mode() == "client"
 
     # Render pipeline progress to the console — used both for a local parse and
     # for the streamed progress of a remote raw-PDF upload.
@@ -2762,8 +2795,9 @@ def _ingest_one(
 
     # ── Remote raw-PDF upload (thin client — GH #16) ─────────────────────────
     # In remote mode the server runs the whole pipeline; the client just ships
-    # the PDF. --local-parse (and --dry-run/--show-cost, which are inherently
-    # client-side estimation) fall through to the local parse path below.
+    # the PDF. --local-parse / RAG_COMPUTE=client (and --dry-run/--show-cost,
+    # which are inherently client-side estimation) fall through to the local
+    # parse path below.
     if (
         backend_mode() == "remote"
         and db_path is None
@@ -2877,7 +2911,8 @@ def _ingest_one(
         return None
 
     step_state["n"] += 1
-    console.rule(f"[bold cyan]Step {step_state['n']} — Embed & store[/]")
+    where = "here" if backend_mode() == "local" or compute_mode() == "client" else "on the server"
+    console.rule(f"[bold cyan]Step {step_state['n']} — Embed & store ({where})[/]")
     from datasheet_rag.backend import MetadataPatch, get_backend
 
     # `rag ingest --db` targets a specific local file; honor it by building a
@@ -2894,7 +2929,7 @@ def _ingest_one(
     # figure_image_path before inserting.
     figures_upload: dict[str, tuple[bytes, str]] | None = None
     if not skip_figures and backend_mode() == "remote" and db_path is None:
-        figures_upload, missing = _collect_figure_uploads(graph)
+        figures_upload, missing = collect_figure_uploads(graph)
         _warn_missing_figure_crops(missing, len(figures_upload))
 
     meta_patch = MetadataPatch(
@@ -3764,9 +3799,10 @@ def fix_titles_cmd(
         console.print("[yellow]No documents need a title fix.[/]")
         return
 
-    console.print(
-        f"Inferring titles for {len(docs)} document(s) (LLM runs server-side in remote mode)…"
-    )
+    from datasheet_rag.backend import compute_mode
+
+    where = "on this machine" if compute_mode() == "client" else "on the server"
+    console.print(f"Inferring titles for {len(docs)} document(s) (the LLM runs {where})…")
 
     for d in docs:
         short_id = d.doc_id[:SHORT_DOC_ID_LEN]

@@ -146,12 +146,27 @@ def _migrate_if_needed(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def stored_embedding_dim(conn: sqlite3.Connection) -> int | None:
+    """The vector width this database was created with, or None if unrecorded.
+
+    The authority on what a vector has to look like to be usable here — more
+    so than ``settings.embedding_dimensions``, which is only what *this*
+    process is configured for. Callers validating a vector handed in from
+    elsewhere (a client that embeds its own — GH #43) should ask the store.
+    """
+    try:
+        row = conn.execute("SELECT embedding_dim FROM schema_version WHERE id = 1").fetchone()
+    except sqlite3.Error:
+        return None
+    return int(row["embedding_dim"]) if row is not None else None
+
+
 def _check_embedding_dim(conn: sqlite3.Connection, embedding_dim: int) -> None:
-    row = conn.execute("SELECT embedding_dim FROM schema_version WHERE id = 1").fetchone()
-    if row is None:
+    stored = stored_embedding_dim(conn)
+    if stored is None:
         # Table exists but no row — shouldn't happen, but treat as fresh.
         return
-    stored_dim = int(row["embedding_dim"])
+    stored_dim = stored
     if stored_dim != embedding_dim:
         raise RuntimeError(
             f"Embedding dimension mismatch: database was created with "
