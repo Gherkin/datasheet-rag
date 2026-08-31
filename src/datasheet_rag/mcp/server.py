@@ -43,6 +43,15 @@ Pure-vs-transport split
 -----------------------
 Each ``@mcp.tool()`` is a thin wrapper around a ``_impl`` function. Tests
 exercise the ``_impl`` layer directly without needing the MCP transport.
+
+Guidance vs data
+----------------
+Tool results state facts about a chunk; instructions about what to do with
+those facts live in the tool descriptions and the server instructions, never
+in the payload. An imperative naming a tool call ("you MUST call
+show_figure(...)") is indistinguishable from a prompt injection once it is
+sitting in retrieved data, and agents duly discounted it (GH #30). See
+``_chunk_fields_help``.
 """
 
 from __future__ import annotations
@@ -50,9 +59,11 @@ from __future__ import annotations
 import json
 import os
 import sys
+from collections.abc import Callable
 from contextvars import ContextVar
+from inspect import cleandoc
 from threading import Thread
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 from datasheet_rag import pdf_viewer
 from datasheet_rag.backend import (
@@ -259,13 +270,6 @@ def _shape_chunk(result_or_chunk: Any, *, score: float | None = None) -> dict[st
         if chunk.figure_description:
             out["figure_description"] = chunk.figure_description
         out["figure_uri"] = f"rag://figure/{chunk.id}"
-        # Directive embedded in result data — more reliable than server instructions
-        # because the model reads it at the moment it is deciding what to do next.
-        out["DISPLAY_INSTRUCTION"] = (
-            f"This chunk has a figure. If it is relevant to the user's question, "
-            f"you MUST call show_figure('{chunk.id}') — do not skip it. "
-            f"If relevance is uncertain, offer it to the user instead of silently skipping."
-        )
     elif is_figure:
         # A figure-typed chunk with no image: caption text only. Say so
         # explicitly — silence here is what sent agents into a retry loop of
@@ -274,33 +278,94 @@ def _shape_chunk(result_or_chunk: Any, *, score: float | None = None) -> dict[st
         out["figure_caption"] = chunk.figure_caption or ""
         if chunk.figure_description:
             out["figure_description"] = chunk.figure_description
-        out["DISPLAY_INSTRUCTION"] = (
-            "This chunk describes a figure but no image is stored for it. "
-            "Do NOT call show_figure or get_figure on it — they will fail. "
-            f"To let the user see it, call {_source_page_tool()}('{chunk.doc_id}'"
-            + (f", {pages[0]})" if pages else ")")
-            + " instead."
-        )
-    if chunk.metadata.layout_type == LayoutType.TABLE and pages:
+        out["figure_status"] = "image_not_stored"
+    if chunk.metadata.layout_type == LayoutType.TABLE:
+        # "unverified" is the floor, not a complaint: the table structure is
+        # machine-extracted, and this result does not confirm it against the
+        # rendered page. "suspect" adds that the extraction flagged itself.
+        # No `pages` guard: the old message interpolated pages[0], but these
+        # flags need no page number, and suppressing them on a page-less chunk
+        # would present a warned table as if its structure were clean.
         warning = chunk.metadata.table_structure_warning
         if warning:
+            out["table_structure"] = "suspect"
             out["table_structure_warning"] = warning
-            out["DISPLAY_INSTRUCTION"] = (
-                f"This table's structure could not be fully verified ({warning}). "
-                f"Before citing specific values from it, call "
-                f"show_page('{chunk.doc_id}', {pages[0]}) to visually check "
-                f"the source page against the text above."
-            )
         else:
-            out["DISPLAY_INSTRUCTION"] = (
-                "Docling's table extraction can mislabel headers or merge stray text into "
-                "cells even when no warning is raised. If you're about to cite a specific "
-                f"value from this table, consider calling show_page('{chunk.doc_id}', {pages[0]}) "
-                "to visually confirm it against the source page."
-            )
+            out["table_structure"] = "unverified"
     if score is not None:
         out["score"] = round(float(score), 4)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Shared tool-description text.
+#
+# Results carry data; what to *do* about that data lives here, in the tool
+# description, and never in the result payload. Directives addressed at the
+# model ("you MUST call show_figure(...)", "Do NOT call get_figure on it")
+# used to ride along inside the result dicts under a DISPLAY_INSTRUCTION key,
+# on the theory that the model reads them at the moment it decides what to do
+# next. In practice that is precisely the shape of a prompt-injection payload
+# — an imperative naming a tool call, arriving as retrieved document data —
+# so models treated it as one: they flagged it and then discounted the advice
+# wholesale (GH #30). Tool descriptions are declared by the server and reach
+# the model as part of the tool schema, so guidance placed here is read as the
+# server speaking rather than as a document speaking.
+# ---------------------------------------------------------------------------
+
+
+_ToolFn = TypeVar("_ToolFn", bound=Callable[..., Any])
+
+
+def _chunk_fields_help(source_page_tool: str) -> str:
+    """The shared description of the acted-on fields in a chunk result.
+
+    Appended to the description of every tool that returns chunk dicts, so
+    the meaning of a field travels with the tool that emits it whichever way
+    the host surfaces server instructions.
+    """
+    # Only ``show_page`` renders the page as an image the model can read;
+    # ``show_pdf`` hands back a loopback URL for the user to open. So the
+    # check-the-table advice names ``show_page`` whatever this server calls
+    # its user-facing source-page tool.
+    if source_page_tool == "show_page":
+        source_page_note = (
+            "To check a table, call `show_page(doc_id, page)` — it renders\n"
+            "the source page as an image you can read."
+        )
+    else:
+        source_page_note = (
+            "To check a table, call `show_page(doc_id, page)` — it renders\n"
+            "the source page as an image you can read. "
+            f"`{source_page_tool}(doc_id, page)`\n"
+            "opens the document in a browser for the *user* to look at, and\n"
+            "returns no image to you."
+        )
+
+    return f"""Fields a chunk result may carry, and what they mean:
+
+- `has_figure: true` — the chunk is a diagram, schematic or curve and
+  its image can be served. `show_figure(chunk_id)` renders it inline;
+  `get_figure(chunk_id)` returns the bytes. Show a figure whenever it
+  illustrates what the user asked about; offer it when unsure.
+- `figure_status: "image_not_stored"` — this chunk's image is absent
+  from the store. `show_figure` and `get_figure` cannot succeed on it,
+  now or on retry; its `figure_caption`, `figure_description` and
+  source page are all there is. The flag is per chunk, so other figure
+  chunks from the same document may still be serviceable.
+- `table_structure: "unverified"` — this result does not confirm the
+  table against the rendered page, so headers can be mislabelled and
+  stray text merged into cells. Worth checking the page yourself
+  before citing an exact value.
+- `table_structure: "suspect"` — extraction flagged the structure
+  itself; `table_structure_warning` says why. Check the page before
+  citing values from it.
+
+{source_page_note}
+
+`show_page` and any other page tool take a single integer, but a chunk's
+`page` may be a range such as `"53-55"` — pass its first number.
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -506,18 +571,18 @@ def _figure_unavailable_text(chunk_id: str, exc: Exception) -> str:
 
     A hard error here reads like a transient fault and invites a retry; the
     agent then burns turns re-calling a tool that can never succeed (GH #41).
-    So the tools answer normally, state that the image does not exist, and
-    point at the one thing that does work — the source page.
+    So the tools answer normally and state what is and is not there. It reads
+    as a status report rather than an order not to retry, because an order
+    arriving inside a tool result is what agents learn to distrust (GH #30) —
+    the rule itself lives in the two tools' descriptions.
     """
     doc_id = chunk_id.split(":", 1)[0]
     return (
-        f"No image is stored for chunk {chunk_id} ({exc}). This is permanent, "
-        f"not a transient failure — do not retry show_figure or get_figure on "
-        f"this chunk, and do not try other figure chunks from the same "
-        f"document expecting a different result. The chunk's own text and "
-        f"caption are all there is. If the user needs to see the figure, call "
-        f"{_source_page_tool()}('{doc_id}', <page>) with the chunk's page and let "
-        f"them read it in the source document."
+        f"No image is stored for chunk {chunk_id} ({exc}). The condition is "
+        f"permanent rather than transient: the image is absent from the "
+        f"store, so a retry resolves the same way. The chunk's own text and "
+        f"caption are all there is; its source page is available through "
+        f"{_source_page_tool()}({doc_id!r}, <page>)."
     )
 
 
@@ -642,6 +707,24 @@ def build_server(
 
     source_page_tool = "show_pdf" if local_client else "show_page"
 
+    chunk_fields_help = _chunk_fields_help(source_page_tool)
+
+    def with_chunk_fields(fn: _ToolFn) -> _ToolFn:
+        """Append the shared chunk-field reference to a tool's description.
+
+        Applied *under* ``@mcp.tool()``, which reads ``__doc__`` at
+        registration and so sees the appended text. One source of truth for
+        five tools, and the text can name whichever source-page tool this
+        server registered.
+
+        ``cleandoc`` because the docstring's own indentation depends on the
+        interpreter: 3.13 strips it at compile time, 3.11 (this package's
+        floor) hands it over as written. Normalising both to flush-left keeps
+        the seam invisible to the model reading the description.
+        """
+        fn.__doc__ = cleandoc(fn.__doc__ or "") + "\n\n" + chunk_fields_help
+        return fn
+
     settings = get_settings()
     project_hint = settings.default_project_id or "(unscoped)"
     mcp = MCPServer(
@@ -722,6 +805,7 @@ def build_server(
     )
 
     @mcp.tool()
+    @with_chunk_fields
     def search(
         query: str,
         mode: SearchMode = "hybrid",
@@ -756,21 +840,25 @@ def build_server(
         )
 
     @mcp.tool()
+    @with_chunk_fields
     def get_chunk(chunk_id: str, include_neighbors: bool = False) -> dict[str, Any] | None:
         """Fetch a chunk by ID. If include_neighbors, also returns parent/prev/next."""
         return _get_chunk_impl(chunk_id, include_neighbors=include_neighbors, backend=backend)
 
     @mcp.tool()
+    @with_chunk_fields
     def navigate(chunk_id: str, direction: Direction) -> list[dict[str, Any]]:
         """Step through the chunk graph: parent | children | prev | next | chapter_root."""
         return _navigate_impl(chunk_id, direction, backend=backend)
 
     @mcp.tool()
+    @with_chunk_fields
     def zoom_in(chunk_id: str) -> list[dict[str, Any]]:
         """Get finer-grained child chunks (e.g. macro -> meso, meso -> micro)."""
         return _navigate_impl(chunk_id, "children", backend=backend)
 
     @mcp.tool()
+    @with_chunk_fields
     def zoom_out(chunk_id: str) -> list[dict[str, Any]]:
         """Get the parent chunk (broader context, e.g. micro -> meso, meso -> macro)."""
         return _navigate_impl(chunk_id, "parent", backend=backend)
@@ -825,6 +913,11 @@ def build_server(
         Returns an Image content block followed by a text block with caption,
         description, and citation. Do not emit markdown image links — the Image
         block is what the client renders.
+
+        Only chunks marked `has_figure: true` have an image. On a chunk marked
+        `figure_status: "image_not_stored"` this returns a note saying so, and
+        will keep doing that however many times it is called: the image is not
+        in the store and a retry cannot conjure it. Reach for the source page instead.
         """
         import base64
 
@@ -889,6 +982,11 @@ def build_server(
 
         Immediately after this call, write one short line: caption (or brief
         description if none), page number, and section.
+
+        Only chunks marked `has_figure: true` have an image. On a chunk marked
+        `figure_status: "image_not_stored"` this returns a note saying so, and
+        will keep doing that however many times it is called: the image is not
+        in the store and a retry cannot conjure it. Offer the source page instead.
         """
         import base64
 
