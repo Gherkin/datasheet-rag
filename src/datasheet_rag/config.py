@@ -427,14 +427,17 @@ class Settings(BaseSettings):
     render_memory_budget_mb: int = Field(
         default=1024,
         description=(
-            "Approximate memory ceiling, in MiB, for PDF pages held in RAM "
-            "while figures are cropped out of them. Page renders are the "
-            "ingest's largest allocation (an A4 page at 300 DPI is ~26 MB), "
-            "and this bounds how many are decoded at once — the renderer "
-            "streams pages and sizes its worker window from this budget and "
-            "the document's largest page, so a 900-page manual costs the same "
-            "as a 10-page one. Raise it to render more pages in parallel; "
-            "lower it on a memory-capped container."
+            "Memory budget, in MiB, for the PDF page images held in RAM while "
+            "figures are cropped out of them. Page renders are the ingest's "
+            "largest allocation (an A4 page at 300 DPI is ~26 MB), and this "
+            "bounds how many are decoded at once — the renderer streams pages "
+            "and sizes its worker window from this budget and the document's "
+            "largest page, so a 900-page manual costs the same as a 10-page "
+            "one. It covers the page buffers only, not total process memory: "
+            "the interpreter, PyMuPDF and Pillow add a baseline of roughly "
+            "150-250 MB on top. On a memory-capped container set this a few "
+            "hundred MB below the cap rather than at it; raise it to render "
+            "more pages in parallel."
         ),
     )
 

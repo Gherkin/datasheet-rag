@@ -253,3 +253,101 @@ def test_extraction_crops_every_page_it_streams(pdf: Path, tmp_path: Path) -> No
         assert fig.image_path is not None
         Image.open(fig.image_path).load()
         assert fig.width_px > 0 and fig.height_px > 0
+
+
+# ---------------------------------------------------------------------------
+# Sizing the window must not change how failures surface (GH #40 × GH #59)
+# ---------------------------------------------------------------------------
+
+
+def test_unopenable_pdf_still_reports_a_page_render_error(tmp_path: Path) -> None:
+    """Measuring pages up front must not downgrade the GH #40 error contract.
+
+    The window is sized before the pool starts, which means the PDF is now
+    opened on the main thread. If that open is what fails, the caller must
+    still get the error that names the file, the page and the --force hint —
+    not the bare ``FileNotFoundError`` PyMuPDF raises.
+    """
+    missing = tmp_path / "gone.pdf"
+
+    with pytest.raises(PageRenderError) as excinfo:
+        _render_all(missing, dpi=72, pages=[1])
+
+    message = str(excinfo.value)
+    assert str(missing) in message
+    assert "page 1" in message
+    assert "--force" in message
+
+
+def test_unopenable_pdf_reports_a_page_render_error_without_a_page_list(
+    tmp_path: Path,
+) -> None:
+    """Same contract when the page count itself is what could not be read."""
+    missing = tmp_path / "gone.pdf"
+
+    with pytest.raises(PageRenderError) as excinfo:
+        _render_all(missing, dpi=72)
+
+    assert str(missing) in str(excinfo.value)
+
+
+def test_slot_sizing_falls_back_instead_of_raising(tmp_path: Path) -> None:
+    from datasheet_rag.figures import _page_slot_bytes
+
+    # An unreadable document still yields a usable slot estimate: sizing the
+    # window is not the step that gets to reject a PDF.
+    assert _page_slot_bytes(tmp_path / "gone.pdf", [1], 72) > 0
+
+
+def test_warm_cache_survives_a_moved_source_pdf(pdf: Path, tmp_path: Path) -> None:
+    """A fully cached re-render must not need the original file.
+
+    Sizing the window opens the PDF, which would otherwise turn a cache hit
+    into a hard failure whenever the source moved between ingests.
+    """
+    cache_dir = tmp_path / "render_cache"
+    _render_all(pdf, dpi=72, pages=[1, 2], cache_dir=cache_dir)
+
+    pdf.unlink()
+    pages = _render_all(pdf, dpi=72, pages=[1, 2], cache_dir=cache_dir)
+
+    assert set(pages) == {1, 2}
+
+
+def test_zero_memory_budget_is_honoured_not_read_as_unset(
+    pdf: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``memory_budget_mb=0`` means the smallest window, not the default one."""
+    from datasheet_rag import figures
+
+    real = figures._render_window_size
+    seen: list[int] = []
+
+    def spy(slot_bytes: int, budget_bytes: int, n_pages: int) -> int:
+        seen.append(budget_bytes)
+        return real(slot_bytes, budget_bytes, n_pages)
+
+    monkeypatch.setattr(figures, "_render_window_size", spy)
+
+    stream = figures.iter_pdf_pages(pdf, dpi=72, pages=[1, 2], memory_budget_mb=0)
+    next(stream)
+    stream.close()
+
+    assert seen == [0]
+
+
+def test_budget_fallback_tracks_the_settings_field(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The no-config fallback is the settings default, not a second literal.
+
+    Two copies of the number would drift, and which one you got would depend
+    only on whether a config happened to load.
+    """
+    from datasheet_rag import figures
+    from datasheet_rag.config import Settings
+
+    def no_settings() -> object:
+        raise RuntimeError("no RAG_HOME")
+
+    monkeypatch.setattr("datasheet_rag.config.get_settings", no_settings)
+
+    assert figures._render_budget_mb() == Settings.model_fields["render_memory_budget_mb"].default

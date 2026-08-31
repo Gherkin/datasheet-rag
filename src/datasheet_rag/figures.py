@@ -310,7 +310,6 @@ def _find_preceding_text(
 # Rendered pages are the memory hot-spot of the whole ingest: one A4 page at
 # 300 DPI is ~26 MB of RGB before anything is cropped from it. Everything below
 # is written to keep a bounded number of them resident at once (GH #59).
-_DEFAULT_RENDER_BUDGET_MB = 1024
 _RGB_BYTES_PER_PX = 3
 # A page costs more than its finished RGB buffer while it is being produced:
 # the PyMuPDF pixmap and the PIL copy coexist, and the PNG encoder allocates on
@@ -324,13 +323,22 @@ def _render_budget_mb() -> int:
     Settings are optional here on purpose: unit tests call the renderer
     directly without a configured RAG_HOME, and a missing config should mean
     "use the default budget", not "fail to render".
-    """
-    try:
-        from datasheet_rag.config import get_settings
 
+    The fallback is read off the settings field rather than restated as a
+    literal here. A second copy would drift the moment one of them changed,
+    and the drift would be invisible: which branch you land on depends only on
+    whether a config happened to load.
+    """
+    from datasheet_rag.config import Settings, get_settings
+
+    try:
         return get_settings().render_memory_budget_mb
     except Exception:
-        return _DEFAULT_RENDER_BUDGET_MB
+        return int(Settings.model_fields["render_memory_budget_mb"].default)
+
+
+# Only used to size a slot when the document itself cannot be measured.
+_A4_WIDTH_PT, _A4_HEIGHT_PT = 595, 842
 
 
 def _page_slot_bytes(pdf_path: Path, pages: list[int], dpi: int) -> int:
@@ -339,18 +347,31 @@ def _page_slot_bytes(pdf_path: Path, pages: list[int], dpi: int) -> int:
     Sized off the largest of the *target* pages rather than an assumed A4: a
     fold-out block diagram or a B4 reference manual is several times the area
     of a letter page, and the window has to shrink accordingly.
+
+    This only picks a window size, so it must not be the step that decides a
+    document is unreadable. When the PDF cannot be opened or measured it falls
+    back to an A4 slot, which keeps two things working: a re-ingest served
+    entirely from the render cache still succeeds when the source PDF has
+    moved, and a genuinely broken PDF fails in the worker instead — as a
+    PageRenderError naming the file, the page and the stage (GH #40), rather
+    than as a bare PyMuPDF error from the sizing pass.
     """
     import fitz  # pymupdf
 
     scale = dpi / 72
-    widest = 0
-    with fitz.open(str(pdf_path)) as doc:
-        for page_no in pages:
-            if not 1 <= page_no <= len(doc):
-                continue  # out-of-range pages fail later, with a proper error
-            rect = doc[page_no - 1].rect
-            widest = max(widest, int(rect.width * scale) * int(rect.height * scale))
-    return max(widest, 1) * _RGB_BYTES_PER_PX * _RENDER_OVERHEAD_FACTOR
+    largest = 0
+    try:
+        with fitz.open(str(pdf_path)) as doc:
+            for page_no in pages:
+                if not 1 <= page_no <= len(doc):
+                    continue  # out-of-range pages fail later, with a proper error
+                rect = doc[page_no - 1].rect
+                largest = max(largest, int(rect.width * scale) * int(rect.height * scale))
+    except Exception:
+        largest = 0
+    if largest == 0:
+        largest = int(_A4_WIDTH_PT * scale) * int(_A4_HEIGHT_PT * scale)
+    return largest * _RGB_BYTES_PER_PX * _RENDER_OVERHEAD_FACTOR
 
 
 def _render_window_size(slot_bytes: int, budget_bytes: int, n_pages: int) -> int:
@@ -408,10 +429,20 @@ def iter_pdf_pages(
     """
     import fitz  # pymupdf
 
-    # Resolve target page list — open briefly if caller passed None
+    # Resolve target page list — open briefly if caller passed None. Unlike the
+    # slot sizing below there is no sane fallback for a page count, so a failure
+    # here is reported properly rather than left as a bare PyMuPDF error.
     if pages is None:
-        with fitz.open(str(pdf_path)) as probe:
-            target_pages: list[int] = list(range(1, len(probe) + 1))
+        try:
+            with fitz.open(str(pdf_path)) as probe:
+                target_pages: list[int] = list(range(1, len(probe) + 1))
+        except Exception as exc:
+            raise PageRenderError(
+                stage="opening the PDF to count its pages",
+                path=pdf_path,
+                page=None,
+                cause=exc,
+            ) from exc
     else:
         target_pages = sorted(set(pages))
     if not target_pages:
@@ -434,7 +465,8 @@ def iter_pdf_pages(
             )
 
     # ---- Size the window from the memory budget ----------------------------
-    budget_bytes = (memory_budget_mb or _render_budget_mb()) * 1024 * 1024
+    budget = memory_budget_mb if memory_budget_mb is not None else _render_budget_mb()
+    budget_bytes = budget * 1024 * 1024
     slot_bytes = _page_slot_bytes(pdf_path, target_pages, dpi)
     n_workers = _render_window_size(slot_bytes, budget_bytes, len(target_pages))
     if slot_bytes * 2 > budget_bytes:
