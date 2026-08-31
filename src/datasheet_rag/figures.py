@@ -9,8 +9,11 @@ from __future__ import annotations
 
 import json
 import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import defaultdict, deque
+from collections.abc import Iterator
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
+from itertools import islice
 from pathlib import Path
 from threading import get_ident
 from typing import Any
@@ -304,19 +307,104 @@ def _find_preceding_text(
 # ---------------------------------------------------------------------------
 
 
-def render_pdf_pages(
+# Rendered pages are the memory hot-spot of the whole ingest: one A4 page at
+# 300 DPI is ~26 MB of RGB before anything is cropped from it. Everything below
+# is written to keep a bounded number of them resident at once (GH #59).
+_RGB_BYTES_PER_PX = 3
+# A page costs more than its finished RGB buffer while it is being produced:
+# the PyMuPDF pixmap and the PIL copy coexist, and the PNG encoder allocates on
+# top of both. Three times the pixel data is the honest per-slot figure.
+_RENDER_OVERHEAD_FACTOR = 3
+
+
+def _render_budget_mb() -> int:
+    """The configured page-render memory budget, or the built-in default.
+
+    Settings are optional here on purpose: unit tests call the renderer
+    directly without a configured RAG_HOME, and a missing config should mean
+    "use the default budget", not "fail to render".
+
+    The fallback is read off the settings field rather than restated as a
+    literal here. A second copy would drift the moment one of them changed,
+    and the drift would be invisible: which branch you land on depends only on
+    whether a config happened to load.
+    """
+    from datasheet_rag.config import Settings, get_settings
+
+    try:
+        return get_settings().render_memory_budget_mb
+    except Exception:
+        return int(Settings.model_fields["render_memory_budget_mb"].default)
+
+
+# Only used to size a slot when the document itself cannot be measured.
+_A4_WIDTH_PT, _A4_HEIGHT_PT = 595, 842
+
+
+def _page_slot_bytes(pdf_path: Path, pages: list[int], dpi: int) -> int:
+    """Approximate peak bytes one in-flight page occupies, at *dpi*.
+
+    Sized off the largest of the *target* pages rather than an assumed A4: a
+    fold-out block diagram or a B4 reference manual is several times the area
+    of a letter page, and the window has to shrink accordingly.
+
+    This only picks a window size, so it must not be the step that decides a
+    document is unreadable. When *nothing* could be measured it falls back to
+    an A4 slot — a partial measurement is kept in preference to that fallback,
+    since undersizing the slot is what widens the window past the budget. That
+    keeps two things working: a re-ingest served entirely from the render cache
+    still succeeds when the source PDF has moved, and a genuinely broken PDF
+    fails in the worker instead — as a PageRenderError naming the file, the
+    page and the stage (GH #40), rather than as a bare PyMuPDF error from the
+    sizing pass.
+    """
+    import fitz  # pymupdf
+
+    scale = dpi / 72
+    largest = 0
+    try:
+        with fitz.open(str(pdf_path)) as doc:
+            for page_no in pages:
+                if not 1 <= page_no <= len(doc):
+                    continue  # out-of-range pages fail later, with a proper error
+                rect = doc[page_no - 1].rect
+                largest = max(largest, int(rect.width * scale) * int(rect.height * scale))
+    except Exception:
+        # Whatever was measured before the failure is kept: a document that
+        # opens and then dies on a damaged page has usually already shown us
+        # its fold-out, and discarding that in favour of the A4 fallback would
+        # undersize the slot and widen the window past the budget.
+        pass
+    if largest == 0:
+        largest = int(_A4_WIDTH_PT * scale) * int(_A4_HEIGHT_PT * scale)
+    return largest * _RGB_BYTES_PER_PX * _RENDER_OVERHEAD_FACTOR
+
+
+def _render_window_size(slot_bytes: int, budget_bytes: int, n_pages: int) -> int:
+    """How many pages may be in flight at once without blowing the budget.
+
+    One slot is reserved for the page the consumer is currently holding, so the
+    pool only gets what is left over. Never returns less than one: a page too
+    big for the entire budget still has to be rendered, just on its own.
+    """
+    slots = max(2, budget_bytes // max(slot_bytes, 1))
+    return max(1, min(os.cpu_count() or 4, n_pages, 8, slots - 1))
+
+
+def iter_pdf_pages(
     pdf_path: Path,
     *,
     dpi: int = 300,
     pages: list[int] | None = None,
     cache_dir: Path | None = None,
     refresh_cache: bool = False,
-) -> dict[int, Image.Image]:
-    """Render PDF pages to PIL Images. Returns {page_number: Image}.
+    memory_budget_mb: int | None = None,
+) -> Iterator[tuple[int, Image.Image]]:
+    """Yield ``(page_number, image)`` for each requested page, in page order.
 
     Page numbers are 1-indexed to match Textract conventions.
 
-    Two optimisations over the original Poppler/subprocess approach:
+    Three properties, in the order they were added:
 
     1. **Page render cache** — each rendered page is saved as a PNG under
        ``cache_dir / f'p{page:04d}_{dpi}dpi.png'``. On subsequent ingests
@@ -331,81 +419,110 @@ def render_pdf_pages(
        ``fitz.Document`` (PyMuPDF is not thread-safe when sharing one
        instance) and renders its assigned page independently. Wall-clock
        time scales roughly as 1/n_workers.
+
+    3. **Bounded memory** (GH #59) — this is a generator, and only a small
+       window of pages is ever decoded at once. The old shape returned
+       ``dict[int, Image.Image]`` with every page resident, which scales
+       linearly with page count and DPI and with nothing capping it: a
+       900-page datasheet at 300 DPI is ~23 GB of RGB, so the kernel
+       OOM-killed the server mid-ingest — no traceback, just SIGKILL. The
+       window is now sized from ``render_memory_budget_mb`` and the largest
+       target page, so peak footprint is bounded by the budget rather than by
+       the document.
+
+    The caller must therefore consume each image before asking for the next,
+    and must not accumulate them — that would reintroduce the OOM.
     """
     import fitz  # pymupdf
 
-    # Resolve target page list — open briefly if caller passed None
+    # Resolve target page list — open briefly if caller passed None. Unlike the
+    # slot sizing below there is no sane fallback for a page count, so a failure
+    # here is reported properly rather than left as a bare PyMuPDF error.
     if pages is None:
-        with fitz.open(str(pdf_path)) as probe:
-            target_pages: list[int] = list(range(1, len(probe) + 1))
+        try:
+            with fitz.open(str(pdf_path)) as probe:
+                target_pages: list[int] = list(range(1, len(probe) + 1))
+        except Exception as exc:
+            raise PageRenderError(
+                stage="opening the PDF to count its pages",
+                path=pdf_path,
+                page=None,
+                cause=exc,
+            ) from exc
     else:
         target_pages = sorted(set(pages))
+    if not target_pages:
+        return
 
-    # ---- Serve from cache where possible -----------------------------------
-    result: dict[int, Image.Image] = {}
-    to_render: list[int] = []
+    def _cache_file(page_no: int) -> Path | None:
+        return None if cache_dir is None else cache_dir / f"p{page_no:04d}_{dpi}dpi.png"
 
     if cache_dir is not None:
         cache_dir.mkdir(parents=True, exist_ok=True)
         if refresh_cache:
             _clear_render_cache(cache_dir)
-        damaged = 0
-        for page_no in target_pages:
-            cache_file = cache_dir / f"p{page_no:04d}_{dpi}dpi.png"
-            existed = cache_file.is_file()
-            img = _load_cached_page(cache_file)
-            if img is not None:
-                result[page_no] = img
-                continue
-            if existed:
-                damaged += 1  # it was there but wouldn't decode — discarded above
-            to_render.append(page_no)
-        if damaged:
+        # Existence-only pre-scan: cheap, and just for the progress line. Whether
+        # a cached page actually decodes is settled per page, in the worker.
+        on_disk = sum(1 for p in target_pages if (f := _cache_file(p)) and f.is_file())
+        if on_disk:
             console.print(
-                f"[yellow]Page render cache:[/] {damaged} cached page(s) in "
-                f"{cache_dir} were unreadable (likely an interrupted render) "
-                "— discarded, re-rendering."
+                f"[dim]Page render cache:[/] {on_disk} of {len(target_pages)} "
+                f"pages already cached, {len(target_pages) - on_disk} to render."
             )
-        if result:
-            console.print(
-                f"[dim]Page render cache:[/] {len(result)} of {len(target_pages)} "
-                f"pages loaded, {len(to_render)} to render."
-            )
-    else:
-        to_render = list(target_pages)
 
-    # ---- Render remaining pages in parallel --------------------------------
-    if to_render:
-        pdf_path_str = str(pdf_path)
-        mat_scale = dpi / 72
-        n_workers = min(os.cpu_count() or 4, len(to_render), 8)
+    # ---- Size the window from the memory budget ----------------------------
+    budget = memory_budget_mb if memory_budget_mb is not None else _render_budget_mb()
+    budget_bytes = budget * 1024 * 1024
+    slot_bytes = _page_slot_bytes(pdf_path, target_pages, dpi)
+    n_workers = _render_window_size(slot_bytes, budget_bytes, len(target_pages))
+    if slot_bytes * 2 > budget_bytes:
+        console.print(
+            f"[yellow]Page render:[/] one page at {dpi} DPI needs about "
+            f"{slot_bytes / 1024 / 1024:.0f} MB, against a "
+            f"{budget_bytes / 1024 / 1024:.0f} MB budget — rendering serially. "
+            "Lower --dpi, or raise RAG_RENDER_MEMORY_BUDGET_MB."
+        )
 
-        def _render_one(page_no: int) -> tuple[int, Image.Image]:
-            # Each worker owns its own fitz.Document — required for thread safety.
-            try:
-                doc = fitz.open(pdf_path_str)
-                mat = fitz.Matrix(mat_scale, mat_scale)
-                pix = doc[page_no - 1].get_pixmap(matrix=mat)
+    mat_scale = dpi / 72
+    pdf_path_str = str(pdf_path)
+
+    def _page(page_no: int) -> tuple[int, Image.Image, str]:
+        """Return one page: from the cache when it decodes, rendered otherwise."""
+        cache_file = _cache_file(page_no)
+        stale = False
+        if cache_file is not None:
+            stale = cache_file.is_file()
+            cached = _load_cached_page(cache_file)
+            if cached is not None:
+                return page_no, cached, "cached"
+
+        # Each worker owns its own fitz.Document — required for thread safety.
+        try:
+            with fitz.open(pdf_path_str) as doc:
+                pix = doc[page_no - 1].get_pixmap(matrix=fitz.Matrix(mat_scale, mat_scale))
                 img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
-                doc.close()
+                del pix  # the pixmap doubles this page's footprint until it goes
+        except Exception as exc:
+            raise PageRenderError(
+                stage="rendering a page", path=pdf_path, page=page_no, cause=exc
+            ) from exc
+        if cache_file is not None:
+            try:
+                _save_image_atomic(img, cache_file)
             except Exception as exc:
                 raise PageRenderError(
-                    stage="rendering a page", path=pdf_path, page=page_no, cause=exc
+                    stage="caching a rendered page",
+                    path=cache_file,
+                    page=page_no,
+                    cause=exc,
                 ) from exc
-            if cache_dir is not None:
-                cache_file = cache_dir / f"p{page_no:04d}_{dpi}dpi.png"
-                try:
-                    _save_image_atomic(img, cache_file)
-                except Exception as exc:
-                    raise PageRenderError(
-                        stage="caching a rendered page",
-                        path=cache_file,
-                        page=page_no,
-                        cause=exc,
-                    ) from exc
-            return page_no, img
+        return page_no, img, "repaired" if stale else "rendered"
 
-        with Progress(
+    counts = {"cached": 0, "rendered": 0, "repaired": 0}
+    remaining = iter(target_pages)
+
+    with (
+        Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
             BarColumn(),
@@ -413,20 +530,41 @@ def render_pdf_pages(
             MofNCompleteColumn(),
             TimeRemainingColumn(),
             console=console,
-        ) as progress:
-            task = progress.add_task(
-                f"Rendering {len(to_render)} pages at {dpi} DPI · {n_workers} workers…",
-                total=len(to_render),
-            )
-            with ThreadPoolExecutor(max_workers=n_workers) as pool:
-                futures = {pool.submit(_render_one, p): p for p in to_render}
-                for fut in as_completed(futures):
-                    page_no, img = fut.result()
-                    result[page_no] = img
-                    progress.advance(task)
+        ) as progress,
+        ThreadPoolExecutor(max_workers=n_workers) as pool,
+    ):
+        task = progress.add_task(
+            f"Pages at {dpi} DPI · {n_workers} workers…", total=len(target_pages)
+        )
+        # Keep exactly n_workers pages in flight: submitting the whole list up
+        # front is what made peak memory a function of page count (GH #59).
+        window: deque[Future[tuple[int, Image.Image, str]]] = deque(
+            pool.submit(_page, p) for p in islice(remaining, n_workers)
+        )
+        try:
+            while window:
+                page_no, img, status = window.popleft().result()
+                for nxt in islice(remaining, 1):
+                    window.append(pool.submit(_page, nxt))
+                counts[status] += 1
+                progress.advance(task)
+                yield page_no, img
+        finally:
+            # An abandoned generator (an exception in the consumer) must not
+            # leave the pool rendering pages nobody will ever collect.
+            for pending in window:
+                pending.cancel()
 
-    console.print(f"[green]Rendered[/] {len(result)} pages")
-    return result
+    if counts["repaired"]:
+        console.print(
+            f"[yellow]Page render cache:[/] {counts['repaired']} cached page(s) in "
+            f"{cache_dir} were unreadable (likely an interrupted render) "
+            "— discarded and re-rendered."
+        )
+    console.print(
+        f"[green]Rendered[/] {counts['rendered'] + counts['repaired']} pages "
+        f"({counts['cached']} from cache)"
+    )
 
 
 def crop_figure(
@@ -486,8 +624,6 @@ def _compute_adjacent_crop_caps(
 
     Returns {block_id: {'max_right': x, 'min_left': x}} for affected regions.
     """
-    from collections import defaultdict
-
     by_page: dict[int, list[FigureRegion]] = defaultdict(list)
     for r in regions:
         by_page[r.page].append(r)
@@ -577,7 +713,13 @@ def extract_figures_from_regions(
         f"across pages {sorted(set(r.page for r in regions))}"
     )
 
-    needed_pages = sorted(set(r.page for r in regions))
+    # Regions grouped by the page they sit on, keeping each one's position in
+    # the caller's list: a page is cropped the moment it is rendered and then
+    # dropped, so the manifest is reassembled into region order at the end.
+    pending: dict[int, list[tuple[int, FigureRegion]]] = defaultdict(list)
+    for i, region in enumerate(regions):
+        pending[region.page].append((i, region))
+    needed_pages = sorted(pending)
 
     # Derive a per-document render cache directory so re-ingests of the same
     # document (e.g. after layout fixes) skip re-rendering pages that haven't
@@ -591,48 +733,60 @@ def extract_figures_from_regions(
     except Exception:
         pass
 
-    page_images = render_pdf_pages(
+    crop_caps = _compute_adjacent_crop_caps(regions, padding_pct)
+    if crop_caps:
+        console.print(f"[yellow]Column caps:[/] padding capped on {len(crop_caps)} regions")
+
+    manifest = FigureManifest(doc_id=doc_id, source_pdf=str(pdf_path))
+    extracted: list[tuple[int, ExtractedFigure]] = []
+
+    # Streamed, one page at a time: holding every rendered page until the crop
+    # loop started is what OOM-killed the server on long documents (GH #59).
+    page_stream = iter_pdf_pages(
         pdf_path,
         dpi=dpi,
         pages=needed_pages,
         cache_dir=render_cache_dir,
         refresh_cache=force,
     )
+    for page_no, page_img in page_stream:
+        try:
+            for i, region in pending.pop(page_no, []):
+                caps = crop_caps.get(region.block_id, {})
+                cropped = crop_figure(
+                    page_img,
+                    region,
+                    padding_pct=padding_pct,
+                    max_right=caps.get("max_right", 1.0),
+                    min_left=caps.get("min_left", 0.0),
+                )
+                prefix = "formula" if region.kind == "formula" else "fig"
+                filename = f"p{region.page:03d}_{prefix}{i:03d}.{image_format}"
+                image_path = output_dir / filename
+                _save_image_atomic(cropped, image_path, image_format)
 
-    crop_caps = _compute_adjacent_crop_caps(regions, padding_pct)
-    if crop_caps:
-        console.print(f"[yellow]Column caps:[/] padding capped on {len(crop_caps)} regions")
+                extracted.append(
+                    (
+                        i,
+                        ExtractedFigure(
+                            region=region,
+                            image_path=image_path,
+                            width_px=cropped.width,
+                            height_px=cropped.height,
+                        ),
+                    )
+                )
+                cropped.close()
+        finally:
+            page_img.close()  # free it before the next page is pulled in
 
-    manifest = FigureManifest(doc_id=doc_id, source_pdf=str(pdf_path))
-
-    for i, region in enumerate(track(regions, description="Cropping figures…")):
-        page_img = page_images.get(region.page)
-        if page_img is None:
-            console.print(f"[red]Warning:[/] page {region.page} not rendered, skipping")
-            continue
-
-        caps = crop_caps.get(region.block_id, {})
-        cropped = crop_figure(
-            page_img,
-            region,
-            padding_pct=padding_pct,
-            max_right=caps.get("max_right", 1.0),
-            min_left=caps.get("min_left", 0.0),
+    for page_no in sorted(pending):
+        console.print(
+            f"[red]Warning:[/] page {page_no} not rendered, "
+            f"skipping {len(pending[page_no])} region(s)"
         )
-        prefix = "formula" if region.kind == "formula" else "fig"
-        filename = f"p{region.page:03d}_{prefix}{i:03d}.{image_format}"
-        image_path = output_dir / filename
-        _save_image_atomic(cropped, image_path, image_format)
 
-        manifest.figures.append(
-            ExtractedFigure(
-                region=region,
-                image_path=image_path,
-                width_px=cropped.width,
-                height_px=cropped.height,
-            )
-        )
-
+    manifest.figures = [fig for _, fig in sorted(extracted, key=lambda pair: pair[0])]
     console.print(f"[green]Extracted {len(manifest.figures)} regions[/] → {output_dir}")
     return manifest
 
