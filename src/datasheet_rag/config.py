@@ -423,6 +423,21 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Figure extraction (page rendering)
+    render_memory_budget_mb: int = Field(
+        default=1024,
+        description=(
+            "Approximate memory ceiling, in MiB, for PDF pages held in RAM "
+            "while figures are cropped out of them. Page renders are the "
+            "ingest's largest allocation (an A4 page at 300 DPI is ~26 MB), "
+            "and this bounds how many are decoded at once — the renderer "
+            "streams pages and sizes its worker window from this budget and "
+            "the document's largest page, so a 900-page manual costs the same "
+            "as a 10-page one. Raise it to render more pages in parallel; "
+            "lower it on a memory-capped container."
+        ),
+    )
+
     # Figure description (Bedrock Claude vision)
     description_model_id: str = Field(
         default="eu.anthropic.claude-haiku-4-5-20251001-v1:0",
