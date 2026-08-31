@@ -434,10 +434,10 @@ class Settings(BaseSettings):
             "and sizes its worker window from this budget and the document's "
             "largest page, so a 900-page manual costs the same as a 10-page "
             "one. It covers the page buffers only, not total process memory: "
-            "the interpreter, PyMuPDF and Pillow add a baseline of roughly "
-            "150-250 MB on top. On a memory-capped container set this a few "
-            "hundred MB below the cap rather than at it; raise it to render "
-            "more pages in parallel."
+            "the interpreter, PyMuPDF and Pillow add a baseline on top, which "
+            "measured at roughly 100 MB on the GH #59 test documents. On a "
+            "memory-capped container set this a few hundred MB below the cap "
+            "rather than at it; raise it to render more pages in parallel."
         ),
     )
 

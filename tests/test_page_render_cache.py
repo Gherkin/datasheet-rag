@@ -340,7 +340,9 @@ def test_budget_fallback_tracks_the_settings_field(monkeypatch: pytest.MonkeyPat
     """The no-config fallback is the settings default, not a second literal.
 
     Two copies of the number would drift, and which one you got would depend
-    only on whether a config happened to load.
+    only on whether a config happened to load. Both sides are asserted against
+    the literal rather than against each other: comparing the fallback to the
+    expression it is implemented as cannot fail, so it would pin nothing.
     """
     from datasheet_rag import figures
     from datasheet_rag.config import Settings
@@ -350,4 +352,62 @@ def test_budget_fallback_tracks_the_settings_field(monkeypatch: pytest.MonkeyPat
 
     monkeypatch.setattr("datasheet_rag.config.get_settings", no_settings)
 
-    assert figures._render_budget_mb() == Settings.model_fields["render_memory_budget_mb"].default
+    assert Settings.model_fields["render_memory_budget_mb"].default == 1024
+    assert figures._render_budget_mb() == 1024
+
+
+def test_slot_sizing_keeps_what_it_measured_before_a_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A document that dies mid-measurement must not fall back to A4.
+
+    ``fitz.open`` is tolerant enough to open a file whose later pages are
+    damaged. Throwing away the pages already measured would substitute an A4
+    slot for a fold-out that was sized correctly moments earlier — undersizing
+    the slot, widening the window, and overshooting the very budget this
+    machinery exists to hold (GH #59).
+    """
+    import fitz
+
+    from datasheet_rag.figures import (
+        _A4_HEIGHT_PT,
+        _A4_WIDTH_PT,
+        _RENDER_OVERHEAD_FACTOR,
+        _RGB_BYTES_PER_PX,
+        _page_slot_bytes,
+    )
+
+    class _Rect:
+        def __init__(self, width: float, height: float) -> None:
+            self.width, self.height = width, height
+
+    class _Page:
+        def __init__(self, rect: _Rect) -> None:
+            self.rect = rect
+
+    class _Doc:
+        """Page 1 is an A2 fold-out; page 2 is damaged and raises."""
+
+        def __len__(self) -> int:
+            return 2
+
+        def __getitem__(self, index: int) -> _Page:
+            if index == 0:
+                return _Page(_Rect(1191, 1684))
+            raise RuntimeError("cannot find page 2 in the file")
+
+        def __enter__(self) -> _Doc:
+            return self
+
+        def __exit__(self, *exc: object) -> bool:
+            return False
+
+    monkeypatch.setattr(fitz, "open", lambda *a, **k: _Doc())
+
+    measured = _page_slot_bytes(tmp_path / "damaged.pdf", [1, 2], 72)
+
+    # At 72 DPI the scale is 1, so the slot is the page area times the
+    # per-pixel and in-flight-overhead factors — the A2 page, not an A4 one.
+    a2_slot = 1191 * 1684 * _RGB_BYTES_PER_PX * _RENDER_OVERHEAD_FACTOR
+    a4_slot = _A4_WIDTH_PT * _A4_HEIGHT_PT * _RGB_BYTES_PER_PX * _RENDER_OVERHEAD_FACTOR
+    assert measured == a2_slot > a4_slot

@@ -349,12 +349,14 @@ def _page_slot_bytes(pdf_path: Path, pages: list[int], dpi: int) -> int:
     of a letter page, and the window has to shrink accordingly.
 
     This only picks a window size, so it must not be the step that decides a
-    document is unreadable. When the PDF cannot be opened or measured it falls
-    back to an A4 slot, which keeps two things working: a re-ingest served
-    entirely from the render cache still succeeds when the source PDF has
-    moved, and a genuinely broken PDF fails in the worker instead — as a
-    PageRenderError naming the file, the page and the stage (GH #40), rather
-    than as a bare PyMuPDF error from the sizing pass.
+    document is unreadable. When *nothing* could be measured it falls back to
+    an A4 slot — a partial measurement is kept in preference to that fallback,
+    since undersizing the slot is what widens the window past the budget. That
+    keeps two things working: a re-ingest served entirely from the render cache
+    still succeeds when the source PDF has moved, and a genuinely broken PDF
+    fails in the worker instead — as a PageRenderError naming the file, the
+    page and the stage (GH #40), rather than as a bare PyMuPDF error from the
+    sizing pass.
     """
     import fitz  # pymupdf
 
@@ -368,7 +370,11 @@ def _page_slot_bytes(pdf_path: Path, pages: list[int], dpi: int) -> int:
                 rect = doc[page_no - 1].rect
                 largest = max(largest, int(rect.width * scale) * int(rect.height * scale))
     except Exception:
-        largest = 0
+        # Whatever was measured before the failure is kept: a document that
+        # opens and then dies on a damaged page has usually already shown us
+        # its fold-out, and discarding that in favour of the A4 fallback would
+        # undersize the slot and widen the window past the budget.
+        pass
     if largest == 0:
         largest = int(_A4_WIDTH_PT * scale) * int(_A4_HEIGHT_PT * scale)
     return largest * _RGB_BYTES_PER_PX * _RENDER_OVERHEAD_FACTOR
