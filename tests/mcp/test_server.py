@@ -54,7 +54,7 @@ def _make_chunk(
     text: str = "",
     section: str = "",
     chapter: str = "",
-    page: int = 1,
+    page: int | None = 1,
     parent_id: str | None = None,
     prev_id: str | None = None,
     next_id: str | None = None,
@@ -66,7 +66,7 @@ def _make_chunk(
         doc_id=doc_id,
         chapter_title=chapter,
         section_title=section,
-        page_numbers=[page],
+        page_numbers=[page] if page is not None else [],
         layout_type=layout_type,
         table_structure_warning=table_structure_warning,
     )
@@ -786,6 +786,7 @@ def test_declared_version_matches_the_packaging_metadata() -> None:
     installed = importlib.metadata.version("datasheet-rag")
     assert installed == datasheet_rag.__version__
 
+
 # ---------------------------------------------------------------------------
 # Guidance lives in tool descriptions, not in results (GH #30)
 # ---------------------------------------------------------------------------
@@ -804,9 +805,25 @@ _DIRECTIVE_MARKERS = (
 )
 
 
+#: Result fields the server authors itself. The contract under test is that
+#: *these* stay free of directives — the rest (`text`, `section`, `chapter`,
+#: the figure caption/description) is verbatim document content, and a
+#: datasheet is entitled to say "Do not exceed the absolute maximum ratings"
+#: without that reading as a prompt-injection regression.
+_SERVER_AUTHORED_FIELDS = (
+    "has_figure",
+    "figure_status",
+    "figure_uri",
+    "table_structure",
+    "table_structure_warning",
+)
+
+
 def _assert_no_directives(result: dict[str, Any]) -> None:
-    for key, value in result.items():
-        haystack = f"{key} {value}".lower()
+    for key in _SERVER_AUTHORED_FIELDS:
+        if key not in result:
+            continue
+        haystack = f"{key} {result[key]}".lower()
         for marker in _DIRECTIVE_MARKERS:
             assert marker not in haystack, f"directive {marker!r} in result field {key!r}"
 
@@ -860,13 +877,94 @@ def test_chunk_tools_describe_the_fields_they_emit(tool_name: str) -> None:
     assert "\n\nFields a chunk result may carry" in description
 
 
-@pytest.mark.parametrize("local_client, expected", [(True, "show_pdf"), (False, "show_page")])
-def test_chunk_tool_description_names_the_usable_source_page_tool(
-    local_client: bool, expected: str
-) -> None:
+@pytest.mark.parametrize("local_client", [True, False])
+def test_table_check_always_names_show_page(local_client: bool) -> None:
+    """Only ``show_page`` returns an image the model can read.
+
+    ``show_pdf`` hands back a loopback URL for the *user* to open, so pointing
+    the model at it to confirm a table is pointing it at a tool that cannot
+    confirm anything.
+    """
     pytest.importorskip("mcp")
     from datasheet_rag.mcp import server as mcp_server
 
     server = mcp_server.build_server(local_client=local_client)
     description = server._tool_manager.get_tool("search").description
-    assert f"{expected}(doc_id, page)" in description
+    assert "To check a table, call `show_page(doc_id, page)`" in description
+
+
+def test_local_description_marks_show_pdf_as_the_user_facing_tool() -> None:
+    pytest.importorskip("mcp")
+    from datasheet_rag.mcp import server as mcp_server
+
+    server = mcp_server.build_server(local_client=True)
+    description = server._tool_manager.get_tool("search").description
+    assert "`show_pdf(doc_id, page)`" in description
+    assert "returns no image to you" in description
+
+
+def test_description_warns_that_page_can_be_a_range() -> None:
+    """`page` is a string, and `"53-55"` for a chunk spanning pages.
+
+    Both source-page tools declare ``page: int``, so an agent that passes the
+    field through verbatim has the call rejected by schema validation.
+    """
+    pytest.importorskip("mcp")
+    from datasheet_rag.mcp import server as mcp_server
+
+    description = mcp_server.build_server()._tool_manager.get_tool("search").description
+    assert "pass its first number" in description
+
+
+def test_figure_status_is_described_as_per_chunk() -> None:
+    pytest.importorskip("mcp")
+    from datasheet_rag.mcp import server as mcp_server
+
+    description = mcp_server.build_server()._tool_manager.get_tool("search").description
+    assert "per chunk" in description
+
+
+def test_warned_table_without_pages_still_reports_its_structure(conn: Any) -> None:
+    """The `and pages` guard existed only because the old text needed pages[0].
+
+    Suppressing the flags on a page-less chunk presented a table Docling had
+    flagged as if its structure were clean.
+    """
+    chunk = _make_chunk(
+        "t:nopage",
+        text="Pin | Function\n88 | -",
+        page=None,
+        layout_type=LayoutType.TABLE,
+        table_structure_warning="garbled header",
+    )
+    insert_chunks(conn, [chunk], vectors={"t:nopage": _vec(11)}, project_id="p1")
+
+    out = _get_chunk_impl("t:nopage", conn=conn)
+    assert out is not None
+    assert out["page"] == ""
+    assert out["table_structure"] == "suspect"
+    assert out["table_structure_warning"] == "garbled header"
+
+
+def test_datasheet_prose_is_not_a_directive_regression(conn: Any) -> None:
+    """The contract is about server-authored fields, not document content.
+
+    Datasheets are full of imperatives — a chunk quoting one is not a prompt
+    injection, and must not be reported as one.
+    """
+    chunk = _make_chunk(
+        "t:prose",
+        text=(
+            "Do not exceed the absolute maximum ratings. Stresses beyond those "
+            "listed may cause permanent damage; you must observe the operating "
+            "conditions in Table 3."
+        ),
+        section="Absolute Maximum Ratings",
+        layout_type=LayoutType.TABLE,
+    )
+    insert_chunks(conn, [chunk], vectors={"t:prose": _vec(12)}, project_id="p1")
+
+    out = _get_chunk_impl("t:prose", conn=conn)
+    assert out is not None
+    assert "do not exceed" in out["text"].lower()
+    _assert_no_directives(out)

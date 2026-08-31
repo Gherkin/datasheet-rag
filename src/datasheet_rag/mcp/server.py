@@ -279,10 +279,13 @@ def _shape_chunk(result_or_chunk: Any, *, score: float | None = None) -> dict[st
         if chunk.figure_description:
             out["figure_description"] = chunk.figure_description
         out["figure_status"] = "image_not_stored"
-    if chunk.metadata.layout_type == LayoutType.TABLE and pages:
-        # "unverified" is the floor, not a complaint: Docling's table structure
-        # is machine-extracted and never checked against the rendered page.
-        # "suspect" adds that the extraction flagged itself.
+    if chunk.metadata.layout_type == LayoutType.TABLE:
+        # "unverified" is the floor, not a complaint: the table structure is
+        # machine-extracted, and this result does not confirm it against the
+        # rendered page. "suspect" adds that the extraction flagged itself.
+        # No `pages` guard: the old message interpolated pages[0], but these
+        # flags need no page number, and suppressing them on a page-less chunk
+        # would present a warned table as if its structure were clean.
         warning = chunk.metadata.table_structure_warning
         if warning:
             out["table_structure"] = "suspect"
@@ -321,26 +324,47 @@ def _chunk_fields_help(source_page_tool: str) -> str:
     the meaning of a field travels with the tool that emits it whichever way
     the host surfaces server instructions.
     """
+    # Only ``show_page`` renders the page as an image the model can read;
+    # ``show_pdf`` hands back a loopback URL for the user to open. So the
+    # check-the-table advice names ``show_page`` whatever this server calls
+    # its user-facing source-page tool.
+    if source_page_tool == "show_page":
+        source_page_note = (
+            "To check a table, call `show_page(doc_id, page)` — it renders\n"
+            "the source page as an image you can read."
+        )
+    else:
+        source_page_note = (
+            "To check a table, call `show_page(doc_id, page)` — it renders\n"
+            "the source page as an image you can read. "
+            f"`{source_page_tool}(doc_id, page)`\n"
+            "opens the document in a browser for the *user* to look at, and\n"
+            "returns no image to you."
+        )
+
     return f"""Fields a chunk result may carry, and what they mean:
 
 - `has_figure: true` — the chunk is a diagram, schematic or curve and
   its image can be served. `show_figure(chunk_id)` renders it inline;
   `get_figure(chunk_id)` returns the bytes. Show a figure whenever it
   illustrates what the user asked about; offer it when unsure.
-- `figure_status: "image_not_stored"` — a figure chunk whose document
-  was ingested without figures. `show_figure` and `get_figure` cannot
-  succeed on it, now or on retry; its `figure_caption`,
-  `figure_description` and source page are all there is.
-- `table_structure: "unverified"` — table structure is machine
-  extracted and never checked against the rendered page, so headers
-  can be mislabelled and stray text merged into cells. Worth
-  confirming against the page before citing an exact value.
+- `figure_status: "image_not_stored"` — this chunk's image is absent
+  from the store. `show_figure` and `get_figure` cannot succeed on it,
+  now or on retry; its `figure_caption`, `figure_description` and
+  source page are all there is. The flag is per chunk, so other figure
+  chunks from the same document may still be serviceable.
+- `table_structure: "unverified"` — this result does not confirm the
+  table against the rendered page, so headers can be mislabelled and
+  stray text merged into cells. Worth checking the page yourself
+  before citing an exact value.
 - `table_structure: "suspect"` — extraction flagged the structure
-  itself; `table_structure_warning` says why. Confirm against the
-  page before citing values from it.
+  itself; `table_structure_warning` says why. Check the page before
+  citing values from it.
 
-A chunk's own `doc_id` and `page` address its source page, for
-`{source_page_tool}(doc_id, page)`.
+{source_page_note}
+
+`show_page` and any other page tool take a single integer, but a chunk's
+`page` may be a range such as `"53-55"` — pass its first number.
 """
 
 
