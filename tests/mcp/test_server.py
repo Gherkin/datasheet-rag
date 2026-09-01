@@ -747,6 +747,29 @@ def test_mcp_app_tools_declare_their_widget_resource() -> None:
     assert set(_APP_TOOLS.values()) <= served
 
 
+def test_figure_resource_advertises_a_binary_mime_type() -> None:
+    """Figure resource metadata must not label image bytes as plain text."""
+    pytest.importorskip("mcp")
+    import asyncio
+
+    from pydantic import AnyUrl
+
+    from datasheet_rag.mcp import server as mcp_server
+
+    server = mcp_server.build_server()
+    templates = asyncio.run(server.list_resource_templates())
+    template = next(t for t in templates if t.uri_template == "rag://figure/{chunk_id}")
+    assert template.mime_type == "application/octet-stream"
+
+    with mock.patch(
+        "datasheet_rag.mcp.server._get_figure_impl",
+        return_value={"image_bytes": b"figure-bytes"},
+    ):
+        contents = asyncio.run(server.read_resource(AnyUrl("rag://figure/fig:1")))
+    assert len(contents) == 1
+    assert contents[0].mime_type == "application/octet-stream"
+
+
 def test_handshake_version_survives_a_missing_distribution() -> None:
     """The bundle has no installed metadata, and must still report a version.
 
