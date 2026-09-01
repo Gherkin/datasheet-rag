@@ -943,13 +943,14 @@ def build_server(
             TextContent(type="text", text=text_summary),
         ]
 
-    @mcp.resource("rag://figure/{chunk_id}")
+    @mcp.resource("rag://figure/{chunk_id}", mime_type="application/octet-stream")
     def figure_resource(chunk_id: str) -> bytes:
         """Stable URI for a figure. Clients can dereference this on demand.
 
-        Returned as raw bytes; the MCP SDK negotiates the content type
-        from the resource registration. See ``get_figure`` for the
-        in-tool-result rendering path.
+        Returned as raw bytes with a binary content type because the resource
+        registration cannot infer a per-figure MIME type. See ``get_figure``
+        for the in-tool-result rendering path, which preserves the specific
+        image type.
         """
         result = _get_figure_impl(chunk_id, backend=backend)
         image_bytes: bytes = result["image_bytes"]
