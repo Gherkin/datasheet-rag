@@ -108,6 +108,42 @@ class ScannedPdfError(Exception):
     """Raised when Docling is forced on a scanned PDF (no text layer to parse)."""
 
 
+class BackendUnavailableError(Exception):
+    """Raised when the requested parse backend cannot run in this process."""
+
+
+def textract_blocks_cache(pdf_path: Path, doc_id: str | None) -> tuple[str, Path]:
+    """The doc_id and the cached-blocks path a Textract run resumes from."""
+    from datasheet_rag.config import get_settings
+    from datasheet_rag.docling_parser import content_hash
+
+    did = doc_id or content_hash(pdf_path)
+    return did, get_settings().output_dir / f"{did}_blocks.json"
+
+
+def check_backend_prerequisites(
+    pdf_path: Path, *, backend: str, doc_id: str | None, force: bool
+) -> None:
+    """Fail before any work when *backend* cannot run here (GH #65).
+
+    A forced Textract run reads the PDF from S3, so with no bucket it cannot
+    succeed — unless blocks from an earlier OCR run are cached, in which case
+    it never touches S3. ``"auto"`` only picks Textract after type detection,
+    where ``upload_pdf``'s own ``require_s3_bucket()`` guard catches it.
+    """
+    from datasheet_rag.config import get_settings
+
+    if backend != "textract" or get_settings().s3_bucket:
+        return
+    if not force and textract_blocks_cache(pdf_path, doc_id)[1].exists():
+        return
+    raise BackendUnavailableError(
+        "The textract backend needs S3, but no bucket is configured — set "
+        "RAG_S3_BUCKET where the pipeline runs. Textract reads its input PDF "
+        "from S3."
+    )
+
+
 def parse_pdf_to_graph(
     pdf_path: Path,
     *,
@@ -296,9 +332,7 @@ def parse_pdf_to_graph(
             wait_for_job,
         )
 
-        blocks_path_probe = None
-        did_probe = doc_id or content_hash(pdf_path)
-        blocks_path_probe = settings.output_dir / f"{did_probe}_blocks.json"
+        did_probe, blocks_path_probe = textract_blocks_cache(pdf_path, doc_id)
         have_cached_blocks = blocks_path_probe.exists() and not force
 
         if not allow_ocr and not have_cached_blocks:

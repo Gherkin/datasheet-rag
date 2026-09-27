@@ -315,6 +315,78 @@ def test_server_ingest_pdf_streams_sse(client, monkeypatch) -> None:
     }
 
 
+def test_server_ingest_pdf_failure_logs_traceback(client, monkeypatch, caplog) -> None:
+    # GH #65: the client gets str(exc) only, so the server must keep the stack.
+    import datasheet_rag.ingest_pipeline as ip
+
+    def deep_failure():
+        raise TypeError("expected string or bytes-like object, got 'NoneType'")
+
+    def fake_parse(pdf_path, **kw):
+        deep_failure()
+
+    monkeypatch.setattr(ip, "parse_pdf_to_graph", fake_parse)
+
+    with caplog.at_level("ERROR", logger="datasheet_rag.server"):
+        r = client.post(
+            "/ingest-pdf",
+            files={"payload": ("x.pdf", b"%PDF-1.4 fake", "application/pdf")},
+            data={"options": json.dumps({"project_id": "proj"})},
+        )
+    assert r.status_code == 200, r.text
+    assert "event: error" in r.text
+    assert "got 'NoneType'" in r.text
+
+    [record] = [rec for rec in caplog.records if rec.name == "datasheet_rag.server"]
+    assert "x.pdf" in record.getMessage() and "proj" in record.getMessage()
+    assert record.exc_info is not None
+    assert "deep_failure" in caplog.text
+
+
+def test_server_ingest_pdf_rejects_textract_without_bucket(client, monkeypatch, tmp_path) -> None:
+    # GH #65: an unsatisfiable backend is a 400 naming the setting, and the
+    # pipeline never starts.
+    import datasheet_rag.ingest_pipeline as ip
+    from datasheet_rag.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "s3_bucket", None)
+    monkeypatch.setattr(get_settings(), "output_dir", tmp_path)
+    monkeypatch.setattr(
+        ip, "parse_pdf_to_graph", lambda *a, **kw: pytest.fail("pipeline should not run")
+    )
+
+    r = client.post(
+        "/ingest-pdf",
+        files={"payload": ("x.pdf", b"%PDF-1.4 fake", "application/pdf")},
+        data={"options": json.dumps({"backend": "textract"})},
+    )
+    assert r.status_code == 400
+    assert "RAG_S3_BUCKET" in r.json()["detail"]
+
+
+def test_check_backend_prerequisites_allows_cached_textract_blocks(monkeypatch, tmp_path) -> None:
+    # Cached OCR blocks mean the Textract branch never touches S3 — unless
+    # --force throws the cache away.
+    from datasheet_rag.config import get_settings
+    from datasheet_rag.ingest_pipeline import (
+        BackendUnavailableError,
+        check_backend_prerequisites,
+    )
+
+    monkeypatch.setattr(get_settings(), "s3_bucket", None)
+    monkeypatch.setattr(get_settings(), "output_dir", tmp_path)
+    pdf = tmp_path / "x.pdf"
+    pdf.write_bytes(b"%PDF-1.4 fake")
+    (tmp_path / "doc1_blocks.json").write_text("[]")
+
+    check_backend_prerequisites(pdf, backend="textract", doc_id="doc1", force=False)
+    check_backend_prerequisites(pdf, backend="docling", doc_id="doc2", force=False)
+    with pytest.raises(BackendUnavailableError, match="RAG_S3_BUCKET"):
+        check_backend_prerequisites(pdf, backend="textract", doc_id="doc1", force=True)
+    with pytest.raises(BackendUnavailableError):
+        check_backend_prerequisites(pdf, backend="textract", doc_id="doc2", force=False)
+
+
 def test_server_token_required_when_set(conn, monkeypatch) -> None:
     from fastapi.testclient import TestClient
 

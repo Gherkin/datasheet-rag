@@ -60,7 +60,7 @@ def start_analysis(doc_id: str, s3_key: str) -> str:
     params: dict[str, Any] = {
         "DocumentLocation": {
             "S3Object": {
-                "Bucket": settings.s3_bucket,
+                "Bucket": settings.require_s3_bucket(),
                 "Name": s3_key,
             }
         },
