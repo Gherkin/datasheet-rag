@@ -624,3 +624,32 @@ def test_remote_backend_reraises_figure_unavailable(monkeypatch) -> None:
     be._client = _Client()
     with pytest.raises(FigureUnavailableError, match="no usable figure source"):
         be._request("GET", "/figures/x/bytes")
+
+
+def test_server_reports_an_unknown_figure_chunk_with_a_code(client) -> None:
+    """Still 400, but typed: a bare 400 is any server-side ValueError (GH #70)."""
+    r = client.get("/figures/nope:L2:0/bytes")
+    assert r.status_code == 400
+    assert r.json()["code"] == "figure_not_found"
+
+
+def test_remote_backend_reraises_figure_not_found() -> None:
+    from datasheet_rag.backend import FigureNotFoundError
+    from datasheet_rag.backend.remote import RemoteBackend
+
+    be = RemoteBackend.__new__(RemoteBackend)
+
+    class _Resp:
+        status_code = 400
+        text = ""
+
+        def json(self):
+            return {"detail": "unknown chunk_id: x", "code": "figure_not_found"}
+
+    class _Client:
+        def request(self, *a, **kw):
+            return _Resp()
+
+    be._client = _Client()
+    with pytest.raises(FigureNotFoundError, match="unknown chunk_id"):
+        be._request("GET", "/figures/x/bytes")

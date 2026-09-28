@@ -272,6 +272,15 @@ class FigureUnavailableError(ValueError):
     """
 
 
+class FigureNotFoundError(ValueError):
+    """No figure chunk by that id: the chunk is unknown, or not a figure.
+
+    Typed so callers can tell this expected answer apart from other
+    ``ValueError``s — JSON, pydantic and base64 decode errors all subclass it
+    and are real faults, not "no image here" (GH #70).
+    """
+
+
 class RagServerError(RuntimeError):
     """Raised by RemoteBackend when the server returns a non-2xx response."""
 

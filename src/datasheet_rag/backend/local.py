@@ -17,6 +17,7 @@ from threading import Lock
 from typing import TYPE_CHECKING, Any
 
 from datasheet_rag.backend.base import (
+    FigureNotFoundError,
     FigureUnavailableError,
     FigureUploads,
     RagBackend,
@@ -383,9 +384,9 @@ class LocalBackend(RagBackend):
 
         chunk = get_chunk(self._get_conn(), chunk_id)
         if chunk is None:
-            raise ValueError(f"unknown chunk_id: {chunk_id}")
+            raise FigureNotFoundError(f"unknown chunk_id: {chunk_id}")
         if chunk.metadata.layout_type != LayoutType.FIGURE:
-            raise ValueError(
+            raise FigureNotFoundError(
                 f"chunk {chunk_id} is not a figure (layout_type={chunk.metadata.layout_type.value})"
             )
         image_bytes, fmt, resolved = self._read_figure_image(chunk)

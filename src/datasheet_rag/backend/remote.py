@@ -25,6 +25,7 @@ import sys
 from typing import TYPE_CHECKING, Any
 
 from datasheet_rag.backend.base import (
+    FigureNotFoundError,
     FigureUnavailableError,
     FigureUploads,
     RagBackend,
@@ -256,6 +257,8 @@ class RemoteBackend(RagBackend):
             # of flattening it into a generic transport error (GH #41).
             if code == "figure_unavailable":
                 raise FigureUnavailableError(detail)
+            if code == "figure_not_found":
+                raise FigureNotFoundError(detail)
             raise RagServerError(resp.status_code, detail)
         return resp
 
