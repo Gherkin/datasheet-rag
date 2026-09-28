@@ -36,6 +36,17 @@ class DocMetadata(BaseModel):
     updated_at: str | None = None
 
 
+#: ``attributes`` keys the pipeline writes itself: title provenance
+#: (``title_source``/``title_inferred``, below), the ingest-time title hints
+#: (``running_header``/``pdf_meta_title``, ``ingest_pipeline``) and the
+#: re-embed marker (``needs_reembed``, ``rag repair``). A ``.rag.toml`` may not
+#: set them — a directory default would either be overwritten at ingest or
+#: mislabel every document under it.
+RESERVED_ATTRIBUTES = frozenset(
+    {"title_source", "title_inferred", "running_header", "pdf_meta_title", "needs_reembed"}
+)
+
+
 # ---------------------------------------------------------------------------
 # Title provenance
 #
