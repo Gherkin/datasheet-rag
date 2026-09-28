@@ -3650,22 +3650,12 @@ def metadata_cmd(
 
     # Decide read-vs-write from what the user actually typed, before any
     # .rag.toml defaults get merged in below — otherwise a project config
-    # would silently turn every `rag metadata <doc>` into a write.
-    is_read = not any(
-        (
-            doc_title,
-            project_id,
-            group_name,
-            mpn,
-            mpn_aliases,
-            manufacturer,
-            subsystem,
-            doc_type,
-            tags,
-            clear_tags,
-            attrs,
-            unset_attrs,
-        )
+    # would silently turn every `rag metadata <doc>` into a write. The scalar
+    # options are tested against None, not truthiness: `--title ''` is an
+    # explicit request to clear the field, not an absent option.
+    scalars = (doc_title, project_id, group_name, mpn, manufacturer, subsystem, doc_type)
+    is_read = all(v is None for v in scalars) and not any(
+        (mpn_aliases, tags, clear_tags, attrs, unset_attrs)
     )
     if is_read:
         be = _backend_for(db_path)
@@ -3676,13 +3666,15 @@ def metadata_cmd(
         console.print(existing.model_dump_json(indent=2, exclude_none=True))
         return
 
+    # .rag.toml fills only the fields the user did not pass; an explicit blank
+    # beats a config default.
     proj_cfg = get_project_config()
     if proj_cfg is not None:
-        project_id = project_id or proj_cfg.project_id
-        group_name = group_name or proj_cfg.group
-        mpn = mpn or proj_cfg.mpn
-        manufacturer = manufacturer or proj_cfg.manufacturer
-        subsystem = subsystem or proj_cfg.subsystem
+        project_id = proj_cfg.project_id if project_id is None else project_id
+        group_name = proj_cfg.group if group_name is None else group_name
+        mpn = proj_cfg.mpn if mpn is None else mpn
+        manufacturer = proj_cfg.manufacturer if manufacturer is None else manufacturer
+        subsystem = proj_cfg.subsystem if subsystem is None else subsystem
         if not tags and proj_cfg.tags:
             tags = tuple(proj_cfg.tags)
 
