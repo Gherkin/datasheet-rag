@@ -729,6 +729,62 @@ def test_figure_resource_is_served_as_png(monkeypatch: Any, fmt: str) -> None:
         assert content.content == stored  # already PNG: passed through untouched
 
 
+def _figure_errors() -> list[Any]:
+    from datasheet_rag.backend import FigureUnavailableError, RagServerError
+
+    return [
+        FigureUnavailableError("chunk docA:L2:7 has no usable figure source"),
+        ValueError("unknown chunk_id: docA:L2:7"),
+        ValueError("chunk docA:L2:7 is not a figure (layout_type=text)"),
+        RagServerError(400, "unknown chunk_id: docA:L2:7"),  # remote mode
+    ]
+
+
+@pytest.mark.parametrize("err", _figure_errors(), ids=lambda e: type(e).__name__)
+def test_figure_resource_reports_no_image_as_not_found(monkeypatch: Any, err: Exception) -> None:
+    """No image to serve is INVALID_PARAMS, not an internal error (GH #70)."""
+    pytest.importorskip("mcp")
+    import asyncio
+
+    from mcp.server.mcpserver.exceptions import ResourceNotFoundError, UnexpectedResourceError
+
+    from datasheet_rag.mcp import server as mcp_server
+
+    def _raise(chunk_id: str, **kw: Any) -> dict[str, Any]:
+        raise err
+
+    monkeypatch.setattr(mcp_server, "_get_figure_impl", _raise)
+    server = mcp_server.build_server()
+
+    with pytest.raises(ResourceNotFoundError) as info:
+        asyncio.run(server.read_resource("rag://figure/docA:L2:7"))
+    assert not isinstance(info.value, UnexpectedResourceError)
+    assert "docA:L2:7" in str(info.value)
+
+
+@pytest.mark.parametrize("status", [0, 401, 500])
+def test_figure_resource_keeps_other_server_errors_unexpected(
+    monkeypatch: Any, status: int
+) -> None:
+    """Transport, auth and server faults are not "no image here"."""
+    pytest.importorskip("mcp")
+    import asyncio
+
+    from mcp.server.mcpserver.exceptions import UnexpectedResourceError
+
+    from datasheet_rag.backend import RagServerError
+    from datasheet_rag.mcp import server as mcp_server
+
+    def _raise(chunk_id: str, **kw: Any) -> dict[str, Any]:
+        raise RagServerError(status, "boom")
+
+    monkeypatch.setattr(mcp_server, "_get_figure_impl", _raise)
+    server = mcp_server.build_server()
+
+    with pytest.raises(UnexpectedResourceError):
+        asyncio.run(server.read_resource("rag://figure/docA:L2:7"))
+
+
 #: Tools that hand back content blocks the host renders itself. Their payload
 #: is the blocks — a structured copy alongside would be dead weight (GH #48).
 _CONTENT_BLOCK_TOOLS = {"get_figure", "show_figure", "show_pdf", "show_page", "show_hello"}

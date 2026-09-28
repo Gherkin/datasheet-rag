@@ -69,6 +69,7 @@ from datasheet_rag import pdf_viewer
 from datasheet_rag.backend import (
     FigureUnavailableError,
     RagBackend,
+    RagServerError,
     backend_mode,
     compute_mode,
     emit_client_compute_notice,
@@ -714,6 +715,7 @@ def build_server(
             mount sets on every request.
     """
     from mcp.server.mcpserver import MCPServer
+    from mcp.server.mcpserver.exceptions import ResourceNotFoundError
     from mcp.types import ImageContent, TextContent
 
     source_page_tool = "show_pdf" if local_client else "show_page"
@@ -966,8 +968,22 @@ def build_server(
         Unlike the figure tools this skips ``_compress_for_mcp``: the ~1 MB
         ceiling it enforces is a tool-result limit, not a resource one. See
         ``get_figure`` for the in-tool-result rendering path.
+
+        A chunk with no image to serve — unknown, not a figure, or image not
+        stored — is a ``ResourceNotFoundError``. Anything else the SDK wraps
+        as an unexpected error: ``INTERNAL_ERROR`` and a logged traceback,
+        which is wrong for an expected, permanent answer (GH #70).
         """
-        result = _get_figure_impl(chunk_id, backend=backend)
+        try:
+            result = _get_figure_impl(chunk_id, backend=backend)
+        except ValueError as exc:  # FigureUnavailableError subclasses it
+            raise ResourceNotFoundError(str(exc)) from exc
+        except RagServerError as exc:
+            # Remote mode: the server answers an unknown or non-figure chunk
+            # with 400. Other codes (auth, transport, 5xx) stay unexpected.
+            if exc.status_code != 400:
+                raise
+            raise ResourceNotFoundError(exc.detail) from exc
         image_bytes: bytes = result["image_bytes"]
         if result["format"].lower() == "png":
             return image_bytes
