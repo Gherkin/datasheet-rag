@@ -614,6 +614,10 @@ def build_app() -> FastAPI:
         )
 
         opts = json.loads(options) if options else {}
+        # Read once: the preflight must check the backend the worker runs.
+        backend = opts.get("backend", "docling")
+        doc_id = opts.get("doc_id")
+        force = bool(opts.get("force", False))
         pdf_bytes = await payload.read()
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
         tmp.write(pdf_bytes)
@@ -623,12 +627,7 @@ def build_app() -> FastAPI:
         # Before the stream opens, so an unsatisfiable request is a plain 4xx
         # naming the setting rather than an opaque failure a few steps in.
         try:
-            check_backend_prerequisites(
-                tmp_path,
-                backend=opts.get("backend", "docling"),
-                doc_id=opts.get("doc_id"),
-                force=bool(opts.get("force", False)),
-            )
+            check_backend_prerequisites(tmp_path, backend=backend, doc_id=doc_id, force=force)
         except BackendUnavailableError as exc:
             tmp_path.unlink(missing_ok=True)
             audit(
@@ -655,15 +654,15 @@ def build_app() -> FastAPI:
                 skip_describe = bool(opts.get("skip_describe", False))
                 parsed = parse_pdf_to_graph(
                     tmp_path,
-                    doc_id=opts.get("doc_id"),
-                    backend=opts.get("backend", "docling"),
+                    doc_id=doc_id,
+                    backend=backend,
                     skip_figures=skip_figures,
                     upload_figures=bool(opts.get("upload_figures", False)),
                     dpi=int(opts.get("dpi", 300)),
                     micro_tokens=int(opts.get("micro_tokens", 128)),
                     meso_tokens=int(opts.get("meso_tokens", 512)),
                     accurate_tables=opts.get("accurate_tables"),
-                    force=bool(opts.get("force", False)),
+                    force=force,
                     progress=on_progress,
                 )
                 embed_step = {"kind": "step", "text": "Embed & store", "step": max_step["n"] + 1}
