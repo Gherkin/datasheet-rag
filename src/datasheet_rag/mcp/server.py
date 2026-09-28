@@ -67,9 +67,9 @@ from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 from datasheet_rag import pdf_viewer
 from datasheet_rag.backend import (
+    FigureNotFoundError,
     FigureUnavailableError,
     RagBackend,
-    RagServerError,
     backend_mode,
     compute_mode,
     emit_client_compute_notice,
@@ -976,14 +976,8 @@ def build_server(
         """
         try:
             result = _get_figure_impl(chunk_id, backend=backend)
-        except ValueError as exc:  # FigureUnavailableError subclasses it
+        except (FigureNotFoundError, FigureUnavailableError) as exc:
             raise ResourceNotFoundError(str(exc)) from exc
-        except RagServerError as exc:
-            # Remote mode: the server answers an unknown or non-figure chunk
-            # with 400. Other codes (auth, transport, 5xx) stay unexpected.
-            if exc.status_code != 400:
-                raise
-            raise ResourceNotFoundError(exc.detail) from exc
         image_bytes: bytes = result["image_bytes"]
         if result["format"].lower() == "png":
             return image_bytes

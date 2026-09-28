@@ -15,6 +15,7 @@ import sys
 from functools import lru_cache
 
 from datasheet_rag.backend.base import (
+    FigureNotFoundError,
     FigureUnavailableError,
     RagBackend,
     RagServerError,
@@ -37,6 +38,7 @@ __all__ = [
     "ChunkVectors",
     "DocSummary",
     "FigureBytes",
+    "FigureNotFoundError",
     "FigureUnavailableError",
     "IngestResult",
     "IngestedDoc",
