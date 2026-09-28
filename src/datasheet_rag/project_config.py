@@ -89,9 +89,14 @@ def _check_attributes(candidate: Path, raw: Any) -> dict[str, str]:
                 f"itself (reserved: {', '.join(sorted(RESERVED_ATTRIBUTES))})"
             )
         if not isinstance(value, str):
+            # Only a plain number or bool can simply be quoted; spell a bool
+            # the TOML way, not as Python's True/False.
+            hint = ""
+            if isinstance(value, (bool, int, float)):
+                shown = str(value).lower() if isinstance(value, bool) else value
+                hint = f' — quote it, e.g. {key} = "{shown}"'
             raise ProjectConfigError(
-                f"{candidate}: attribute {key!r} must be a string, got "
-                f'{type(value).__name__} — quote it, e.g. {key} = "{value}"'
+                f"{candidate}: attribute {key!r} must be a string, got {type(value).__name__}{hint}"
             )
     return dict(raw)
 
