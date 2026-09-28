@@ -7,9 +7,11 @@ numbers, register names, signal names, or block names, but staying
 faithful to what is actually in the image.
 
 A formula chunk goes through the same path with a different prompt: the
-model transcribes the cropped equation into LaTeX instead of describing
-it in prose (GH #19). The result lands in ``figure_description`` either
-way, so storage, search and the MCP tools need no second field.
+model transcribes the cropped equation into LaTeX and adds one
+``Computes:`` sentence saying what it calculates (GH #19). The LaTeX finds
+the formula by its symbols, the sentence by the quantity. The result lands
+in ``figure_description`` either way, so storage, search and the MCP tools
+need no second field.
 
 Cost notes (approximate, as of writing — verify in your console):
 
@@ -32,7 +34,7 @@ import json
 import re
 import sqlite3
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -81,17 +83,55 @@ _SYSTEM_PROMPT = (
 )
 
 _FORMULA_SYSTEM_PROMPT = (
-    "You transcribe mathematical formulas from electronics datasheets, "
-    "reference manuals, and application notes into LaTeX. The output is "
-    "stored in a retrieval index and read by engineers, so it must match "
-    "the image exactly: keep every symbol, subscript, superscript, unit, "
-    "and equation number. Do not solve, simplify, rename, or explain "
-    "anything. Output only the LaTeX — no prose, no code fences, no $ "
-    "delimiters. Put each equation on its own line."
+    "You read formulas from electronics datasheets, reference manuals, and "
+    "application notes. Your answer is stored in a retrieval index and read "
+    "by engineers.\n\n"
+    "Reply in exactly this form:\n"
+    "LATEX:\n"
+    "<the formula in LaTeX>\n"
+    "COMPUTES:\n"
+    "<one sentence>\n\n"
+    "LATEX: match the image exactly. Keep every symbol, subscript, "
+    "superscript, and unit. If an equation number such as (4) is printed "
+    "beside it, end that line with \\tag{4}. Do not solve, simplify, or "
+    "rename anything. No code fences and no $ delimiters. Put each equation "
+    "on its own line. In sans-serif fonts a capital I and a lowercase l look "
+    "alike; use the surrounding text to tell them apart (a current is I).\n\n"
+    "COMPUTES: one sentence saying what the formula calculates and what its "
+    "symbols stand for. Take each symbol's meaning from the surrounding text, "
+    "which often defines them after the formula in a 'where' list, and name "
+    "the quantities concretely (for example 'output voltage' or 'feedback "
+    "resistor R1'). If the text does not define a symbol, refer to it by its "
+    "symbol only; never guess what it means.\n\n"
+    "If the image does not show a formula (for example a table fragment or "
+    "plain text), reply with 'NOT A FORMULA:' followed by one sentence "
+    "saying what it shows."
 )
 
 # Where the model wraps its LaTeX despite being asked not to.
 _LATEX_FENCE_RE = re.compile(r"^```[a-zA-Z]*\s*\n?(.*?)\n?```$", re.DOTALL)
+_FORMULA_REPLY_RE = re.compile(r"LATEX:\s*(.*?)\s*COMPUTES:\s*(.*)", re.DOTALL)
+# Not anchored: the model sometimes explains itself before the tag.
+_NOT_A_FORMULA_RE = re.compile(r"NOT A FORMULA:\s*(.*)", re.DOTALL)
+
+
+def _format_formula_reply(reply: str) -> str:
+    """Turn the model's tagged reply into the stored description.
+
+    A formula is stored as its LaTeX followed by a ``Computes:`` line, so a
+    search for either the symbols or the quantity finds it. A crop Docling
+    mislabelled as a formula is stored as ``Not a formula: ...``. A reply
+    without the tags is kept as it came, minus any LaTeX wrapping.
+    """
+    tagged = _FORMULA_REPLY_RE.search(reply)
+    if not tagged:
+        not_formula = _NOT_A_FORMULA_RE.search(reply)
+        if not_formula:
+            return f"Not a formula: {' '.join(not_formula.group(1).split())}"
+        return _strip_latex_wrapping(reply)
+    latex = _strip_latex_wrapping(tagged.group(1))
+    computes = " ".join(tagged.group(2).split())
+    return f"{latex}\nComputes: {computes}" if computes else latex
 
 
 def _strip_latex_wrapping(text: str) -> str:
@@ -139,7 +179,7 @@ def _build_user_blocks(
             text_parts.append(
                 f"Text extracted from the PDF (may be garbled or incomplete): {extracted_text}"
             )
-        text_parts.append("Transcribe the formula in the image as LaTeX.")
+        text_parts.append("Transcribe the formula in the image as LaTeX and say what it computes.")
     else:
         text_parts.append(
             "Write a 2-3 sentence description of the figure for a retrieval index. "
@@ -199,6 +239,54 @@ def _load_figure_bytes(chunk: Chunk) -> tuple[bytes, str]:
 
 _NEIGHBOR_CHAR_LIMIT = 400
 
+# A formula's symbols are usually defined *after* it, in a "where" list that
+# the chunker splits into one chunk per item. One next sibling is then just
+# "where", and the model guesses the symbols instead (a real run read a
+# DCR term as "load resistance"). So a formula reads further ahead.
+_FORMULA_FOLLOWING_CHUNKS = 6
+_FORMULA_FOLLOWING_CHARS = 800
+# The sentence that introduces a formula ends the paragraph before it, so a
+# formula keeps the *end* of that paragraph, not its start.
+_FORMULA_PRECEDING_CHARS = 600
+
+# (text, next_id) of a chunk by id, or None when it is not there.
+_NeighbourLookup = Callable[[str], "tuple[str, str | None] | None"]
+
+
+def _neighbour_text(chunk: Chunk, lookup: _NeighbourLookup, char_limit: int) -> str:
+    """The text around *chunk*: its prev sibling, then what follows it.
+
+    A figure gets the start of its prev sibling and its next sibling. A
+    formula gets the end of its prev sibling and the chunks after it up to
+    ``_FORMULA_FOLLOWING_CHARS``, joined as one run of text.
+    """
+    is_formula = chunk.metadata.layout_type == LayoutType.FORMULA
+    fragments: list[str] = []
+    if chunk.prev_id:
+        prev = lookup(chunk.prev_id)
+        if prev and prev[0]:
+            text = prev[0]
+            fragments.append(text[-_FORMULA_PRECEDING_CHARS:] if is_formula else text[:char_limit])
+
+    if is_formula:
+        max_chunks, max_chars = _FORMULA_FOLLOWING_CHUNKS, _FORMULA_FOLLOWING_CHARS
+    else:
+        max_chunks, max_chars = 1, char_limit
+    following: list[str] = []
+    used = 0
+    nid = chunk.next_id
+    while nid and len(following) < max_chunks and used < max_chars:
+        found = lookup(nid)
+        if found is None:
+            break
+        text, nid = found
+        if text:
+            following.append(text[: max_chars - used])
+            used += len(following[-1])
+    if following:
+        fragments.append(" ".join(following))
+    return " [...] ".join(fragments)
+
 
 def surrounding_text_for(
     conn: sqlite3.Connection,
@@ -206,18 +294,20 @@ def surrounding_text_for(
     *,
     char_limit: int = _NEIGHBOR_CHAR_LIMIT,
 ) -> str:
-    """Concat the text of the chunk's prev and next siblings (trimmed)."""
+    """The text of the chunk's prev and next siblings (trimmed).
+
+    A formula also gets the chunks after its next sibling, where its symbols
+    are defined (see ``_FORMULA_FOLLOWING_CHUNKS``).
+    """
     # TODO: skip siblings that are just the figure's own caption — Textract
     # emits the caption as its own chunk, so it reappears here as redundant
     # surrounding text (e.g. next sibling == chunk.figure_caption).
-    fragments: list[str] = []
-    for nid in (chunk.prev_id, chunk.next_id):
-        if not nid:
-            continue
-        row = conn.execute("SELECT text FROM chunks WHERE id = ?", (nid,)).fetchone()
-        if row and row["text"]:
-            fragments.append(row["text"][:char_limit])
-    return " [...] ".join(fragments)
+
+    def lookup(chunk_id: str) -> tuple[str, str | None] | None:
+        row = conn.execute("SELECT text, next_id FROM chunks WHERE id = ?", (chunk_id,)).fetchone()
+        return (row["text"] or "", row["next_id"]) if row else None
+
+    return _neighbour_text(chunk, lookup, char_limit)
 
 
 # ---------------------------------------------------------------------------
@@ -271,12 +361,12 @@ class GraphFigureSource:
 
     def inputs(self, chunk: Chunk) -> FigureInputs:
         image_bytes, fmt = _load_figure_bytes(chunk)
-        fragments: list[str] = []
-        for nid in (chunk.prev_id, chunk.next_id):
-            neighbour = self._graph.chunks.get(nid) if nid else None
-            if neighbour is not None and neighbour.text:
-                fragments.append(neighbour.text[:_NEIGHBOR_CHAR_LIMIT])
-        return FigureInputs(image_bytes, fmt, " [...] ".join(fragments))
+
+        def lookup(chunk_id: str) -> tuple[str, str | None] | None:
+            neighbour = self._graph.chunks.get(chunk_id)
+            return (neighbour.text or "", neighbour.next_id) if neighbour else None
+
+        return FigureInputs(image_bytes, fmt, _neighbour_text(chunk, lookup, _NEIGHBOR_CHAR_LIMIT))
 
 
 class BackendFigureSource:
@@ -363,8 +453,9 @@ class FigureDescriber:
         """Send one figure to Bedrock and return the description text.
 
         With ``layout_type=FORMULA`` the model transcribes the image into
-        LaTeX instead, and ``extracted_text`` (whatever the parser pulled
-        from the PDF) is passed along as a hint.
+        LaTeX plus a ``Computes:`` line instead (see
+        :func:`_format_formula_reply`), and ``extracted_text`` (whatever the
+        parser pulled from the PDF) is passed along as a hint.
         """
         is_formula = layout_type == LayoutType.FORMULA
         body = {
@@ -387,7 +478,7 @@ class FigureDescriber:
             ],
         }
         out = self._invoke(body)
-        return _strip_latex_wrapping(out) if is_formula else out
+        return _format_formula_reply(out) if is_formula else out
 
     def describe_chunk_in_context(
         self,

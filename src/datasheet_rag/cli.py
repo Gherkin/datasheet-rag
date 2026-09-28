@@ -2149,7 +2149,8 @@ def describe_figures_cmd(
     doc/project, skipping those that already have a description), sends
     each image + caption + neighbour text to Bedrock Claude vision, and
     folds the response into the chunk row + context_text. A figure gets a
-    short prose description; a formula gets a LaTeX transcription.
+    short prose description; a formula gets a LaTeX transcription and one
+    sentence on what it computes.
 
     Descriptions are folded into the existing chunk rows, so no re-chunk is
     needed — just re-embed the affected document so they show up in vector

@@ -348,7 +348,8 @@ def _chunk_fields_help(source_page_tool: str) -> str:
 
 - `has_figure: true` — the chunk is a diagram, schematic, curve or
   formula and its image can be served. On a formula chunk,
-  `figure_description` is a LaTeX transcription of the image. `show_figure(chunk_id)` renders it inline;
+  `figure_description` is the formula in LaTeX, then a line starting
+  `Computes:` that says what it calculates. `show_figure(chunk_id)` renders it inline;
   `get_figure(chunk_id)` returns the bytes. Show a figure whenever it
   illustrates what the user asked about; offer it when unsure.
 - `figure_status: "image_not_stored"` — this chunk's image is absent
