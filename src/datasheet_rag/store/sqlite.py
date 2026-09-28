@@ -143,10 +143,24 @@ ON CONFLICT(id) DO UPDATE SET
     -- incoming source defers to the stored one, exactly like doc_title
     -- above and figure_description below. A genuine re-crop still lands:
     -- it arrives with a path.
-    figure_s3_key     = COALESCE(NULLIF(excluded.figure_s3_key, ''), chunks.figure_s3_key),
-    figure_caption    = COALESCE(NULLIF(excluded.figure_caption, ''), chunks.figure_caption),
-    figure_image_path = COALESCE(NULLIF(excluded.figure_image_path, ''), chunks.figure_image_path),
-    figure_description = COALESCE(excluded.figure_description, chunks.figure_description),
+    --
+    -- Ids are positional, so a re-chunk that adds chunks (formulas, GH #19)
+    -- can land a formula on the id a figure used to hold. The stored figure
+    -- fields only carry over when the row keeps its layout type; otherwise
+    -- the formula would inherit the figure's image and description, and
+    -- describe would skip it as already described.
+    figure_s3_key     = CASE WHEN excluded.layout_type = chunks.layout_type
+        THEN COALESCE(NULLIF(excluded.figure_s3_key, ''), chunks.figure_s3_key)
+        ELSE excluded.figure_s3_key END,
+    figure_caption    = CASE WHEN excluded.layout_type = chunks.layout_type
+        THEN COALESCE(NULLIF(excluded.figure_caption, ''), chunks.figure_caption)
+        ELSE excluded.figure_caption END,
+    figure_image_path = CASE WHEN excluded.layout_type = chunks.layout_type
+        THEN COALESCE(NULLIF(excluded.figure_image_path, ''), chunks.figure_image_path)
+        ELSE excluded.figure_image_path END,
+    figure_description = CASE WHEN excluded.layout_type = chunks.layout_type
+        THEN COALESCE(excluded.figure_description, chunks.figure_description)
+        ELSE excluded.figure_description END,
     metadata_json     = excluded.metadata_json
 """
 

@@ -145,7 +145,14 @@ class RemoteBackend(RagBackend):
             return
         for chunk in stored:
             target = graph.chunks.get(chunk.id)
-            if target is not None and not target.figure_description and chunk.figure_description:
+            # Ids are positional: only restore onto a chunk of the same kind,
+            # as the server-side upsert does.
+            if (
+                target is not None
+                and target.metadata.layout_type == chunk.metadata.layout_type
+                and not target.figure_description
+                and chunk.figure_description
+            ):
                 apply_description_to_chunk(target, chunk.figure_description)
 
     def _remote_health(self) -> dict[str, Any] | None:

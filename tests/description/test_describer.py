@@ -386,6 +386,8 @@ def test_a_figure_still_gets_the_prose_prompt(conn: Any, fake_client: Any, tmp_p
         ("$$a = b$$ and $$c = d$$", "$$a = b$$ and $$c = d$$"),
         ("V = IR", "V = IR"),
         ("LATEX:\n```latex\nV = IR\n```\nCOMPUTES:\nOhm's law.", "V = IR\nComputes: Ohm's law."),
+        # Cut off at max_tokens before COMPUTES: keep the LaTeX, drop the tag.
+        ("LATEX:\nV = IR", "V = IR"),
         # Docling labels table fragments and lone equation numbers as formulas.
         ("NOT A FORMULA: A table fragment.", "Not a formula: A table fragment."),
         # Seen on Bedrock: the model explains itself before the tag.

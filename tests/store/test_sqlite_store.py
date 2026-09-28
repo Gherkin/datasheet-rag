@@ -946,6 +946,27 @@ def test_reinsert_without_a_figure_source_keeps_the_stored_one(
     assert get_chunk(conn, "fig:keep").figure_image_path == "/tmp/figs/fig-1-v2.png"
 
 
+def test_reinsert_as_another_layout_type_drops_the_stored_figure_fields(
+    conn: sqlite3.Connection,
+) -> None:
+    """Ids are positional: a formula landing on an old figure's id must not
+    inherit that figure's image or description (GH #19)."""
+    insert_chunks(conn, [_make_figure_chunk("pos:3", description="A timing diagram.")])
+
+    formula = _make_figure_chunk("pos:3", image_path=None, caption="")
+    formula.metadata.layout_type = LayoutType.FORMULA
+    formula.figure_s3_key = None
+    insert_chunks(conn, [formula])
+
+    after = get_chunk(conn, "pos:3")
+    assert after is not None
+    assert after.metadata.layout_type == LayoutType.FORMULA
+    assert after.figure_image_path is None
+    assert after.figure_s3_key is None
+    assert not after.figure_caption
+    assert after.figure_description is None
+
+
 def test_set_figure_source_relinks_and_preserves_a_curated_caption(
     conn: sqlite3.Connection, tmp_path: object
 ) -> None:

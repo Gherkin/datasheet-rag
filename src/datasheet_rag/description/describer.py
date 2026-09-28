@@ -110,7 +110,8 @@ _FORMULA_SYSTEM_PROMPT = (
 
 # Where the model wraps its LaTeX despite being asked not to.
 _LATEX_FENCE_RE = re.compile(r"^```[a-zA-Z]*\s*\n?(.*?)\n?```$", re.DOTALL)
-_FORMULA_REPLY_RE = re.compile(r"LATEX:\s*(.*?)\s*COMPUTES:\s*(.*)", re.DOTALL)
+# COMPUTES is optional: a reply cut off at max_tokens ends inside the LaTeX.
+_FORMULA_REPLY_RE = re.compile(r"LATEX:\s*(.*?)\s*(?:COMPUTES:\s*(.*))?$", re.DOTALL)
 # Not anchored: the model sometimes explains itself before the tag.
 _NOT_A_FORMULA_RE = re.compile(r"NOT A FORMULA:\s*(.*)", re.DOTALL)
 
@@ -130,7 +131,7 @@ def _format_formula_reply(reply: str) -> str:
             return f"Not a formula: {' '.join(not_formula.group(1).split())}"
         return _strip_latex_wrapping(reply)
     latex = _strip_latex_wrapping(tagged.group(1))
-    computes = " ".join(tagged.group(2).split())
+    computes = " ".join((tagged.group(2) or "").split())
     return f"{latex}\nComputes: {computes}" if computes else latex
 
 
