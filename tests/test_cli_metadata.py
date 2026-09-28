@@ -194,6 +194,80 @@ def test_list_filters_by_attr(db_path: Path) -> None:
     assert DOC_B[:12] not in result.output
 
 
+# --- explicit blank values (GH #37) -----------------------------------------
+#
+# An explicitly passed empty string is a value, not an absent option. Each
+# case is checked alone and alongside another flag: the alongside form already
+# worked before #37, so only the alone form guards the read-vs-write gate.
+
+_SCALAR_FIELDS = [
+    ("--project-id", "project_id"),
+    ("--group", "group_name"),
+    ("--mpn", "mpn"),
+    ("--manufacturer", "manufacturer"),
+    ("--subsystem", "subsystem"),
+    ("--doc-type", "doc_type"),
+]
+
+# A second write flag that touches none of the fields above.
+_OTHER_FLAG = ("--attr", "note=x")
+
+
+def _doc_title(db_path: Path, doc_id: str) -> str:
+    conn = connect(db_path, embedding_dim=get_settings().embedding_dimensions)
+    try:
+        row = conn.execute("SELECT doc_title FROM chunks WHERE doc_id = ?", (doc_id,)).fetchone()
+    finally:
+        conn.close()
+    return row[0]
+
+
+@pytest.mark.parametrize("extra", [(), _OTHER_FLAG], ids=["alone", "alongside"])
+def test_blank_title_clears_title(db_path: Path, extra: tuple[str, ...]) -> None:
+    assert _doc_title(db_path, DOC_A) == f"Doc {DOC_A[:8]}"
+    result = _meta(db_path, DOC_A, "--title", "", *extra)
+    assert result.exit_code == 0, result.output
+    assert "Title set" in result.output
+    assert _doc_title(db_path, DOC_A) == ""
+    # A blank title is still a manual choice, so re-ingest must not refill it.
+    assert _get_json(db_path, DOC_A)["attributes"]["title_source"] == "manual"
+
+
+@pytest.mark.parametrize("extra", [(), _OTHER_FLAG], ids=["alone", "alongside"])
+@pytest.mark.parametrize(("flag", "field"), _SCALAR_FIELDS)
+def test_blank_scalar_clears_field(
+    db_path: Path, flag: str, field: str, extra: tuple[str, ...]
+) -> None:
+    _meta(db_path, DOC_A, flag, "seeded")
+    assert _get_json(db_path, DOC_A)[field] == "seeded"
+    result = _meta(db_path, DOC_A, flag, "", *extra)
+    assert result.exit_code == 0, result.output
+    assert "Saved metadata" in result.output
+    assert _get_json(db_path, DOC_A)[field] == ""
+
+
+# doc_type has no .rag.toml default, so it is not part of this merge.
+@pytest.mark.parametrize(("flag", "field"), [f for f in _SCALAR_FIELDS if f[1] != "doc_type"])
+def test_blank_scalar_beats_project_config_default(
+    db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flag: str, field: str
+) -> None:
+    toml_key = "group" if field == "group_name" else field
+    (tmp_path / ".rag.toml").write_text(f'{toml_key} = "from-config"\n')
+    monkeypatch.chdir(tmp_path)
+    # Alongside another flag, so this reaches the merge whatever the gate does.
+    result = _meta(db_path, DOC_A, flag, "", *_OTHER_FLAG)
+    assert result.exit_code == 0, result.output
+    assert _get_json(db_path, DOC_A)[field] == ""
+
+
+def test_no_flags_is_still_a_read(db_path: Path) -> None:
+    _meta(db_path, DOC_A, "--mpn", "INA226")
+    result = _meta(db_path, DOC_A)
+    assert result.exit_code == 0, result.output
+    assert "Saved metadata" not in result.output
+    assert json.loads(result.output)["mpn"] == "INA226"
+
+
 def test_ingest_tag_help_mentions_replace_semantics() -> None:
     runner = CliRunner()
     result = runner.invoke(cli, ["ingest", "--help"])
