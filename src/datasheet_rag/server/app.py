@@ -8,6 +8,7 @@ existing pydantic models (``Chunk``, ``SearchResult``, ``DocMetadata``,
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -58,6 +59,8 @@ if TYPE_CHECKING:
     # at module scope would drag docling (and torch behind it) into every
     # server process, including ones that only ever serve reads.
     from datasheet_rag.ingest_pipeline import ProgressEvent
+
+logger = logging.getLogger("datasheet_rag.server")
 
 # Vectors are always None post-retrieval; never ship them.
 _CHUNK_EXCLUDE = {"content_embedding", "context_embedding"}
@@ -604,14 +607,38 @@ def build_app() -> FastAPI:
         import asyncio
         import tempfile
 
-        from datasheet_rag.ingest_pipeline import parse_pdf_to_graph
+        from datasheet_rag.ingest_pipeline import (
+            BackendUnavailableError,
+            check_backend_prerequisites,
+            parse_pdf_to_graph,
+        )
 
         opts = json.loads(options) if options else {}
+        # Read once: the preflight must check the backend the worker runs.
+        backend = opts.get("backend", "docling")
+        doc_id = opts.get("doc_id")
+        force = bool(opts.get("force", False))
         pdf_bytes = await payload.read()
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
         tmp.write(pdf_bytes)
         tmp.close()
         tmp_path = Path(tmp.name)
+
+        # Before the stream opens, so an unsatisfiable request is a plain 4xx
+        # naming the setting rather than an opaque failure a few steps in.
+        try:
+            check_backend_prerequisites(tmp_path, backend=backend, doc_id=doc_id, force=force)
+        except BackendUnavailableError as exc:
+            tmp_path.unlink(missing_ok=True)
+            audit(
+                request,
+                be,
+                action="ingest",
+                status="error",
+                project_id=opts.get("project_id"),
+                error=str(exc),
+            )
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue[tuple[str, dict[str, Any]]] = asyncio.Queue()
@@ -627,15 +654,15 @@ def build_app() -> FastAPI:
                 skip_describe = bool(opts.get("skip_describe", False))
                 parsed = parse_pdf_to_graph(
                     tmp_path,
-                    doc_id=opts.get("doc_id"),
-                    backend=opts.get("backend", "docling"),
+                    doc_id=doc_id,
+                    backend=backend,
                     skip_figures=skip_figures,
                     upload_figures=bool(opts.get("upload_figures", False)),
                     dpi=int(opts.get("dpi", 300)),
                     micro_tokens=int(opts.get("micro_tokens", 128)),
                     meso_tokens=int(opts.get("meso_tokens", 512)),
                     accurate_tables=opts.get("accurate_tables"),
-                    force=bool(opts.get("force", False)),
+                    force=force,
                     progress=on_progress,
                 )
                 embed_step = {"kind": "step", "text": "Embed & store", "step": max_step["n"] + 1}
@@ -657,6 +684,11 @@ def build_app() -> FastAPI:
                     queue.put_nowait, ("result", result.model_dump(mode="json"))
                 )
             except Exception as exc:  # surfaced to the client as an error event
+                # The client and the audit row get one line. This is the last
+                # frame that still holds the traceback, so log it here (GH #65).
+                logger.exception(
+                    "Ingest of %s failed (project %s)", payload.filename, opts.get("project_id")
+                )
                 loop.call_soon_threadsafe(queue.put_nowait, ("error", {"detail": str(exc)}))
             finally:
                 # Empty payload rather than None: the sentinel is recognised

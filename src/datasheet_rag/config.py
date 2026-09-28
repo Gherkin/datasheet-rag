@@ -317,10 +317,6 @@ class Settings(BaseSettings):
     s3_textract_prefix: str = "textract-output/"
 
     # Textract
-    textract_role_arn: str | None = Field(
-        default=None,
-        description="IAM role ARN for Textract async jobs (needed for S3 notifications)",
-    )
     textract_features: list[str] = Field(
         default=["TABLES", "FORMS", "LAYOUT"],
         description="Textract AnalyzeDocument feature types",
