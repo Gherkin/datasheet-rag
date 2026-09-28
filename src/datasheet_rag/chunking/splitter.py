@@ -24,6 +24,7 @@ from datasheet_rag.chunking.layout_parser import (
     ElementType,
 )
 from datasheet_rag.models.chunk import (
+    IMAGE_LAYOUT_TYPES,
     Chunk,
     ChunkGraph,
     ChunkLevel,
@@ -211,7 +212,7 @@ def _create_micro_chunks(
 ) -> list[Chunk]:
     """Create MICRO level chunks from content elements.
 
-    - Tables and figures become their own chunks (never split).
+    - Tables, figures and formulas become their own chunks (never split).
     - Text elements are split at sentence boundaries if they exceed the token limit.
     - Small figures (logos) are filtered out.
     """
@@ -247,6 +248,33 @@ def _create_micro_chunks(
             # made: with figures skipped there is no manifest, and folding the
             # caption into the same `if` left those chunks as a bare
             # "[Figure]" with nothing to reason about (GH #41).
+            chunk.figure_caption = (
+                (fig_info or {}).get("caption") or elem.figure_caption or ""
+            ) or None
+
+            chunks.append(chunk)
+            counter += 1
+
+        elif elem.element_type == ElementType.FORMULA:
+            # No size filter: a formula crop is small by nature, and dropping
+            # it was the bug (GH #19). The text is whatever Docling extracted,
+            # or "[Formula]" when it got nothing; the crop is what a describe
+            # run transcribes into LaTeX.
+            fig_info = figure_lookup.get(elem.figure_block_id)
+            chunk = _make_chunk(
+                doc_id=doc_id,
+                level=ChunkLevel.MICRO,
+                index=counter,
+                text=elem.text or "[Formula]",
+                doc_title=doc_title,
+                chapter_title=section.title,
+                section_title=elem_section.title,
+                page=elem.page,
+                layout_type=LayoutType.FORMULA,
+            )
+            if fig_info:
+                chunk.figure_image_path = fig_info.get("image_path")
+                chunk.figure_s3_key = fig_info.get("s3_key")
             chunk.figure_caption = (
                 (fig_info or {}).get("caption") or elem.figure_caption or ""
             ) or None
@@ -422,8 +450,8 @@ def _create_meso_chunks(
         # across so the coarser zoom level is showable too. With more than one
         # there is no single right image to advertise, so it keeps none and
         # search reports it as unshowable rather than promising an image it
-        # cannot serve (GH #41).
-        if layout_type == LayoutType.FIGURE:
+        # cannot serve (GH #41). The same holds for a lone formula.
+        if layout_type in IMAGE_LAYOUT_TYPES:
             figures = [c for c in current_group if c.figure_image_path or c.figure_s3_key]
             if len(figures) == 1:
                 src = figures[0]

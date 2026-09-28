@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 
@@ -790,6 +791,23 @@ def test_list_figure_chunks_filters_and_image_required(
     # doc_id filter still applies.
     by_doc = list_figure_chunks(conn, doc_id="does-not-exist")
     assert by_doc == []
+
+
+def test_list_figure_chunks_includes_formulas(conn: sqlite3.Connection, tmp_path: Path) -> None:
+    """A formula is cropped and described like a figure (GH #19)."""
+    from datasheet_rag.store import list_figure_chunks
+
+    img = tmp_path / "p042_formula000.png"
+    img.write_bytes(b"\x89PNGFAKE")
+    formula = _make_figure_chunk("fig:formula", image_path=str(img))
+    formula.metadata.layout_type = LayoutType.FORMULA
+    insert_chunks(conn, [_make_figure_chunk("fig:figure"), formula])
+
+    listed = {c.id: c for c in list_figure_chunks(conn, only_with_image=False)}
+    assert set(listed) == {"fig:figure", "fig:formula"}
+    assert listed["fig:formula"].metadata.layout_type == LayoutType.FORMULA
+    # Availability is checked for formulas too, so search can advertise them.
+    assert listed["fig:formula"].figure_available is True
 
 
 def test_update_figure_description_persists_and_folds_into_context(

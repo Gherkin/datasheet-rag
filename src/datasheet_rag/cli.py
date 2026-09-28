@@ -1862,7 +1862,7 @@ def _next_steps(doc_id: str | None, *, rechunk: bool) -> None:
 def _print_chunk_detail(chunk: Chunk, *, show_context: bool = False) -> None:
     """Render one chunk's metadata + text — the CLI counterpart of the MCP
     server's ``_shape_chunk``."""
-    from datasheet_rag.models.chunk import LayoutType
+    from datasheet_rag.models.chunk import IMAGE_LAYOUT_TYPES
 
     pages = chunk.metadata.page_numbers
     page = str(pages[0]) if len(pages) == 1 else f"{pages[0]}-{pages[-1]}" if pages else "—"
@@ -1876,7 +1876,7 @@ def _print_chunk_detail(chunk: Chunk, *, show_context: bool = False) -> None:
     console.print(f"  prev:    {chunk.prev_id or '—'}")
     console.print(f"  next:    {chunk.next_id or '—'}")
 
-    if chunk.metadata.layout_type == LayoutType.FIGURE:
+    if chunk.metadata.layout_type in IMAGE_LAYOUT_TYPES:
         if chunk.figure_caption:
             console.print(f"  caption: {chunk.figure_caption}")
         if chunk.figure_description:
@@ -1970,7 +1970,7 @@ def _warn_unusable_figures(unusable: list[Any], listed: bool) -> None:
     )
 
 
-@inspect_group.command("figures", short_help="List figure chunks in the store.")
+@inspect_group.command("figures", short_help="List figure and formula chunks in the store.")
 @click.option("--doc-id", default=None, help="Restrict to a single document.")
 @click.option(
     "--project-id",
@@ -2001,7 +2001,7 @@ def list_figures_cmd(
     missing_description_only: bool,
     include_unusable: bool,
 ) -> None:
-    """List figure chunks in the store.
+    """List figure and formula chunks in the store.
 
     Shows the ones with a usable image by default. Pass --include-unusable to
     see figure chunks whose image is missing — search will not offer those,
@@ -2026,8 +2026,9 @@ def list_figures_cmd(
         _warn_unusable_figures(unusable, include_unusable)
         return
 
-    table = Table(title=f"Figure chunks ({len(figs)})")
+    table = Table(title=f"Figure and formula chunks ({len(figs)})")
     table.add_column("chunk_id", style="cyan", no_wrap=True)
+    table.add_column("kind")
     table.add_column("page")
     table.add_column("section")
     table.add_column("caption")
@@ -2043,6 +2044,7 @@ def list_figures_cmd(
             src = "[red]missing[/]" if c.figure_image_path else "[red]none[/]"
         table.add_row(
             _short_chunk_id(c.id, c.doc_id),
+            c.metadata.layout_type.value,
             page,
             (c.metadata.section_title or "")[:30],
             (c.figure_caption or "")[:40],
@@ -2116,7 +2118,7 @@ def get_figure_cmd(chunk_id: str, output_path: Path | None, db_path: Path | None
 # ---------------------------------------------------------------------------
 
 
-@repair_group.command("figures", short_help="Describe figures with a vision LLM.")
+@repair_group.command("figures", short_help="Describe figures and formulas with a vision LLM.")
 @click.option("--doc-id", default=None, help="Restrict to a single document.")
 @click.option("--project-id", default=None, help="Restrict to a single project.")
 @click.option(
@@ -2141,12 +2143,13 @@ def describe_figures_cmd(
     db_path: Path | None,
     verbose: bool,
 ) -> None:
-    """Generate vision-LLM descriptions for figure chunks and persist them.
+    """Generate vision-LLM descriptions for figure and formula chunks.
 
-    Walks `chunks WHERE layout_type='figure'` (optionally filtered by
+    Walks the figure and formula chunks (optionally filtered by
     doc/project, skipping those that already have a description), sends
     each image + caption + neighbour text to Bedrock Claude vision, and
-    folds the response into the chunk row + context_text.
+    folds the response into the chunk row + context_text. A figure gets a
+    short prose description; a formula gets a LaTeX transcription.
 
     Descriptions are folded into the existing chunk rows, so no re-chunk is
     needed — just re-embed the affected document so they show up in vector
@@ -2204,24 +2207,26 @@ def _relink_plan(
     for each source-less figure chunk that a crop can be reattached to, and
     ``notes`` explains every page that was left alone.
 
-    Matching is per page, in reading order: the manifest lists crops in the
-    order they were cut from the page and the chunks were inserted in the same
-    order, so an equal count on a page pairs them off unambiguously. A page
-    whose counts disagree (a crop dropped for being logo-sized, say) is
-    skipped rather than guessed at, and so is any pair whose captions are both
-    present and different.
+    Matching is per page and per kind (figure or formula), in reading order:
+    the manifest lists crops in the order they were cut from the page and the
+    chunks were inserted in the same order, so an equal count on a page pairs
+    them off unambiguously. A page whose counts disagree (a crop dropped for
+    being logo-sized, say) is skipped rather than guessed at, and so is any
+    pair whose captions are both present and different.
     """
     import json as _json
 
-    from datasheet_rag.models.chunk import ChunkLevel, LayoutType
+    from datasheet_rag.models.chunk import IMAGE_LAYOUT_TYPES, ChunkLevel, LayoutType
     from datasheet_rag.store import resolve_figure_path
 
     settings = get_settings()
+    image_types = sorted(t.value for t in IMAGE_LAYOUT_TYPES)
+    type_marks = ",".join("?" * len(image_types))
     orphans = conn.execute(
-        "SELECT COUNT(*) AS n FROM chunks WHERE doc_id = ? AND layout_type = ? "
+        f"SELECT COUNT(*) AS n FROM chunks WHERE doc_id = ? AND layout_type IN ({type_marks}) "
         "AND level = ? AND COALESCE(figure_image_path, '') = '' "
         "AND COALESCE(figure_s3_key, '') = ''",
-        (doc_id, LayoutType.FIGURE.value, int(ChunkLevel.MICRO)),
+        (doc_id, *image_types, int(ChunkLevel.MICRO)),
     ).fetchone()["n"]
     if not orphans:
         # Coarser levels inherit their image from the MICRO chunk they wrap,
@@ -2233,11 +2238,13 @@ def _relink_plan(
         return [], [f"no manifest at {manifest_path} — re-ingest the PDF to re-crop"]
 
     manifest = _json.loads(manifest_path.read_text())
-    by_page: dict[int, list[dict[str, Any]]] = {}
+    # Keyed by (layout_type, page): a formula crop only pairs with a formula
+    # chunk, so a page holding both kinds still lines up.
+    by_page: dict[tuple[str, int], list[dict[str, Any]]] = {}
     for fig in manifest.get("figures", []):
-        # Formulas are their own element type and never become figure chunks.
-        if "formula" in (fig.get("block_id") or ""):
-            continue
+        crop_kind = (
+            LayoutType.FORMULA if "formula" in (fig.get("block_id") or "") else LayoutType.FIGURE
+        )
         path = resolve_figure_path(fig.get("image_path"))
         if path is None or not path.is_file():
             # A manifest written on another machine: fall back to the crop
@@ -2250,27 +2257,31 @@ def _relink_plan(
                     continue
             else:
                 continue
-        by_page.setdefault(int(fig.get("page") or 1), []).append({**fig, "_path": path})
+        by_page.setdefault((crop_kind.value, int(fig.get("page") or 1)), []).append(
+            {**fig, "_path": path}
+        )
 
-    chunks_by_page: dict[int, list[Any]] = {}
+    chunks_by_page: dict[tuple[str, int], list[Any]] = {}
     for row in conn.execute(
-        "SELECT * FROM chunks WHERE doc_id = ? AND layout_type = ? AND level = ? ORDER BY rowid",
-        (doc_id, LayoutType.FIGURE.value, int(ChunkLevel.MICRO)),
+        f"SELECT * FROM chunks WHERE doc_id = ? AND layout_type IN ({type_marks}) "
+        "AND level = ? ORDER BY rowid",
+        (doc_id, *image_types, int(ChunkLevel.MICRO)),
     ).fetchall():
         pages = json.loads(row["page_numbers"] or "[]")
-        chunks_by_page.setdefault(pages[0] if pages else 1, []).append(row)
+        key = (row["layout_type"], pages[0] if pages else 1)
+        chunks_by_page.setdefault(key, []).append(row)
 
     plan: list[tuple[str, Path, str]] = []
     notes: list[str] = []
-    for page in sorted(set(by_page) | set(chunks_by_page)):
-        crops = by_page.get(page, [])
-        rows = chunks_by_page.get(page, [])
+    for kind, page in sorted(set(by_page) | set(chunks_by_page), key=lambda k: (k[1], k[0])):
+        crops = by_page.get((kind, page), [])
+        rows = chunks_by_page.get((kind, page), [])
         # Only pages that actually need repair are worth reporting on.
         if not any(not (r["figure_image_path"] or r["figure_s3_key"]) for r in rows):
             continue
         if len(crops) != len(rows):
             notes.append(
-                f"page {page}: {len(crops)} crop(s) vs {len(rows)} figure chunk(s) "
+                f"page {page}: {len(crops)} {kind} crop(s) vs {len(rows)} {kind} chunk(s) "
                 f"— skipped, cannot pair them unambiguously"
             )
             continue
@@ -2298,6 +2309,8 @@ def _relink_plan(
 def relink_figures_cmd(doc_id: str | None, do_apply: bool, db_path: Path | None) -> None:
     """Reattach cropped figure images to figure chunks that lost their link.
 
+    Formula chunks are repaired the same way, from the formula crops.
+
     A document ingested with `--skip-figures`, or restored from a backup
     written before figure links existed, leaves chunks that search can find
     and `show_figure` cannot serve. When the crops are still on disk under
@@ -2315,7 +2328,7 @@ def relink_figures_cmd(doc_id: str | None, do_apply: bool, db_path: Path | None)
     Documents with no crops on disk cannot be repaired this way — re-ingest
     the PDF (without --skip-figures) instead.
     """
-    from datasheet_rag.models.chunk import LayoutType
+    from datasheet_rag.models.chunk import IMAGE_LAYOUT_TYPES
     from datasheet_rag.store import connect, set_figure_source
 
     path = _require_local_db(db_path)
@@ -2325,13 +2338,15 @@ def relink_figures_cmd(doc_id: str | None, do_apply: bool, db_path: Path | None)
         doc_id = _resolve_doc_id(conn, doc_id)
         doc_ids = [doc_id]
     else:
+        image_types = sorted(t.value for t in IMAGE_LAYOUT_TYPES)
         doc_ids = [
             r["doc_id"]
             for r in conn.execute(
-                "SELECT DISTINCT doc_id FROM chunks WHERE layout_type = ? "
+                "SELECT DISTINCT doc_id FROM chunks "
+                f"WHERE layout_type IN ({','.join('?' * len(image_types))}) "
                 "AND COALESCE(figure_image_path, '') = '' "
                 "AND COALESCE(figure_s3_key, '') = '' ORDER BY doc_id",
-                (LayoutType.FIGURE.value,),
+                image_types,
             ).fetchall()
         ]
 

@@ -6,6 +6,11 @@ sentence description tuned for retrieval — naming any visible part
 numbers, register names, signal names, or block names, but staying
 faithful to what is actually in the image.
 
+A formula chunk goes through the same path with a different prompt: the
+model transcribes the cropped equation into LaTeX instead of describing
+it in prose (GH #19). The result lands in ``figure_description`` either
+way, so storage, search and the MCP tools need no second field.
+
 Cost notes (approximate, as of writing — verify in your console):
 
 * Claude 3 Haiku (vision)       — ``$0.25 / 1M`` input, ``$1.25 / 1M`` output.
@@ -24,6 +29,7 @@ from __future__ import annotations
 import base64
 import concurrent.futures as _cf
 import json
+import re
 import sqlite3
 import time
 from collections.abc import Iterable
@@ -36,7 +42,7 @@ from tenacity import Retrying, retry_if_exception, stop_after_attempt, wait_expo
 
 from datasheet_rag.aws import s3_client
 from datasheet_rag.config import get_settings
-from datasheet_rag.models.chunk import Chunk, ChunkGraph, LayoutType
+from datasheet_rag.models.chunk import IMAGE_LAYOUT_TYPES, Chunk, ChunkGraph, LayoutType
 from datasheet_rag.store import resolve_figure_path
 
 console = Console()
@@ -74,6 +80,33 @@ _SYSTEM_PROMPT = (
     "the image. Keep the description to 2-3 sentences."
 )
 
+_FORMULA_SYSTEM_PROMPT = (
+    "You transcribe mathematical formulas from electronics datasheets, "
+    "reference manuals, and application notes into LaTeX. The output is "
+    "stored in a retrieval index and read by engineers, so it must match "
+    "the image exactly: keep every symbol, subscript, superscript, unit, "
+    "and equation number. Do not solve, simplify, rename, or explain "
+    "anything. Output only the LaTeX — no prose, no code fences, no $ "
+    "delimiters. Put each equation on its own line."
+)
+
+# Where the model wraps its LaTeX despite being asked not to.
+_LATEX_FENCE_RE = re.compile(r"^```[a-zA-Z]*\s*\n?(.*?)\n?```$", re.DOTALL)
+
+
+def _strip_latex_wrapping(text: str) -> str:
+    """Drop a code fence or ``$$``/``\\[ \\]`` pair around a transcription."""
+    text = text.strip()
+    fenced = _LATEX_FENCE_RE.match(text)
+    if fenced:
+        text = fenced.group(1).strip()
+    for left, right in (("$$", "$$"), ("\\[", "\\]")):
+        inner = text[len(left) : -len(right)] if len(text) > len(left) + len(right) else ""
+        # Only a single outer pair: "$$a$$ = $$b$$" is two blocks, not one.
+        if text.startswith(left) and text.endswith(right) and inner and left not in inner:
+            text = inner.strip()
+    return text
+
 
 def _build_user_blocks(
     *,
@@ -82,6 +115,8 @@ def _build_user_blocks(
     caption: str,
     section_context: str,
     surrounding_text: str,
+    layout_type: LayoutType = LayoutType.FIGURE,
+    extracted_text: str = "",
 ) -> list[dict[str, Any]]:
     """Build the user-message ``content`` array for the Anthropic messages API."""
     media_type = {
@@ -99,11 +134,18 @@ def _build_user_blocks(
         text_parts.append(f"Caption: {caption}")
     if surrounding_text:
         text_parts.append(f"Surrounding text: {surrounding_text}")
-    text_parts.append(
-        "Write a 2-3 sentence description of the figure for a retrieval index. "
-        "Be specific about what is visible — block / signal / register names, "
-        "labels, and any visible numeric values."
-    )
+    if layout_type == LayoutType.FORMULA:
+        if extracted_text:
+            text_parts.append(
+                f"Text extracted from the PDF (may be garbled or incomplete): {extracted_text}"
+            )
+        text_parts.append("Transcribe the formula in the image as LaTeX.")
+    else:
+        text_parts.append(
+            "Write a 2-3 sentence description of the figure for a retrieval index. "
+            "Be specific about what is visible — block / signal / register names, "
+            "labels, and any visible numeric values."
+        )
 
     return [
         {
@@ -315,12 +357,20 @@ class FigureDescriber:
         caption: str = "",
         section_context: str = "",
         surrounding_text: str = "",
+        layout_type: LayoutType = LayoutType.FIGURE,
+        extracted_text: str = "",
     ) -> str:
-        """Send one figure to Bedrock and return the description text."""
+        """Send one figure to Bedrock and return the description text.
+
+        With ``layout_type=FORMULA`` the model transcribes the image into
+        LaTeX instead, and ``extracted_text`` (whatever the parser pulled
+        from the PDF) is passed along as a hint.
+        """
+        is_formula = layout_type == LayoutType.FORMULA
         body = {
             "anthropic_version": "bedrock-2023-05-31",
             "max_tokens": self.max_tokens,
-            "system": _SYSTEM_PROMPT,
+            "system": _FORMULA_SYSTEM_PROMPT if is_formula else _SYSTEM_PROMPT,
             "messages": [
                 {
                     "role": "user",
@@ -330,11 +380,14 @@ class FigureDescriber:
                         caption=caption,
                         section_context=section_context,
                         surrounding_text=surrounding_text,
+                        layout_type=layout_type,
+                        extracted_text=extracted_text,
                     ),
                 }
             ],
         }
-        return self._invoke(body)
+        out = self._invoke(body)
+        return _strip_latex_wrapping(out) if is_formula else out
 
     def describe_chunk_in_context(
         self,
@@ -347,11 +400,14 @@ class FigureDescriber:
         graph, or a remote backend. A bare sqlite connection is accepted too
         and wrapped in a :class:`StoreFigureSource`.
         """
-        if chunk.metadata.layout_type != LayoutType.FIGURE:
+        layout_type = chunk.metadata.layout_type
+        if layout_type not in IMAGE_LAYOUT_TYPES:
             raise ValueError(
-                f"chunk {chunk.id} is not a figure (layout_type={chunk.metadata.layout_type.value})"
+                f"chunk {chunk.id} is not a figure or formula (layout_type={layout_type.value})"
             )
         figure = _as_source(source).inputs(chunk)
+        # "[Formula]" is the parser's placeholder for "extracted nothing".
+        extracted = chunk.text if chunk.text and chunk.text != "[Formula]" else ""
         # TODO: dedupe consecutive identical levels — when chapter_title ==
         # section_title this emits "X > X" in the prompt. Collapse repeats.
         section_context = " > ".join(
@@ -363,6 +419,8 @@ class FigureDescriber:
             caption=chunk.figure_caption or "",
             section_context=section_context,
             surrounding_text=figure.surrounding_text,
+            layout_type=layout_type,
+            extracted_text=extracted if layout_type == LayoutType.FORMULA else "",
         )
 
     def describe_chunks(
@@ -376,7 +434,7 @@ class FigureDescriber:
         transient failure (timeout/throttle/5xx) before being skipped; the
         dict only contains successes. Use :meth:`stats` for the failure count.
         """
-        targets = [c for c in chunks if c.metadata.layout_type == LayoutType.FIGURE]
+        targets = [c for c in chunks if c.metadata.layout_type in IMAGE_LAYOUT_TYPES]
         if not targets:
             return {}
         figures = _as_source(source)
@@ -657,7 +715,7 @@ def describe_figures_in_graph(
     targets = [
         c
         for c in graph.chunks.values()
-        if c.metadata.layout_type == LayoutType.FIGURE
+        if c.metadata.layout_type in IMAGE_LAYOUT_TYPES
         and figure_source_available(c.figure_image_path, c.figure_s3_key)
     ]
     descriptions = _run_description_plan(

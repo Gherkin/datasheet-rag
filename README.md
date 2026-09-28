@@ -15,6 +15,7 @@ electronics datasheets and embeds them using hierarchical chunking.
 Some Features:
 * Embeds navigational breadcrumbs with text (chapter/section/page/etc)
 * Does visual analysis of figures to embed them as text
+* Transcribes formulas into LaTeX from their cropped image
 * Different chunk sizes to provide both detail and overview
 * Provides rendered pages/figures inline in chat using an MCP App
 * Weighted vector and keyword searching

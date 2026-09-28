@@ -135,9 +135,9 @@ class RemoteBackend(RagBackend):
         get recomputed, which is what would have happened anyway.
         """
         from datasheet_rag.description import apply_description_to_chunk
-        from datasheet_rag.models.chunk import LayoutType
+        from datasheet_rag.models.chunk import IMAGE_LAYOUT_TYPES
 
-        if not any(c.metadata.layout_type == LayoutType.FIGURE for c in graph.chunks.values()):
+        if not any(c.metadata.layout_type in IMAGE_LAYOUT_TYPES for c in graph.chunks.values()):
             return  # nothing to restore, so no round trip
         try:
             stored = self.list_figure_chunks(doc_id=graph.doc_id, only_with_image=False)

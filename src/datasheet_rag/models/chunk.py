@@ -22,10 +22,17 @@ class LayoutType(StrEnum):
     TEXT = "text"
     TABLE = "table"
     FIGURE = "figure"
+    FORMULA = "formula"
     KEY_VALUE = "key_value"
     HEADER = "header"
     LIST = "list"
     MIXED = "mixed"
+
+
+# Layout types whose chunks can carry a cropped image in the ``figure_*``
+# fields. A formula is cropped like a figure, but describing it means
+# transcribing it, so it keeps its own type (GH #19).
+IMAGE_LAYOUT_TYPES: frozenset[LayoutType] = frozenset({LayoutType.FIGURE, LayoutType.FORMULA})
 
 
 class ChunkMetadata(BaseModel):

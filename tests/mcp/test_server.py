@@ -575,6 +575,31 @@ def test_get_figure_returns_image_bytes_and_citation(conn: Any, tmp_path: Any) -
     assert out["citation"]["section"] == "SPI Timing"
 
 
+def test_a_formula_chunk_is_served_like_a_figure(conn: Any, tmp_path: Any) -> None:
+    """Search flags a formula's crop, and get_figure returns it (GH #19)."""
+    from datasheet_rag.mcp.server import _get_figure_impl, _shape_chunk
+    from datasheet_rag.store import get_chunk, update_figure_description
+
+    img = tmp_path / "p042_formula000.png"
+    img.write_bytes(b"\x89PNG\r\n\x1a\nformula")
+    _seed_figure_chunk(conn, "fig:eq", image_path=str(img))
+    conn.execute(
+        "UPDATE chunks SET layout_type = ?, metadata_json = json_set(metadata_json, "
+        "'$.layout_type', ?) WHERE id = ?",
+        (LayoutType.FORMULA.value, LayoutType.FORMULA.value, "fig:eq"),
+    )
+    update_figure_description(conn, "fig:eq", r"V = I \cdot R")
+
+    shaped = _shape_chunk(get_chunk(conn, "fig:eq"))
+    assert shaped["has_figure"] is True
+    assert shaped["figure_uri"] == "rag://figure/fig:eq"
+    assert shaped["figure_description"] == r"V = I \cdot R"
+
+    out = _get_figure_impl("fig:eq", conn=conn)
+    assert out["image_bytes"] == b"\x89PNG\r\n\x1a\nformula"
+    assert out["description"] == r"V = I \cdot R"
+
+
 def test_get_figure_unknown_chunk_raises(conn: Any) -> None:
     from datasheet_rag.mcp.server import _get_figure_impl
 

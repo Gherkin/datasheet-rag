@@ -81,6 +81,14 @@ def _figure_chunk(
     )
 
 
+def _formula_chunk(chunk_id: str, *, image_path: str, text: str = "[Formula]") -> Chunk:
+    chunk = _figure_chunk(chunk_id, image_path=image_path, caption="")
+    chunk.metadata.layout_type = LayoutType.FORMULA
+    chunk.text = text
+    chunk.figure_caption = None
+    return chunk
+
+
 def _text_chunk(chunk_id: str, text: str) -> Chunk:
     md = ChunkMetadata(
         doc_id="docA",
@@ -298,6 +306,113 @@ def test_describe_chunks_ignores_non_figure_inputs(
     describer = FigureDescriber(client=fake_client)
     out = describer.describe_chunks([fig, text], conn)
     assert set(out.keys()) == {"c-fig"}
+
+
+# ---------------------------------------------------------------------------
+# Formulas (GH #19) — transcribed into LaTeX, not described in prose
+# ---------------------------------------------------------------------------
+
+
+def _sent_request(client: Any) -> tuple[str, str]:
+    """The system prompt and user text of the last request sent."""
+    body = json.loads(client.invoke_model.call_args.kwargs["body"])
+    text = next(b["text"] for b in body["messages"][0]["content"] if b["type"] == "text")
+    return body["system"], text
+
+
+def test_a_formula_is_sent_with_the_latex_prompt(conn: Any, tmp_path: Any) -> None:
+    img = tmp_path / "formula.png"
+    img.write_bytes(b"\x89PNGFAKE")
+    formula = _formula_chunk("c-eq", image_path=str(img), text="V OUT = V REF (1 + R1 R2)")
+    insert_chunks(conn, [formula])
+
+    client = MagicMock()
+    client.invoke_model.return_value = _mock_bedrock_response(
+        r"V_{OUT} = V_{REF}\left(1 + \frac{R_1}{R_2}\right)"
+    )
+    out = FigureDescriber(client=client).describe_chunk_in_context(formula, conn)
+
+    assert out == r"V_{OUT} = V_{REF}\left(1 + \frac{R_1}{R_2}\right)"
+    system, text = _sent_request(client)
+    assert "LaTeX" in system
+    assert "2-3 sentences" not in system
+    assert "Transcribe the formula" in text
+    # The parser's text is a useful hint for the model.
+    assert "V OUT = V REF (1 + R1 R2)" in text
+
+
+def test_a_formula_placeholder_is_not_offered_as_extracted_text(
+    conn: Any, fake_client: Any, tmp_path: Any
+) -> None:
+    img = tmp_path / "formula.png"
+    img.write_bytes(b"\x89PNGFAKE")
+    formula = _formula_chunk("c-eq", image_path=str(img), text="[Formula]")
+    insert_chunks(conn, [formula])
+
+    FigureDescriber(client=fake_client).describe_chunk_in_context(formula, conn)
+
+    _, text = _sent_request(fake_client)
+    assert "[Formula]" not in text
+    assert "extracted from the PDF" not in text
+
+
+def test_a_figure_still_gets_the_prose_prompt(conn: Any, fake_client: Any, tmp_path: Any) -> None:
+    img = tmp_path / "fig.png"
+    img.write_bytes(b"\x89PNGFAKE")
+    fig = _figure_chunk("c-fig", image_path=str(img))
+    insert_chunks(conn, [fig])
+
+    FigureDescriber(client=fake_client).describe_chunk_in_context(fig, conn)
+
+    system, text = _sent_request(fake_client)
+    assert "LaTeX" not in system
+    assert "Transcribe" not in text
+
+
+@pytest.mark.parametrize(
+    ("reply", "expected"),
+    [
+        ("```latex\nV = IR\n```", "V = IR"),
+        ("$$V = IR$$", "V = IR"),
+        ("\\[ V = IR \\]", "V = IR"),
+        # Two display blocks are two equations, not one wrapped one.
+        ("$$a = b$$ and $$c = d$$", "$$a = b$$ and $$c = d$$"),
+        ("V = IR", "V = IR"),
+    ],
+)
+def test_latex_wrapping_is_stripped_from_a_transcription(reply: str, expected: str) -> None:
+    client = MagicMock()
+    client.invoke_model.return_value = _mock_bedrock_response(reply)
+    out = FigureDescriber(client=client).describe_one(
+        image_bytes=b"x", image_format="png", layout_type=LayoutType.FORMULA
+    )
+    assert out == expected
+
+
+def test_describe_figures_in_store_transcribes_formulas_too(conn: Any, tmp_path: Any) -> None:
+    fig_img = tmp_path / "fig.png"
+    fig_img.write_bytes(b"\x89PNGFIG")
+    eq_img = tmp_path / "eq.png"
+    eq_img.write_bytes(b"\x89PNGEQ")
+    insert_chunks(
+        conn,
+        [
+            _figure_chunk("c-fig", image_path=str(fig_img)),
+            _formula_chunk("c-eq", image_path=str(eq_img)),
+        ],
+    )
+
+    client = MagicMock()
+    client.invoke_model.return_value = _mock_bedrock_response("V = IR")
+    out = describe_figures_in_store(conn, describer=FigureDescriber(client=client))
+
+    assert set(out) == {"c-fig", "c-eq"}
+    from datasheet_rag.store import get_chunk
+
+    stored = get_chunk(conn, "c-eq")
+    assert stored is not None
+    assert stored.figure_description == "V = IR"
+    assert "Description: V = IR" in stored.context_text
 
 
 # ---------------------------------------------------------------------------

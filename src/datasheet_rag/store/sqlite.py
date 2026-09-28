@@ -22,6 +22,7 @@ from typing import Any, NamedTuple
 import numpy as np
 
 from datasheet_rag.models.chunk import (
+    IMAGE_LAYOUT_TYPES,
     Chunk,
     ChunkGraph,
     ChunkLevel,
@@ -462,10 +463,10 @@ def _row_to_chunk(row: sqlite3.Row) -> Chunk:
         figure_caption=row["figure_caption"],
         figure_image_path=figure_image_path,
         figure_description=figure_description,
-        # Only figure chunks pay for the stat; everything else short-circuits.
+        # Only image-bearing chunks pay for the stat; the rest short-circuit.
         figure_available=(
             figure_source_available(figure_image_path, row["figure_s3_key"])
-            if metadata.layout_type == LayoutType.FIGURE
+            if metadata.layout_type in IMAGE_LAYOUT_TYPES
             else None
         ),
     )
@@ -513,19 +514,22 @@ def list_figure_chunks(
     project_id: str | None = None,
     only_with_image: bool = True,
 ) -> list[Chunk]:
-    """Return all chunks whose layout_type is 'figure'.
+    """Return all chunks that can carry an image: figures and formulas.
 
     Useful for both the MCP ``get_figure`` tool and offline workflows like
     "generate descriptions for every figure that doesn't have one yet."
+    Formulas are included because they are cropped and described the same
+    way; callers that want one kind check ``metadata.layout_type``.
 
     Parameters
     ----------
     only_with_image:
-        When True (default), filter out figure chunks that don't have a
-        usable image source (no ``figure_image_path`` and no ``figure_s3_key``).
+        When True (default), filter out chunks that don't have a usable
+        image source (no ``figure_image_path`` and no ``figure_s3_key``).
     """
-    sql = "SELECT * FROM chunks WHERE layout_type = ?"
-    params: list[object] = [LayoutType.FIGURE.value]
+    types = sorted(t.value for t in IMAGE_LAYOUT_TYPES)
+    sql = f"SELECT * FROM chunks WHERE layout_type IN ({','.join('?' * len(types))})"
+    params: list[object] = list(types)
     if doc_id:
         sql += " AND doc_id = ?"
         params.append(doc_id)
