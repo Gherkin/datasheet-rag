@@ -313,6 +313,27 @@ class OrderedGroup(click.Group):
         # a newly added command shows up rather than silently disappearing.
         return known + sorted(set(self.commands) - set(known))
 
+    def invoke(self, ctx: click.Context) -> Any:
+        # A broken .rag.toml can surface from any command that resolves a
+        # project scope; report it as a plain CLI error, not a traceback.
+        from datasheet_rag.project_config import ProjectConfigError
+
+        try:
+            return super().invoke(ctx)
+        except ProjectConfigError as e:
+            raise click.ClickException(str(e)) from e
+
+
+def _parse_attr_items(items: tuple[str, ...]) -> dict[str, str]:
+    """Parse repeated ``--attr KEY=VALUE`` options into a dict."""
+    parsed: dict[str, str] = {}
+    for item in items:
+        key, sep, value = item.partition("=")
+        if not sep or not key:
+            raise click.BadParameter(f"--attr expects KEY=VALUE, got {item!r}", param_hint="--attr")
+        parsed[key] = value
+    return parsed
+
 
 @click.group(
     cls=OrderedGroup,
@@ -751,12 +772,7 @@ def list_docs(
         console.print(table)
         return
 
-    attr_filters: dict[str, str] = {}
-    for item in attrs:
-        key, sep, value = item.partition("=")
-        if not sep or not key:
-            raise click.BadParameter(f"--attr expects KEY=VALUE, got {item!r}", param_hint="--attr")
-        attr_filters[key] = value
+    attr_filters = _parse_attr_items(attrs)
 
     filtering = bool(group_name or mpn or tags or attr_filters)
     be = _backend_for(db_path)
@@ -2480,8 +2496,16 @@ def _print_cost_table(cost: CostEstimate, heading: str = "Estimated AWS cost") -
     "reviewed (repeatable). Sets the sidecar's whole tag list "
     "for this ingest. Change it later without a re-ingest via "
     "`rag metadata <doc-id> --tag ...`; for arbitrary "
-    "key=value tagging use `rag metadata <doc-id> --attr key=value` "
-    "instead.",
+    "key=value tagging use --attr key=value instead.",
+)
+@click.option(
+    "--attr",
+    "attrs",
+    multiple=True,
+    metavar="KEY=VALUE",
+    help="Arbitrary key=value attribute, repeatable, e.g. --attr "
+    "revision=B. Merged over any [attributes] from .rag.toml, key by "
+    "key. Change it later via `rag metadata <doc-id> --attr ...`.",
 )
 @click.option(
     "--skip-figures",
@@ -2580,6 +2604,7 @@ def ingest(
     subsystem: str | None,
     doc_type: str | None,
     tags: tuple[str, ...],
+    attrs: tuple[str, ...],
     skip_figures: bool,
     upload_figures: bool,
     skip_describe: bool,
@@ -2618,6 +2643,7 @@ def ingest(
         subsystem=subsystem,
         doc_type=doc_type,
         tags=tags,
+        attributes=_parse_attr_items(attrs),
         skip_figures=skip_figures,
         upload_figures=upload_figures,
         skip_describe=skip_describe,
@@ -2726,6 +2752,7 @@ def _ingest_one(
     subsystem: str | None,
     doc_type: str | None,
     tags: tuple[str, ...],
+    attributes: dict[str, str],
     skip_figures: bool,
     upload_figures: bool,
     skip_describe: bool,
@@ -2751,17 +2778,24 @@ def _ingest_one(
         estimate_textract_cost,
         estimate_title_inference_cost,
     )
-    from datasheet_rag.project_config import get_project_config_for
+    from datasheet_rag.project_config import ProjectConfigError, get_project_config_for
 
-    proj_cfg = get_project_config_for(pdf_path.parent)
+    # Raised as a ClickException here, not left to the root group, so a bulk
+    # ingest records the one bad directory as a failed document and goes on.
+    try:
+        proj_cfg = get_project_config_for(pdf_path.parent)
+    except ProjectConfigError as e:
+        raise click.ClickException(str(e)) from e
     if proj_cfg is not None:
         project_id = project_id or proj_cfg.project_id
         group_name = group_name or proj_cfg.group
         mpn = mpn or proj_cfg.mpn
         manufacturer = manufacturer or proj_cfg.manufacturer
         subsystem = subsystem or proj_cfg.subsystem
+        doc_type = doc_type or proj_cfg.doc_type
         if not tags and proj_cfg.tags:
             tags = tuple(proj_cfg.tags)
+        attributes = {**(proj_cfg.attributes or {}), **attributes}
 
     if show_cost:
         dry_run = True
@@ -2819,6 +2853,7 @@ def _ingest_one(
             subsystem=subsystem or None,
             doc_type=doc_type or None,
             tags=list(tags) if tags else None,
+            attributes=attributes or None,
         )
         try:
             result = get_backend().ingest_pdf(
@@ -2944,6 +2979,7 @@ def _ingest_one(
         subsystem=subsystem or None,
         doc_type=doc_type or None,
         tags=list(tags) if tags else None,
+        attributes=attributes or None,
     )
     title_hints = dict(parsed.title_hints)
 
@@ -3675,15 +3711,14 @@ def metadata_cmd(
         mpn = proj_cfg.mpn if mpn is None else mpn
         manufacturer = proj_cfg.manufacturer if manufacturer is None else manufacturer
         subsystem = proj_cfg.subsystem if subsystem is None else subsystem
+        doc_type = proj_cfg.doc_type if doc_type is None else doc_type
         if not tags and proj_cfg.tags:
             tags = tuple(proj_cfg.tags)
 
-    attributes: dict[str, Any] = {}
-    for item in attrs:
-        key, sep, value = item.partition("=")
-        if not sep or not key:
-            raise click.BadParameter(f"--attr expects KEY=VALUE, got {item!r}", param_hint="--attr")
-        attributes[key] = value
+    # Config attributes fill the keys the user did not name; --attr and
+    # --unset-attr both win for the keys they touch.
+    attributes: dict[str, Any] = dict(proj_cfg.attributes or {}) if proj_cfg is not None else {}
+    attributes.update(_parse_attr_items(attrs))
     for key in unset_attrs:
         attributes[key] = None
 

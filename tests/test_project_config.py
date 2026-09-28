@@ -8,11 +8,13 @@ import pytest
 
 from datasheet_rag.project_config import (
     ProjectConfig,
+    ProjectConfigError,
     find_project_configs,
     get_project_config_for,
     merge_project_configs,
     resolve_cli_project_id,
 )
+from datasheet_rag.store.metadata import RESERVED_ATTRIBUTES
 
 # ---------------------------------------------------------------------------
 # find_project_configs
@@ -68,22 +70,77 @@ def test_find_project_configs_returns_empty_when_absent(tmp_path: Path) -> None:
     assert find_project_configs(tmp_path) == []
 
 
-def test_find_project_configs_skips_malformed_toml(tmp_path: Path) -> None:
+def test_find_project_configs_rejects_malformed_toml(tmp_path: Path) -> None:
     (tmp_path / ".rag.toml").write_text("this is not [valid toml")
 
-    assert find_project_configs(tmp_path) == []
+    with pytest.raises(ProjectConfigError, match="not valid TOML"):
+        find_project_configs(tmp_path)
 
 
-def test_find_project_configs_skips_malformed_but_keeps_ancestors(tmp_path: Path) -> None:
+def test_find_project_configs_rejects_malformed_even_with_valid_ancestors(tmp_path: Path) -> None:
     (tmp_path / ".rag.toml").write_text('project_id = "proj-a"\n')
     nested = tmp_path / "sub"
     nested.mkdir()
     (nested / ".rag.toml").write_text("not valid toml [")
 
-    configs = find_project_configs(nested)
+    with pytest.raises(ProjectConfigError, match=str(nested / ".rag.toml")):
+        find_project_configs(nested)
 
-    assert len(configs) == 1
-    assert configs[0].project_id == "proj-a"
+
+# ---------------------------------------------------------------------------
+# Schema: doc_type, [attributes], and what is rejected (GH #26)
+# ---------------------------------------------------------------------------
+
+
+def test_loads_doc_type_and_attributes(tmp_path: Path) -> None:
+    (tmp_path / ".rag.toml").write_text(
+        'doc_type = "technical-manual"\n[attributes]\nrevision = "B"\n'
+    )
+
+    (cfg,) = find_project_configs(tmp_path)
+
+    assert cfg.doc_type == "technical-manual"
+    assert cfg.attributes == {"revision": "B"}
+
+
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        ('colour = "red"\n', "unknown key"),
+        ("mpn = 226\n", "'mpn' must be a string"),
+        ('doc_type = ["a"]\n', "'doc_type' must be a string"),
+        ('tags = "mcu"\n', "'tags' must be a list of strings"),
+        ("tags = [1, 2]\n", "'tags' must be a list of strings"),
+        ('attributes = "x"\n', "must be a table"),
+        ("[attributes]\nrevision = 2\n", "'revision' must be a string"),
+        ("[attributes]\nreviewed = true\n", "'reviewed' must be a string"),
+        ('[attributes]\nlist = ["a"]\n', "'list' must be a string"),
+        ('[attributes.nested]\nkey = "v"\n', "'nested' must be a string"),
+        ('[attributes]\n"" = "v"\n', "empty key"),
+    ],
+)
+def test_rejects_schema_violations(tmp_path: Path, body: str, message: str) -> None:
+    (tmp_path / ".rag.toml").write_text(body)
+
+    with pytest.raises(ProjectConfigError, match=message):
+        find_project_configs(tmp_path)
+
+
+@pytest.mark.parametrize("key", sorted(RESERVED_ATTRIBUTES))
+def test_rejects_reserved_attribute_keys(tmp_path: Path, key: str) -> None:
+    (tmp_path / ".rag.toml").write_text(f'[attributes]\n{key} = "x"\n')
+
+    with pytest.raises(ProjectConfigError, match="reserved"):
+        find_project_configs(tmp_path)
+
+
+def test_reserved_attributes_cover_every_key_the_pipeline_writes() -> None:
+    from datasheet_rag.cli import _STALE_ATTR
+
+    assert _STALE_ATTR in RESERVED_ATTRIBUTES
+    # store.metadata.set_title_source and ingest_pipeline's title hints.
+    assert {"title_source", "title_inferred"} <= RESERVED_ATTRIBUTES
+    assert {"running_header", "pdf_meta_title"} <= RESERVED_ATTRIBUTES
 
 
 # ---------------------------------------------------------------------------
@@ -126,6 +183,22 @@ def test_merge_project_configs_unions_tags_nearest_first_deduped(tmp_path: Path)
 
     assert merged is not None
     assert merged.tags == ["errata", "datasheet", "reference-manual"]
+
+
+def test_merge_project_configs_merges_attributes_key_by_key_nearest_wins(tmp_path: Path) -> None:
+    nearest = ProjectConfig(path=tmp_path / "mpn" / ".rag.toml", attributes={"revision": "B"})
+    middle = ProjectConfig(path=tmp_path / "sub" / ".rag.toml", doc_type="errata")
+    root = ProjectConfig(
+        path=tmp_path / ".rag.toml",
+        doc_type="datasheet",
+        attributes={"revision": "A", "owner": "hw"},
+    )
+
+    merged = merge_project_configs([nearest, middle, root])
+
+    assert merged is not None
+    assert merged.attributes == {"revision": "B", "owner": "hw"}
+    assert merged.doc_type == "errata"
 
 
 def test_merge_project_configs_single_config_passthrough(tmp_path: Path) -> None:

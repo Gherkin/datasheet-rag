@@ -246,8 +246,7 @@ def test_blank_scalar_clears_field(
     assert _get_json(db_path, DOC_A)[field] == ""
 
 
-# doc_type has no .rag.toml default, so it is not part of this merge.
-@pytest.mark.parametrize(("flag", "field"), [f for f in _SCALAR_FIELDS if f[1] != "doc_type"])
+@pytest.mark.parametrize(("flag", "field"), _SCALAR_FIELDS)
 def test_blank_scalar_beats_project_config_default(
     db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flag: str, field: str
 ) -> None:
@@ -258,6 +257,55 @@ def test_blank_scalar_beats_project_config_default(
     result = _meta(db_path, DOC_A, flag, "", *_OTHER_FLAG)
     assert result.exit_code == 0, result.output
     assert _get_json(db_path, DOC_A)[field] == ""
+
+
+# --- .rag.toml doc_type and [attributes] (GH #26) ----------------------------
+
+
+def test_project_config_supplies_doc_type_and_attributes(
+    db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".rag.toml").write_text(
+        'doc_type = "technical-manual"\n[attributes]\nrevision = "A"\nowner = "hw"\n'
+    )
+    monkeypatch.chdir(tmp_path)
+    result = _meta(db_path, DOC_A, "--mpn", "V700")
+    assert result.exit_code == 0, result.output
+    meta = _get_json(db_path, DOC_A)
+    assert meta["doc_type"] == "technical-manual"
+    assert meta["attributes"] == {"revision": "A", "owner": "hw"}
+
+
+def test_attr_flags_beat_project_config_attributes(
+    db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _meta(db_path, DOC_A, "--attr", "owner=seeded")
+    (tmp_path / ".rag.toml").write_text('[attributes]\nrevision = "A"\nowner = "hw"\n')
+    monkeypatch.chdir(tmp_path)
+    result = _meta(db_path, DOC_A, "--attr", "revision=C", "--unset-attr", "owner")
+    assert result.exit_code == 0, result.output
+    assert _get_json(db_path, DOC_A)["attributes"] == {"revision": "C"}
+
+
+def test_bad_project_config_is_a_clean_cli_error(
+    db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".rag.toml").write_text('[attributes]\nneeds_reembed = "yes"\n')
+    monkeypatch.chdir(tmp_path)
+    result = _meta(db_path, DOC_A, "--mpn", "V700")
+    assert result.exit_code == 1
+    assert "reserved" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_bad_project_config_fails_scoped_read_commands(
+    db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".rag.toml").write_text('colour = "red"\n')
+    monkeypatch.chdir(tmp_path)
+    result = _list(db_path)
+    assert result.exit_code == 1
+    assert "unknown key(s) colour" in result.output
 
 
 def test_no_flags_is_still_a_read(db_path: Path) -> None:
@@ -273,3 +321,4 @@ def test_ingest_tag_help_mentions_replace_semantics() -> None:
     result = runner.invoke(cli, ["ingest", "--help"])
     assert result.exit_code == 0, result.output
     assert "--attr key=value" in result.output
+    assert "--attr KEY=VALUE" in result.output

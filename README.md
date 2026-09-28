@@ -351,8 +351,23 @@ manufacturer = "STMicroelectronics"
 group        = "psu"
 subsystem    = "power"
 mpn          = "STM32H743VIT6"
+doc_type     = "reference-manual"
 tags         = ["pinout", "power-tree", "reference-manual"]
+
+[attributes]
+revision     = "B"
+reviewed_by  = "hector"
 ```
+
+`tags` are combined across every `.rag.toml` on the path. `[attributes]` are merged key by key, and the file closest to the pdf wins for a given key. `--attr key=value` on the command line wins over both.
+
+The schema is closed. Any of the following makes the command fail with an error that names the file:
+- a key that is not listed above (arbitrary keys go under `[attributes]`)
+- a value of the wrong type — every value is a string, `tags` is a list of strings, and attribute values must be quoted strings
+- an attribute the pipeline sets itself: `title_source`, `title_inferred`, `running_header`, `pdf_meta_title`, `needs_reembed`
+- a file that is not valid TOML
+
+A bad file inside a directory given to `rag ingest ./datasheets` fails only the pdfs below it; the rest are still ingested.
 
 ## Usage
 

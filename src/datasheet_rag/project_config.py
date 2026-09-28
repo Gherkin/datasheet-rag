@@ -20,7 +20,7 @@ Running ``rag ingest`` from inside ``STM32H743VIT6/`` merges all three files:
 the mpn-level config wins for fields it sets (``mpn``), the subsystem-level
 config fills in ``subsystem``/``group``, and the project-level config supplies
 the rest (``project_id``, ``manufacturer``). ``tags`` are unioned across every
-level instead of overridden.
+level instead of overridden, and ``attributes`` are merged key by key.
 
 Example ``.rag.toml``::
 
@@ -29,7 +29,16 @@ Example ``.rag.toml``::
     mpn = "STM32H743VIT6"
     manufacturer = "STMicroelectronics"
     subsystem = "mcu"
+    doc_type = "reference-manual"
     tags = ["reference-manual"]
+
+    [attributes]
+    revision = "B"
+
+The schema is closed: an unknown key, a value of the wrong type, a reserved
+attribute key or a file that is not valid TOML raises ``ProjectConfigError``
+rather than being dropped, since a silently ignored default mislabels every
+document ingested under it (GH #26).
 """
 
 from __future__ import annotations
@@ -39,8 +48,18 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
+
+from datasheet_rag.store.metadata import RESERVED_ATTRIBUTES
 
 CONFIG_FILENAME = ".rag.toml"
+
+_SCALAR_KEYS = ("project_id", "group", "mpn", "manufacturer", "subsystem", "doc_type")
+_KNOWN_KEYS = frozenset({*_SCALAR_KEYS, "tags", "attributes"})
+
+
+class ProjectConfigError(ValueError):
+    """A ``.rag.toml`` that cannot be applied as written."""
 
 
 @dataclass(frozen=True)
@@ -53,15 +72,55 @@ class ProjectConfig:
     mpn: str | None = None
     manufacturer: str | None = None
     subsystem: str | None = None
+    doc_type: str | None = None
     tags: list[str] | None = None
+    attributes: dict[str, str] | None = None
 
 
-def _load_config(candidate: Path) -> ProjectConfig | None:
+def _check_attributes(candidate: Path, raw: Any) -> dict[str, str]:
+    if not isinstance(raw, dict):
+        raise ProjectConfigError(f"{candidate}: 'attributes' must be a table, e.g. [attributes]")
+    for key, value in raw.items():
+        if not key:
+            raise ProjectConfigError(f"{candidate}: [attributes] has an empty key")
+        if key in RESERVED_ATTRIBUTES:
+            raise ProjectConfigError(
+                f"{candidate}: attribute {key!r} is reserved — the pipeline sets it "
+                f"itself (reserved: {', '.join(sorted(RESERVED_ATTRIBUTES))})"
+            )
+        if not isinstance(value, str):
+            raise ProjectConfigError(
+                f"{candidate}: attribute {key!r} must be a string, got "
+                f'{type(value).__name__} — quote it, e.g. {key} = "{value}"'
+            )
+    return dict(raw)
+
+
+def _load_config(candidate: Path) -> ProjectConfig:
     try:
         with open(candidate, "rb") as f:
             data = tomllib.load(f)
-    except (tomllib.TOMLDecodeError, OSError):
-        return None
+    except tomllib.TOMLDecodeError as e:
+        raise ProjectConfigError(f"{candidate}: not valid TOML: {e}") from e
+    except OSError as e:
+        raise ProjectConfigError(f"{candidate}: cannot be read: {e}") from e
+
+    unknown = sorted(set(data) - _KNOWN_KEYS)
+    if unknown:
+        raise ProjectConfigError(
+            f"{candidate}: unknown key(s) {', '.join(unknown)} (known: "
+            f"{', '.join(sorted(_KNOWN_KEYS))}; arbitrary keys go under [attributes])"
+        )
+    for key in _SCALAR_KEYS:
+        if key in data and not isinstance(data[key], str):
+            raise ProjectConfigError(
+                f"{candidate}: {key!r} must be a string, got {type(data[key]).__name__}"
+            )
+    tags = data.get("tags")
+    if tags is not None and not (isinstance(tags, list) and all(isinstance(t, str) for t in tags)):
+        raise ProjectConfigError(f"{candidate}: 'tags' must be a list of strings")
+    attributes = data.get("attributes")
+
     return ProjectConfig(
         path=candidate,
         project_id=data.get("project_id"),
@@ -69,7 +128,9 @@ def _load_config(candidate: Path) -> ProjectConfig | None:
         mpn=data.get("mpn"),
         manufacturer=data.get("manufacturer"),
         subsystem=data.get("subsystem"),
-        tags=data.get("tags"),
+        doc_type=data.get("doc_type"),
+        tags=tags,
+        attributes=_check_attributes(candidate, attributes) if attributes is not None else None,
     )
 
 
@@ -78,16 +139,15 @@ def find_project_configs(start: Path) -> list[ProjectConfig]:
 
     Returns them ordered from most specific (nearest ``start``) to least
     specific (closest to the filesystem root) — the order ``merge_project_configs``
-    expects. A malformed file is skipped (treated as absent) rather than
-    aborting the whole walk — a broken config file shouldn't break every command.
+    expects. Raises ``ProjectConfigError`` on the first file that is malformed
+    or breaks the schema: skipping it would silently drop the defaults it was
+    written to apply.
     """
     configs = []
     for directory in (start, *start.parents):
         candidate = directory / CONFIG_FILENAME
         if candidate.is_file():
-            cfg = _load_config(candidate)
-            if cfg is not None:
-                configs.append(cfg)
+            configs.append(_load_config(candidate))
     return configs
 
 
@@ -99,6 +159,7 @@ def merge_project_configs(configs: Sequence[ProjectConfig]) -> ProjectConfig | N
     same way directory-local config overrides project-wide config elsewhere.
     ``tags`` are unioned across every level instead, since tags are additive
     labels rather than a single value to override (de-duplicated, nearest first).
+    ``attributes`` merge key by key, the nearest file winning per key.
     The merged ``path`` is the nearest file's, since that's the config a user
     editing files in this directory would reach for first.
     """
@@ -118,6 +179,10 @@ def merge_project_configs(configs: Sequence[ProjectConfig]) -> ProjectConfig | N
             if tag not in tags:
                 tags.append(tag)
 
+    attributes: dict[str, str] = {}
+    for cfg in reversed(configs):
+        attributes.update(cfg.attributes or {})
+
     return ProjectConfig(
         path=configs[0].path,
         project_id=_first("project_id"),
@@ -125,7 +190,9 @@ def merge_project_configs(configs: Sequence[ProjectConfig]) -> ProjectConfig | N
         mpn=_first("mpn"),
         manufacturer=_first("manufacturer"),
         subsystem=_first("subsystem"),
+        doc_type=_first("doc_type"),
         tags=tags or None,
+        attributes=attributes or None,
     )
 
 
