@@ -692,6 +692,43 @@ def test_figure_tools_answer_softly_when_there_is_no_image(
     assert "show_pdf('docA', <page>)" in out[0].text
 
 
+@pytest.mark.parametrize("fmt", ["png", "jpg"])
+def test_figure_resource_is_served_as_png(monkeypatch: Any, fmt: str) -> None:
+    """The resource must say image/png and hold PNG bytes (GH #54).
+
+    The SDK default is text/plain, fixed at registration, so both the
+    template listing and the read have to be checked.
+    """
+    pytest.importorskip("mcp")
+    import asyncio
+    import io
+
+    from PIL import Image
+
+    from datasheet_rag.mcp import server as mcp_server
+
+    buf = io.BytesIO()
+    Image.new("RGB", (4, 4), (200, 10, 10)).save(buf, format="PNG" if fmt == "png" else "JPEG")
+    stored = buf.getvalue()
+
+    def _fig(chunk_id: str, **kw: Any) -> dict[str, Any]:
+        return {"image_bytes": stored, "format": fmt}
+
+    monkeypatch.setattr(mcp_server, "_get_figure_impl", _fig)
+    server = mcp_server.build_server()
+
+    templates = asyncio.run(server.list_resource_templates())
+    figure = next(t for t in templates if t.uri_template == "rag://figure/{chunk_id}")
+    assert figure.mime_type == "image/png"
+
+    (content,) = asyncio.run(server.read_resource("rag://figure/docA:L2:7"))
+    assert content.mime_type == "image/png"
+    assert isinstance(content.content, bytes)
+    assert content.content.startswith(b"\x89PNG\r\n\x1a\n")
+    if fmt == "png":
+        assert content.content == stored  # already PNG: passed through untouched
+
+
 #: Tools that hand back content blocks the host renders itself. Their payload
 #: is the blocks — a structured copy alongside would be dead weight (GH #48).
 _CONTENT_BLOCK_TOOLS = {"get_figure", "show_figure", "show_pdf", "show_page", "show_hello"}

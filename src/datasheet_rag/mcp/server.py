@@ -566,6 +566,17 @@ def _compress_for_mcp(image_bytes: bytes, fmt: str) -> tuple[bytes, str]:
     return buf.getvalue(), "jpg"
 
 
+def _reencode_as_png(image_bytes: bytes) -> bytes:
+    """Re-encode image bytes of any format Pillow reads as PNG."""
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.open(io.BytesIO(image_bytes)).save(buf, format="PNG")
+    return buf.getvalue()
+
+
 def _figure_unavailable_text(chunk_id: str, exc: Exception) -> str:
     """The text a figure tool returns when there is no image to return.
 
@@ -943,17 +954,24 @@ def build_server(
             TextContent(type="text", text=text_summary),
         ]
 
-    @mcp.resource("rag://figure/{chunk_id}")
+    @mcp.resource("rag://figure/{chunk_id}", mime_type="image/png")
     def figure_resource(chunk_id: str) -> bytes:
         """Stable URI for a figure. Clients can dereference this on demand.
 
-        Returned as raw bytes; the MCP SDK negotiates the content type
-        from the resource registration. See ``get_figure`` for the
-        in-tool-result rendering path.
+        The SDK fixes a resource's MIME type at registration and has no
+        per-read override, so this path always serves PNG (GH #54). Ingest
+        stores every figure as PNG, so the re-encode below is a guard for a
+        store that ever holds anything else, not a routine cost.
+
+        Unlike the figure tools this skips ``_compress_for_mcp``: the ~1 MB
+        ceiling it enforces is a tool-result limit, not a resource one. See
+        ``get_figure`` for the in-tool-result rendering path.
         """
         result = _get_figure_impl(chunk_id, backend=backend)
         image_bytes: bytes = result["image_bytes"]
-        return image_bytes
+        if result["format"].lower() == "png":
+            return image_bytes
+        return _reencode_as_png(image_bytes)
 
     # ------------------------------------------------------------------
     # MCP Apps experiment — Goose-style inline UI for figures.
