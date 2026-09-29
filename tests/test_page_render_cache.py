@@ -475,3 +475,107 @@ def test_one_page_stays_within_its_slot(tmp_path: Path) -> None:
     # A few percent of slack for allocator rounding; the .samples copy would
     # add ~40%.
     assert grew <= slot * 1.05
+
+
+# One solid-colour 2000 x 2000 image per page: 12 MB each once decoded, but
+# only a few KB each in the PDF. Every page gets its own colour, so a page drawn
+# with another page's image, or with a freed one, shows up as a wrong pixel.
+# Each image fills a 2000 pt page, so at 72 DPI MuPDF decodes it at full size;
+# drawn smaller, it decodes a subsampled copy and the store barely grows.
+_IMAGE_PAGES = 12
+_IMAGE_PX = 2000
+
+
+def _page_colour(page_no: int) -> tuple[int, int, int]:
+    return (page_no * 20 % 256, 255 - page_no * 20 % 256, page_no * 7 % 256)
+
+
+def _write_image_pdf(path: Path) -> None:
+    import fitz
+
+    doc = fitz.open()
+    for page_no in range(1, _IMAGE_PAGES + 1):
+        rgb = bytes(_page_colour(page_no)) * (_IMAGE_PX * _IMAGE_PX)
+        pix = fitz.Pixmap(fitz.csRGB, _IMAGE_PX, _IMAGE_PX, rgb, False)
+        page = doc.new_page(width=_IMAGE_PX, height=_IMAGE_PX)
+        page.insert_image(page.rect, pixmap=pix)
+    doc.save(str(path), deflate=True)
+    doc.close()
+
+
+def test_emptying_the_store_is_safe_with_several_workers(tmp_path: Path) -> None:
+    """Every worker empties MuPDF's store while the others are still drawing.
+
+    The store is shared by the threads (GH #79). Emptying it drops only the
+    store's own reference, so no page may come out with an image that another
+    worker freed or swapped. Several rounds, so the timing varies.
+    """
+    import os
+
+    from datasheet_rag.figures import _page_slot_bytes, _render_window_size
+
+    path = tmp_path / "images.pdf"
+    _write_image_pdf(path)
+    pages = list(range(1, _IMAGE_PAGES + 1))
+    budget = 4096 * 1024 * 1024
+    workers = _render_window_size(_page_slot_bytes(path, pages, 72), budget, len(pages))
+    if workers < 2:
+        pytest.skip(f"only {os.cpu_count()} CPU(s): the pool renders serially")
+
+    for _ in range(5):
+        for page_no, img in iter_pdf_pages(path, dpi=72, memory_budget_mb=4096):
+            assert img.getpixel((_IMAGE_PX // 2, _IMAGE_PX // 2)) == _page_colour(page_no)
+
+
+_STORE_PROBE = """
+import sys
+from pathlib import Path
+import fitz
+from datasheet_rag.figures import iter_pdf_pages
+
+def peak_bytes():
+    with open("/proc/self/status") as f:
+        return next(int(l.split()[1]) for l in f if l.startswith("VmHWM:")) * 1024
+
+tmp = Path(sys.argv[1])
+warm = fitz.open()
+warm.new_page().insert_text((50, 50), "warm")
+warm.save(str(tmp / "warm.pdf"))
+warm.close()
+
+def render(name):
+    # A budget below two slots forces one worker, so one page is in flight.
+    for _, img in iter_pdf_pages(tmp / name, dpi=72, memory_budget_mb=4):
+        img.load()
+
+render("warm.pdf")
+base = peak_bytes()
+render("images.pdf")
+print(peak_bytes() - base, file=sys.stderr)
+"""
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="reads VmHWM from /proc")
+def test_decoded_images_do_not_pile_up_across_pages(tmp_path: Path) -> None:
+    """A page's decoded images are gone before the next page is rendered.
+
+    MuPDF's store used to keep them all, up to its own cap and outside the
+    render budget (GH #79). Twelve pages of 12 MB images then grew the process
+    by about 200 MB; with the store emptied after each page, only the page in
+    flight holds its image. It runs in a fresh interpreter because the peak is
+    a high-water mark for the whole process.
+    """
+    _write_image_pdf(tmp_path / "images.pdf")
+    out = subprocess.run(
+        [sys.executable, "-c", _STORE_PROBE, str(tmp_path)],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stderr.splitlines()  # stdout carries the progress bar
+    grew = int(out[-1])
+
+    one_image = _IMAGE_PX * _IMAGE_PX * 3
+    # Measured on PyMuPDF 1.27.2: about 6 images' worth with the store emptied
+    # (one page's pixmap, its PIL copy, its own decoded image — GH #81 — and
+    # allocator slack), about 17 without. The line sits between the two.
+    assert grew < 10 * one_image
