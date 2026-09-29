@@ -13,6 +13,8 @@ that window down.
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -197,10 +199,10 @@ def test_window_shrinks_as_pages_get_bigger() -> None:
 
     budget = 1024 * 1024 * 1024  # 1 GiB
 
-    # A 300 DPI A4 page (~26 MB of RGB, ~78 MB per slot) fits many times over,
+    # A 300 DPI A4 page (~25 MB of RGB, ~58 MB per slot) fits many times over,
     # so the cap is the ordinary worker ceiling, not the budget.
-    assert _render_window_size(78 * 1024 * 1024, budget, 900) >= 1
-    assert _render_window_size(78 * 1024 * 1024, budget, 900) <= 8
+    assert _render_window_size(58 * 1024 * 1024, budget, 900) >= 1
+    assert _render_window_size(58 * 1024 * 1024, budget, 900) <= 8
     # A page that alone eats most of the budget renders on its own…
     assert _render_window_size(600 * 1024 * 1024, budget, 900) == 1
     # …and one bigger than the whole budget still renders, rather than dividing
@@ -372,8 +374,7 @@ def test_slot_sizing_keeps_what_it_measured_before_a_failure(
     from datasheet_rag.figures import (
         _A4_HEIGHT_PT,
         _A4_WIDTH_PT,
-        _RENDER_OVERHEAD_FACTOR,
-        _RGB_BYTES_PER_PX,
+        _SLOT_BYTES_PER_PX,
         _page_slot_bytes,
     )
 
@@ -407,7 +408,70 @@ def test_slot_sizing_keeps_what_it_measured_before_a_failure(
     measured = _page_slot_bytes(tmp_path / "damaged.pdf", [1, 2], 72)
 
     # At 72 DPI the scale is 1, so the slot is the page area times the
-    # per-pixel and in-flight-overhead factors — the A2 page, not an A4 one.
-    a2_slot = 1191 * 1684 * _RGB_BYTES_PER_PX * _RENDER_OVERHEAD_FACTOR
-    a4_slot = _A4_WIDTH_PT * _A4_HEIGHT_PT * _RGB_BYTES_PER_PX * _RENDER_OVERHEAD_FACTOR
+    # in-flight bytes per pixel — the A2 page, not an A4 one.
+    a2_slot = 1191 * 1684 * _SLOT_BYTES_PER_PX
+    a4_slot = _A4_WIDTH_PT * _A4_HEIGHT_PT * _SLOT_BYTES_PER_PX
     assert measured == a2_slot > a4_slot
+
+
+# The child reports, on stderr, how far one A2 page at 300 DPI pushed peak RSS above what
+# the process had already touched, next to the slot the window was sized with.
+# A warm-up render first pulls in the pool, the progress bar and PyMuPDF's
+# fonts, so the baseline holds everything except the page itself.
+#
+# The peak is VmHWM, not ru_maxrss: ru_maxrss survives exec, so a child of a
+# pytest process that has grown past one page would report the parent's peak.
+_PEAK_PROBE = """
+import sys
+from pathlib import Path
+import fitz
+from datasheet_rag.figures import _page_slot_bytes, iter_pdf_pages
+
+def peak_bytes():
+    with open("/proc/self/status") as f:
+        return next(int(l.split()[1]) for l in f if l.startswith("VmHWM:")) * 1024
+
+tmp = Path(sys.argv[1])
+for name, (w, h) in {"small": (100, 100), "a2": (1191, 1684)}.items():
+    doc = fitz.open()
+    doc.new_page(width=w, height=h).insert_text((50, 50), name)
+    doc.save(str(tmp / f"{name}.pdf"))
+    doc.close()
+
+def render(name):
+    for _, img in iter_pdf_pages(tmp / f"{name}.pdf", dpi=300, cache_dir=tmp / name):
+        img.load()
+
+render("small")
+base = peak_bytes()
+render("a2")
+peak = peak_bytes()
+print(peak - base, _page_slot_bytes(tmp / "a2.pdf", [1], 300), file=sys.stderr)
+"""
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="reads VmHWM from /proc")
+def test_one_page_stays_within_its_slot(tmp_path: Path) -> None:
+    """Rendering and caching one page fits the slot the window budgets for it.
+
+    The slot is what turns RAG_RENDER_MEMORY_BUDGET_MB into a worker count, so
+    a slot smaller than the real footprint lets the pool overshoot the budget
+    (GH #59). Reading the pixmap through ``.samples`` instead of
+    ``.samples_mv`` adds a third full copy and fails this (GH #63). It runs in
+    a fresh interpreter because the peak is a high-water mark for the whole
+    process, and earlier tests would already have set it.
+    """
+    out = subprocess.run(
+        [sys.executable, "-c", _PEAK_PROBE, str(tmp_path)],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stderr.splitlines()  # stdout carries the progress bar
+    # The report is the last line; a warning on stderr may come before it.
+    grew, slot = (int(v) for v in out[-1].split())
+
+    # The page must actually have been measured, or the check below is empty.
+    assert grew > slot // 2
+    # A few percent of slack for allocator rounding; the .samples copy would
+    # add ~40%.
+    assert grew <= slot * 1.05
