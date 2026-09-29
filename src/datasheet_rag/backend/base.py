@@ -23,6 +23,7 @@ from typing import Literal
 from datasheet_rag.backend.models import (
     ChunkPage,
     DocPage,
+    DocSummary,
     FigureBytes,
     IngestedDoc,
     IngestResult,
@@ -106,6 +107,15 @@ class RagBackend(ABC):
         """One page of the matching documents, in ``doc_id`` order.
 
         ``limit=None`` returns every match from ``offset`` on.
+        """
+
+    @abstractmethod
+    def get_document(self, doc_id: str) -> DocSummary | None:
+        """One document's listing row, or None if the store has no such document.
+
+        A document exists if it has a sidecar row or ingested chunks — the same
+        rule :meth:`list_documents` uses — but only this one is looked up, so
+        the cost does not grow with the store (GH #86).
         """
 
     @abstractmethod

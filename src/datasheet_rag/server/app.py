@@ -349,6 +349,13 @@ def build_app() -> FastAPI:
         save_pdf_bytes(data, resolved)
         return {"stored": True, "doc_id": resolved}
 
+    @app.get("/documents/{doc_id}/summary", dependencies=dep)
+    def document_summary(doc_id: str, be: LocalBackend = Depends(get_backend)) -> Response:
+        summary = be.get_document(doc_id)
+        if summary is None:
+            return Response(status_code=204)
+        return JSONResponse(summary.model_dump(mode="json"))
+
     @app.get("/documents/{doc_id}/metadata", dependencies=dep)
     def document_metadata(doc_id: str, be: LocalBackend = Depends(get_backend)) -> Response:
         md = be.get_metadata(doc_id)

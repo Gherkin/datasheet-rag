@@ -355,6 +355,19 @@ class RemoteBackend(RagBackend):
         rows, total = _page_rows(data, "documents", limit, offset)
         return DocPage(documents=[DocSummary.model_validate(d) for d in rows], total=total)
 
+    def get_document(self, doc_id: str) -> DocSummary | None:
+        try:
+            resp = self._request("GET", f"/documents/{doc_id}/summary")
+        except RagServerError as exc:
+            if exc.status_code != 404:
+                raise
+            # A server from before GH #86 has no such route. Fall back to
+            # the whole listing, which is what every caller did before.
+            return next((d for d in self.list_documents().documents if d.doc_id == doc_id), None)
+        if resp.status_code == 204:
+            return None
+        return DocSummary.model_validate(_decode(resp))
+
     def get_ingested_docs(self, *, project_id: str | None = None) -> list[IngestedDoc]:
         params = _drop_none(project_id=project_id)
         data = self._json("GET", "/documents/ingested", params=params)
