@@ -154,12 +154,16 @@ jobs:
 
       - name: Import
         # Both backends, since the manifest picks local or remote at runtime.
-        # The assert checks the package came from the bundle, not elsewhere.
+        # build_server() runs the SDK imports it does lazily, so an mcp bump
+        # that moves them fails here. The assert checks the package came from
+        # the bundle, not elsewhere.
         working-directory: ${{ runner.temp }}/mcpb/server
         run: |
           uv run --no-sync python -c '
           import os, main, datasheet_rag
           import datasheet_rag.backend.local, datasheet_rag.backend.remote
+          from datasheet_rag.mcp.server import build_server
+          build_server()
           bundle = os.path.join(os.environ["RUNNER_TEMP"], "mcpb", "")
           assert datasheet_rag.__file__.startswith(bundle), datasheet_rag.__file__
           '
