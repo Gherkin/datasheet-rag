@@ -115,3 +115,55 @@ jobs:
 
       - name: pytest
         run: uv run --no-sync pytest -q
+
+  bundle:
+    # The .mcpb ships src/datasheet_rag/ against mcp-bundle/server/uv.lock, a
+    # second lock the jobs above never install. This builds the bundle, unpacks
+    # it outside the checkout — so main.py cannot fall back to the repo's src/ —
+    # and imports the entry point against the bundle's own locked environment.
+    name: mcpb bundle (${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: mcp-bundle/server/uv.lock
+          python-version: ${{ matrix.python-version }}
+
+      - name: uv lock --check
+        # pack.sh re-locks when this fails, so it has to run first: a drifted
+        # lock should fail here, not be quietly rewritten inside the build.
+        run: uv lock --check --project mcp-bundle/server
+
+      - name: Build
+        run: ./mcp-bundle/pack.sh
+
+      - name: Unpack
+        run: unzip -q datasheet-rag.mcpb -d "$RUNNER_TEMP/mcpb"
+
+      - name: Install
+        run: |
+          uv sync --locked --python ${{ matrix.python-version }} \
+            --project "$RUNNER_TEMP/mcpb/server"
+
+      - name: Import
+        # Both backends, since the manifest picks local or remote at runtime.
+        # build_server() runs the SDK imports it does lazily, so an mcp bump
+        # that moves them fails here. The assert checks the package came from
+        # the bundle, not elsewhere.
+        working-directory: ${{ runner.temp }}/mcpb/server
+        run: |
+          uv run --no-sync python -c '
+          import os, main, datasheet_rag
+          import datasheet_rag.backend.local, datasheet_rag.backend.remote
+          from datasheet_rag.mcp.server import build_server
+          build_server()
+          bundle = os.path.join(os.environ["RUNNER_TEMP"], "mcpb", "")
+          assert datasheet_rag.__file__.startswith(bundle), datasheet_rag.__file__
+          '
