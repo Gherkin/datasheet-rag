@@ -688,6 +688,19 @@ def test_server_answers_one_document_summary(client, conn: sqlite3.Connection) -
     assert client.get("/documents/nope/summary").status_code == 204
 
 
+def test_remote_get_document_reads_the_summary_route(client, conn: sqlite3.Connection) -> None:
+    """Against a current server, a row decodes and 204 means no such document."""
+    from datasheet_rag.backend.remote import RemoteBackend
+
+    _three_children(conn)
+    be = RemoteBackend.__new__(RemoteBackend)
+    be._client = client
+
+    doc = be.get_document("d2")
+    assert doc is not None and doc.doc_id == "d2"
+    assert be.get_document("nope") is None
+
+
 def test_remote_get_document_falls_back_on_an_old_server() -> None:
     """A pre-#86 server has no summary route; scan the listing as before."""
     from datasheet_rag.backend.base import RagServerError
