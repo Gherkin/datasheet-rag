@@ -211,10 +211,10 @@ def test_search_keyword_finds_exact_phrase(conn: Any) -> None:
     out = _search_impl(
         "clock stretching",
         mode="keyword",
-        k=3,
+        limit=3,
         project_id="p1",
         conn=conn,
-    )
+    )["items"]
     assert out, "keyword search returned nothing"
     assert out[0]["chunk_id"] == "c1"
 
@@ -225,11 +225,11 @@ def test_search_vector_uses_embedder_and_orders_by_similarity(
     out = _search_impl(
         "i2c question",
         mode="vector",
-        k=3,
+        limit=3,
         project_id="p1",
         conn=conn,
         embedder=fake_embedder,
-    )
+    )["items"]
     assert out[0]["chunk_id"] == "c1"
     fake_embedder.embed_one.assert_called_once()
 
@@ -239,11 +239,11 @@ def test_search_hybrid_combines_signals(conn: Any, fake_embedder: Any) -> None:
     out = _search_impl(
         "SPI4 CR1",
         mode="hybrid",
-        k=3,
+        limit=3,
         project_id="p1",
         conn=conn,
         embedder=fake_embedder,
-    )
+    )["items"]
     assert out[0]["chunk_id"] == "c2"
 
 
@@ -252,10 +252,10 @@ def test_search_respects_project_filter(conn: Any, fake_embedder: Any) -> None:
     out = _search_impl(
         "dropout voltage",
         mode="keyword",
-        k=5,
+        limit=5,
         project_id="p1",
         conn=conn,
-    )
+    )["items"]
     ids = [r["chunk_id"] for r in out]
     assert "c4" not in ids
 
@@ -264,10 +264,10 @@ def test_search_doc_id_filter_narrows_to_doc(conn: Any) -> None:
     out = _search_impl(
         "dropout voltage",
         mode="keyword",
-        k=5,
+        limit=5,
         doc_id="docB",
         conn=conn,
-    )
+    )["items"]
     assert [r["chunk_id"] for r in out] == ["c4"]
 
 
@@ -275,11 +275,11 @@ def test_search_level_filter(conn: Any) -> None:
     out = _search_impl(
         "Comm",
         mode="keyword",
-        k=10,
+        limit=10,
         level="macro",
         project_id="p1",
         conn=conn,
-    )
+    )["items"]
     assert all(r["level"] == "MACRO" for r in out)
 
 
@@ -376,29 +376,29 @@ def test_get_chunk_with_neighbors(conn: Any) -> None:
 
 
 def test_navigate_parent(conn: Any) -> None:
-    out = _navigate_impl("c1", "parent", conn=conn)
+    out = _navigate_impl("c1", "parent", conn=conn)["items"]
     assert [r["chunk_id"] for r in out] == ["s1"]
 
 
 def test_navigate_children_queries_by_parent_id(conn: Any) -> None:
-    out = _navigate_impl("s1", "children", conn=conn)
+    out = _navigate_impl("s1", "children", conn=conn)["items"]
     ids = sorted(r["chunk_id"] for r in out)
     assert ids == ["c1", "c2"]
 
 
 def test_navigate_chapter_root(conn: Any) -> None:
-    out = _navigate_impl("c3", "chapter_root", conn=conn)
+    out = _navigate_impl("c3", "chapter_root", conn=conn)["items"]
     assert [r["chunk_id"] for r in out] == ["m1"]
 
 
 def test_navigate_next_and_prev(conn: Any) -> None:
-    assert [r["chunk_id"] for r in _navigate_impl("c1", "next", conn=conn)] == ["c2"]
-    assert [r["chunk_id"] for r in _navigate_impl("c2", "prev", conn=conn)] == ["c1"]
+    assert [r["chunk_id"] for r in _navigate_impl("c1", "next", conn=conn)["items"]] == ["c2"]
+    assert [r["chunk_id"] for r in _navigate_impl("c2", "prev", conn=conn)["items"]] == ["c1"]
 
 
 def test_navigate_missing_link_returns_empty(conn: Any) -> None:
     # c3 has no prev_id set
-    assert _navigate_impl("c3", "prev", conn=conn) == []
+    assert _navigate_impl("c3", "prev", conn=conn)["items"] == []
 
 
 def test_navigate_invalid_direction_raises(conn: Any) -> None:
@@ -407,7 +407,7 @@ def test_navigate_invalid_direction_raises(conn: Any) -> None:
 
 
 def test_navigate_missing_chunk_returns_empty(conn: Any) -> None:
-    assert _navigate_impl("nope", "parent", conn=conn) == []
+    assert _navigate_impl("nope", "parent", conn=conn)["items"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -419,7 +419,7 @@ def test_list_documents_filters_by_project(conn: Any) -> None:
     set_metadata(conn, "docA", project_id="p1", mpn="STM32H743", manufacturer="ST", subsystem="mcu")
     set_metadata(conn, "docB", project_id="p2", mpn="LM317", manufacturer="TI", subsystem="power")
 
-    out = _list_documents_impl(project_id="p1", conn=conn)
+    out = _list_documents_impl(project_id="p1", conn=conn)["items"]
     assert [d["doc_id"] for d in out] == ["docA"]
     assert out[0]["mpn"] == "STM32H743"
 
@@ -427,7 +427,7 @@ def test_list_documents_filters_by_project(conn: Any) -> None:
 def test_list_documents_manufacturer_filter(conn: Any) -> None:
     set_metadata(conn, "docA", project_id="p1", manufacturer="ST")
     set_metadata(conn, "docB", project_id="p2", manufacturer="TI")
-    out = _list_documents_impl(manufacturer="TI", conn=conn)
+    out = _list_documents_impl(manufacturer="TI", conn=conn)["items"]
     assert [d["doc_id"] for d in out] == ["docB"]
 
 
@@ -447,7 +447,7 @@ def test_list_documents_includes_docs_without_a_sidecar_row(conn: Any) -> None:
     # docB is ingested but never tagged; docA is tagged. Both are documents.
     set_metadata(conn, "docA", mpn="STM32H743")
 
-    out = _list_documents_impl(conn=conn)
+    out = _list_documents_impl(conn=conn)["items"]
 
     assert [d["doc_id"] for d in out] == ["docA", "docB"]
     untagged = out[1]
@@ -459,7 +459,7 @@ def test_list_documents_includes_docs_without_a_sidecar_row(conn: Any) -> None:
 def test_list_documents_sidecar_filter_excludes_untagged_docs(conn: Any) -> None:
     set_metadata(conn, "docA", manufacturer="ST")
     # docB has no sidecar row, so it cannot match a manufacturer filter.
-    out = _list_documents_impl(manufacturer="ST", conn=conn)
+    out = _list_documents_impl(manufacturer="ST", conn=conn)["items"]
     assert [d["doc_id"] for d in out] == ["docA"]
 
 
@@ -541,10 +541,10 @@ def test_search_results_flag_figure_chunks_with_uri(
     out = _search_impl(
         "SPI timing diagram",
         mode="keyword",
-        k=5,
+        limit=5,
         project_id="p1",
         conn=conn,
-    )
+    )["items"]
     fig_hits = [r for r in out if r.get("has_figure")]
     assert fig_hits, "figure chunk should be surfaced"
     fig = fig_hits[0]
@@ -654,10 +654,10 @@ def test_search_does_not_advertise_a_figure_it_cannot_serve(
     out = _search_impl(
         "SPI timing diagram",
         mode="keyword",
-        k=5,
+        limit=5,
         project_id="p1",
         conn=conn,
-    )
+    )["items"]
     hit = next(r for r in out if r["chunk_id"] == "fig:gone")
     assert hit["has_figure"] is False
     assert hit["figure_status"] == "image_not_stored"
@@ -671,10 +671,10 @@ def test_search_marks_sourceless_figure_chunks_unshowable(conn: Any, fake_embedd
     out = _search_impl(
         "SPI timing diagram",
         mode="keyword",
-        k=5,
+        limit=5,
         project_id="p1",
         conn=conn,
-    )
+    )["items"]
     hit = next(r for r in out if r["chunk_id"] == "fig:bare")
     assert hit["has_figure"] is False
     assert hit["figure_status"] == "image_not_stored"
@@ -960,7 +960,9 @@ def test_figure_result_carries_no_directives(conn: Any, fake_embedder: Any, tmp_
     img = tmp_path / "fig.png"
     img.write_bytes(b"\x89PNG\r\n\x1a\nfake")
     _seed_figure_chunk(conn, "fig:ok", image_path=str(img))
-    out = _search_impl("SPI timing diagram", mode="keyword", k=5, project_id="p1", conn=conn)
+    out = _search_impl("SPI timing diagram", mode="keyword", limit=5, project_id="p1", conn=conn)[
+        "items"
+    ]
     hit = next(r for r in out if r["chunk_id"] == "fig:ok")
     assert hit["has_figure"] is True
     _assert_no_directives(hit)
@@ -968,7 +970,9 @@ def test_figure_result_carries_no_directives(conn: Any, fake_embedder: Any, tmp_
 
 def test_unshowable_figure_result_carries_no_directives(conn: Any, fake_embedder: Any) -> None:
     _seed_figure_chunk(conn, "fig:none", image_path=None, s3_key=None)
-    out = _search_impl("SPI timing diagram", mode="keyword", k=5, project_id="p1", conn=conn)
+    out = _search_impl("SPI timing diagram", mode="keyword", limit=5, project_id="p1", conn=conn)[
+        "items"
+    ]
     hit = next(r for r in out if r["chunk_id"] == "fig:none")
     assert hit["figure_status"] == "image_not_stored"
     _assert_no_directives(hit)
@@ -1096,3 +1100,182 @@ def test_datasheet_prose_is_not_a_directive_regression(conn: Any) -> None:
     assert out is not None
     assert "do not exceed" in out["text"].lower()
     _assert_no_directives(out)
+
+
+# ---------------------------------------------------------------------------
+# Paging (GH #42)
+# ---------------------------------------------------------------------------
+
+
+def test_children_come_one_page_at_a_time(conn: Any) -> None:
+    first = _navigate_impl("s1", "children", limit=1, conn=conn)
+    assert [r["chunk_id"] for r in first["items"]] == ["c1"]
+    assert first["total"] == 2
+    assert first["next_offset"] == 1
+
+    last = _navigate_impl("s1", "children", limit=1, offset=first["next_offset"], conn=conn)
+    assert [r["chunk_id"] for r in last["items"]] == ["c2"]
+    assert last["next_offset"] is None
+
+
+def test_single_step_directions_are_one_final_page(conn: Any) -> None:
+    out = _navigate_impl("c1", "parent", conn=conn)
+    assert out["total"] == 1
+    assert out["next_offset"] is None
+
+
+def test_documents_come_one_page_at_a_time(conn: Any) -> None:
+    first = _list_documents_impl(limit=1, conn=conn)
+    assert [d["doc_id"] for d in first["items"]] == ["docA"]
+    assert first["total"] == 2
+    assert first["next_offset"] == 1
+
+    last = _list_documents_impl(limit=1, offset=1, conn=conn)
+    assert [d["doc_id"] for d in last["items"]] == ["docB"]
+    assert last["next_offset"] is None
+
+
+def test_list_documents_derives_fields_for_the_page_only(conn: Any) -> None:
+    """Title and page count cost two queries a document; a page pays for itself."""
+    from datasheet_rag.backend import LocalBackend
+
+    be = LocalBackend(conn=conn)
+    with mock.patch.object(
+        LocalBackend, "_derived_doc_fields", autospec=True, return_value=(None, None)
+    ) as derived:
+        _list_documents_impl(limit=1, backend=be)
+    assert derived.call_count == 1
+
+
+def test_search_pages_continue_the_same_ranking() -> None:
+    """Pages must cut one ranking, even where the store's over-fetch grows with k.
+
+    200 chunks match; the best (most "beta") are inserted last, so the
+    keyword leg's unordered per-term LIMIT picks a different pool for a
+    bigger k. Paging by 5 used to miss 15 of the true top 30.
+    """
+    c = connect(":memory:", embedding_dim=EMB_DIM)
+    chunks = [
+        _make_chunk(f"x{i:03d}", text="alpha filler " + "beta " * (i // 20)) for i in range(200)
+    ]
+    insert_chunks(c, chunks, project_id="p1")
+
+    paged: list[dict[str, Any]] = []
+    offset: int | None = 0
+    while offset is not None and offset < 30:
+        page = _search_impl(
+            "alpha beta", mode="keyword", limit=5, offset=offset, project_id="p1", conn=c
+        )
+        assert page["total"] is None
+        paged += page["items"]
+        offset = page["next_offset"]
+    whole = _search_impl("alpha beta", mode="keyword", limit=30, project_id="p1", conn=c)
+    assert paged == whole["items"]
+
+
+def test_search_paging_ends_at_the_pool(conn: Any) -> None:
+    from datasheet_rag.backend import SEARCH_POOL, LocalBackend
+
+    be = LocalBackend(conn=conn)
+    fake = [mock.sentinel.hit] * SEARCH_POOL
+    with mock.patch.object(LocalBackend, "_rank", return_value=fake):
+        assert len(be.search("q", k=10, offset=SEARCH_POOL - 4)) == 4
+        assert be.search("q", k=10, offset=SEARCH_POOL) == []
+
+
+def test_search_says_when_the_ranking_ran_out(conn: Any) -> None:
+    out = _search_impl("dropout voltage", mode="keyword", limit=5, doc_id="docB", conn=conn)
+    assert len(out["items"]) == 1
+    assert out["next_offset"] is None
+
+
+@pytest.mark.parametrize(("limit", "offset"), [(0, 0), (-1, 0), (5, -1)])
+def test_bad_page_arguments_are_refused(conn: Any, limit: int, offset: int) -> None:
+    with pytest.raises(ValueError, match="limit|offset"):
+        _navigate_impl("s1", "children", limit=limit, offset=offset, conn=conn)
+    with pytest.raises(ValueError, match="limit|offset"):
+        _list_documents_impl(limit=limit, offset=offset, conn=conn)
+    with pytest.raises(ValueError, match="limit|offset"):
+        _search_impl("Comm", mode="keyword", limit=limit, offset=offset, conn=conn)
+
+
+def test_a_page_ends_early_at_the_byte_budget() -> None:
+    from datasheet_rag.mcp.server import _page
+
+    items = [{"text": "x" * 100} for _ in range(10)]
+    out = _page(items, offset=20, total=30, more=False, budget=350)
+
+    assert len(out["items"]) == 3
+    assert out["next_offset"] == 23
+    assert out["total"] == 30
+
+
+def test_a_page_keeps_its_first_item_whatever_its_size() -> None:
+    """Otherwise a single oversized item would stall paging for good."""
+    from datasheet_rag.mcp.server import _page
+
+    out = _page([{"text": "x" * 1000}, {"text": "y"}], offset=0, total=2, more=False, budget=10)
+    assert len(out["items"]) == 1
+    assert out["next_offset"] == 1
+
+
+def test_the_widest_zoom_in_stays_under_the_mcp_result_limit() -> None:
+    """The case behind GH #42: hundreds of children, some of them tables.
+
+    Measured on what the SDK actually sends, which carries each dict result
+    twice (text and structuredContent). Even with a ``limit`` far above the
+    default the page must end before 1 MB, and say where to go on.
+    """
+    pytest.importorskip("mcp")
+    import asyncio
+    import json
+
+    from datasheet_rag.backend import LocalBackend
+    from datasheet_rag.mcp import server as mcp_server
+
+    c = connect(":memory:", embedding_dim=EMB_DIM)
+    children = [
+        _make_chunk(f"k{i}", text=f"row {i} | " + "7.5 mA | " * 700, parent_id="p")
+        for i in range(313)
+    ]
+    insert_chunks(c, [_make_chunk("p", level=ChunkLevel.MESO), *children], project_id="p1")
+
+    server = mcp_server.build_server(LocalBackend(conn=c))
+    result = asyncio.run(server.call_tool("zoom_in", {"chunk_id": "p", "limit": 1000}))
+
+    wire = sum(len(b.text.encode()) for b in result.content) + len(
+        json.dumps(result.structured_content).encode()
+    )
+    assert wire < 1_000_000
+    page = result.structured_content
+    assert page["total"] == 313
+    assert page["next_offset"] == len(page["items"])
+
+
+def test_no_tool_returns_an_unpaged_list() -> None:
+    """A bare list is how an unbounded result gets back in. Page it instead."""
+    pytest.importorskip("mcp")
+    import asyncio
+    import json
+
+    from datasheet_rag.mcp import server as mcp_server
+
+    tools = asyncio.run(mcp_server.build_server().list_tools())
+    for tool in tools:
+        if tool.output_schema is None:
+            continue
+        wrapped = tool.output_schema.get("properties", {}).get("result", {})
+        assert '"array"' not in json.dumps(wrapped), f"{tool.name} returns a bare list"
+
+
+@pytest.mark.parametrize("tool_name", ["search", "navigate", "zoom_in", "list_documents"])
+def test_paged_tools_take_limit_and_offset_and_explain_paging(tool_name: str) -> None:
+    pytest.importorskip("mcp")
+    import asyncio
+
+    from datasheet_rag.mcp import server as mcp_server
+
+    tools = {t.name: t for t in asyncio.run(mcp_server.build_server().list_tools())}
+    tool = tools[tool_name]
+    assert {"limit", "offset"} <= set(tool.input_schema["properties"])
+    assert "next_offset" in (tool.description or "")

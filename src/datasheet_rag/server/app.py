@@ -20,13 +20,14 @@ from fastapi import (
     File,
     Form,
     HTTPException,
+    Query,
     Request,
     Response,
     UploadFile,
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from datasheet_rag.backend.base import FigureNotFoundError, FigureUnavailableError, RagServerError
 from datasheet_rag.backend.local import LocalBackend
@@ -91,6 +92,7 @@ class SearchRequest(BaseModel):
     query: str
     mode: str = "hybrid"
     k: int = 10
+    offset: int = Field(0, ge=0)
     filters: SearchFilters | None = None
     # Set by a client that embeds its own queries (RAG_COMPUTE=client, GH #43).
     # The text is still sent — hybrid keyword matching needs it.
@@ -244,10 +246,12 @@ def build_app() -> FastAPI:
             req.query,
             mode=req.mode,  # type: ignore[arg-type]
             k=req.k,
+            offset=req.offset,
             filters=req.filters,
             query_vector=req.query_vector,
         )
-        return {"results": [_result_json(r) for r in results]}
+        # ``offset`` echoed back tells a client this server pages (GH #42).
+        return {"results": [_result_json(r) for r in results], "offset": req.offset}
 
     # -- chunks ----------------------------------------------------------
     @app.get("/chunks/count", dependencies=dep)
@@ -259,8 +263,14 @@ def build_app() -> FastAPI:
         return {"count": be.count_chunks(doc_id=doc_id, project_id=project_id)}
 
     @app.get("/chunks/{chunk_id}/children", dependencies=dep)
-    def chunk_children(chunk_id: str, be: LocalBackend = Depends(get_backend)) -> dict[str, Any]:
-        return {"chunks": [_chunk_json(c) for c in be.get_children(chunk_id)]}
+    def chunk_children(
+        chunk_id: str,
+        limit: int | None = Query(None, ge=1),
+        offset: int = Query(0, ge=0),
+        be: LocalBackend = Depends(get_backend),
+    ) -> dict[str, Any]:
+        page = be.get_children(chunk_id, limit=limit, offset=offset)
+        return {"chunks": [_chunk_json(c) for c in page.chunks], "total": page.total}
 
     @app.get("/chunks/{chunk_id}", dependencies=dep)
     def chunk(chunk_id: str, be: LocalBackend = Depends(get_backend)) -> Response:
@@ -398,15 +408,22 @@ def build_app() -> FastAPI:
         group_name: str | None = None,
         mpn: str | None = None,
         manufacturer: str | None = None,
+        limit: int | None = Query(None, ge=1),
+        offset: int = Query(0, ge=0),
         be: LocalBackend = Depends(get_backend),
     ) -> dict[str, Any]:
-        docs = be.list_documents(
+        page = be.list_documents(
             project_id=project_id,
             group_name=group_name,
             mpn=mpn,
             manufacturer=manufacturer,
+            limit=limit,
+            offset=offset,
         )
-        return {"documents": [d.model_dump(mode="json") for d in docs]}
+        return {
+            "documents": [d.model_dump(mode="json") for d in page.documents],
+            "total": page.total,
+        }
 
     # -- metadata listing ------------------------------------------------
     @app.get("/metadata", dependencies=dep)

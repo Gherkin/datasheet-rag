@@ -11,6 +11,7 @@ import json
 import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -631,6 +632,131 @@ def test_server_reports_an_unknown_figure_chunk_with_a_code(client) -> None:
     r = client.get("/figures/nope:L2:0/bytes")
     assert r.status_code == 400
     assert r.json()["code"] == "figure_not_found"
+
+
+def _three_children(conn: sqlite3.Connection) -> None:
+    from datasheet_rag.store import insert_chunks
+
+    for did in ("d1", "d2", "d3"):
+        insert_chunks(
+            conn,
+            [
+                Chunk(
+                    id=f"{did}:L0:0",
+                    doc_id=did,
+                    level=ChunkLevel.MACRO,
+                    text=f"{did} overview",
+                    metadata=ChunkMetadata(doc_id=did),
+                ),
+                *(
+                    Chunk(
+                        id=f"{did}:L2:{i}",
+                        doc_id=did,
+                        level=ChunkLevel.MICRO,
+                        text=f"{did} paragraph {i}",
+                        parent_id=f"{did}:L0:0",
+                        metadata=ChunkMetadata(doc_id=did),
+                    )
+                    for i in range(3)
+                ),
+            ],
+        )
+
+
+def test_server_pages_children_and_documents(client, conn: sqlite3.Connection) -> None:
+    """``limit``/``offset`` are applied on the server, not after transfer (GH #42)."""
+    _three_children(conn)
+
+    r = client.get("/chunks/d1:L0:0/children", params={"limit": 2, "offset": 1})
+    assert [c["id"] for c in r.json()["chunks"]] == ["d1:L2:1", "d1:L2:2"]
+    assert r.json()["total"] == 3
+
+    r = client.get("/documents", params={"limit": 1, "offset": 2})
+    assert [d["doc_id"] for d in r.json()["documents"]] == ["d3"]
+    assert r.json()["total"] == 3
+
+    assert client.get("/documents", params={"limit": 0}).status_code == 422
+
+
+def test_remote_backend_pages_a_server_that_does_not() -> None:
+    """A pre-#42 server sends everything and no total; page it client-side."""
+    from datasheet_rag.backend.remote import RemoteBackend
+
+    be = RemoteBackend.__new__(RemoteBackend)
+    old_answer = {"documents": [{"doc_id": f"d{i}"} for i in range(5)]}
+    be._json = lambda *a, **kw: old_answer  # type: ignore[method-assign]
+
+    page = be.list_documents(limit=2, offset=2)
+    assert [d.doc_id for d in page.documents] == ["d2", "d3"]
+    assert page.total == 5
+
+
+def test_remote_backend_trusts_a_paging_server() -> None:
+    from datasheet_rag.backend.remote import RemoteBackend
+
+    be = RemoteBackend.__new__(RemoteBackend)
+    seen: dict[str, object] = {}
+
+    def _json(method: str, path: str, **kw: object) -> dict[str, object]:
+        seen.update(kw)
+        return {"chunks": [], "total": 9}
+
+    be._json = _json  # type: ignore[method-assign]
+    page = be.get_children("x", limit=4, offset=8)
+    assert page.total == 9
+    assert seen["params"] == {"limit": 4, "offset": 8}
+
+
+def _result(chunk_id: str) -> dict[str, object]:
+    chunk = Chunk(
+        id=chunk_id,
+        doc_id="d",
+        level=ChunkLevel.MICRO,
+        text="t",
+        metadata=ChunkMetadata(doc_id="d"),
+    )
+    return {
+        "chunk_id": chunk_id,
+        "score": 1.0,
+        "chunk": chunk.model_dump(mode="json"),
+        "match_source": "keyword",
+    }
+
+
+def test_remote_backend_pages_search_on_a_server_that_does_not() -> None:
+    """A pre-#42 server ignores ``offset``; ask it for more and slice."""
+    from datasheet_rag.backend.remote import RemoteBackend
+
+    be = RemoteBackend.__new__(RemoteBackend)
+    be._compute = "server"
+    asked: list[object] = []
+
+    def _json(method: str, path: str, **kw: Any) -> dict[str, object]:
+        k = kw["json"]["k"]
+        asked.append(k)
+        return {"results": [_result(f"r{i}") for i in range(k)]}
+
+    be._json = _json  # type: ignore[method-assign]
+    hits = be.search("q", mode="keyword", k=2, offset=3)
+    assert [h.chunk_id for h in hits] == ["r3", "r4"]
+    assert asked == [2, 5]
+
+
+def test_remote_backend_trusts_a_paging_search_server() -> None:
+    from datasheet_rag.backend.remote import RemoteBackend
+
+    be = RemoteBackend.__new__(RemoteBackend)
+    be._compute = "server"
+    calls: list[dict[str, Any]] = []
+
+    def _json(method: str, path: str, **kw: Any) -> dict[str, object]:
+        calls.append(kw["json"])
+        return {"results": [_result("r3")], "offset": 3}
+
+    be._json = _json  # type: ignore[method-assign]
+    hits = be.search("q", mode="keyword", k=1, offset=3)
+    assert [h.chunk_id for h in hits] == ["r3"]
+    assert [(c["k"], c["offset"]) for c in calls] == [(1, 3)]
 
 
 def test_remote_backend_reraises_figure_not_found() -> None:

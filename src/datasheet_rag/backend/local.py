@@ -17,6 +17,7 @@ from threading import Lock
 from typing import TYPE_CHECKING, Any
 
 from datasheet_rag.backend.base import (
+    SEARCH_POOL,
     FigureNotFoundError,
     FigureUnavailableError,
     FigureUploads,
@@ -24,6 +25,8 @@ from datasheet_rag.backend.base import (
     SearchMode,
 )
 from datasheet_rag.backend.models import (
+    ChunkPage,
+    DocPage,
     DocSummary,
     FigureBytes,
     FigureCitation,
@@ -135,11 +138,25 @@ class LocalBackend(RagBackend):
         *,
         mode: SearchMode = "hybrid",
         k: int = 10,
+        offset: int = 0,
         filters: SearchFilters | None = None,
         query_vector: Sequence[float] | None = None,
     ) -> list[SearchResult]:
         if not query or not query.strip():
             raise ValueError("query must not be empty")
+        ranked = self._rank(query, mode=mode, filters=filters, query_vector=query_vector)
+        return ranked[offset : offset + k]
+
+    def _rank(
+        self,
+        query: str,
+        *,
+        mode: SearchMode,
+        filters: SearchFilters | None,
+        query_vector: Sequence[float] | None,
+    ) -> list[SearchResult]:
+        """The query's ranking of the best ``SEARCH_POOL`` hits."""
+        k = SEARCH_POOL
         conn = self._get_conn()
         if mode in ("vector", "hybrid"):
             # A caller-supplied vector means the embedding already happened
@@ -167,18 +184,24 @@ class LocalBackend(RagBackend):
     def get_chunk(self, chunk_id: str) -> Chunk | None:
         return get_chunk(self._get_conn(), chunk_id)
 
-    def get_children(self, chunk_id: str) -> list[Chunk]:
+    def get_children(
+        self, chunk_id: str, *, limit: int | None = None, offset: int = 0
+    ) -> ChunkPage:
         conn = self._get_conn()
+        total = conn.execute(
+            "SELECT COUNT(*) AS n FROM chunks WHERE parent_id = ?", (chunk_id,)
+        ).fetchone()["n"]
+        # SQLite reads a negative LIMIT as "no limit".
         rows = conn.execute(
-            "SELECT id FROM chunks WHERE parent_id = ? ORDER BY rowid",
-            (chunk_id,),
+            "SELECT id FROM chunks WHERE parent_id = ? ORDER BY rowid LIMIT ? OFFSET ?",
+            (chunk_id, -1 if limit is None else limit, offset),
         ).fetchall()
         out: list[Chunk] = []
         for row in rows:
             child = get_chunk(conn, row["id"])
             if child is not None:
                 out.append(child)
-        return out
+        return ChunkPage(chunks=out, total=int(total))
 
     def count_chunks(self, *, doc_id: str | None = None, project_id: str | None = None) -> int:
         return count_chunks(self._get_conn(), doc_id=doc_id, project_id=project_id)
@@ -216,7 +239,9 @@ class LocalBackend(RagBackend):
         group_name: str | None = None,
         mpn: str | None = None,
         manufacturer: str | None = None,
-    ) -> list[DocSummary]:
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> DocPage:
         docs = list_docs(
             self._get_conn(),
             project_id=project_id,
@@ -225,9 +250,31 @@ class LocalBackend(RagBackend):
         )
         if manufacturer is not None:
             docs = [d for d in docs if d.manufacturer == manufacturer]
+        matched: dict[str, DocMetadata | None] = {d.doc_id: d for d in docs}
+
+        # The sidecar row is optional: it is written by the metadata-tagging
+        # step, which ingestion does not require. A document that skipped it
+        # is still chunked, searchable and reachable by every other read path,
+        # so list it too — with the sidecar fields left null — rather than
+        # reporting an empty catalogue for a store that plainly has documents
+        # in it. Filters on group, mpn or manufacturer suppress the fallback:
+        # those fields live nowhere but the sidecar, so a document without one
+        # cannot match them.
+        if group_name is None and mpn is None and manufacturer is None:
+            for row in get_ingested_docs(self._get_conn(), project_id=project_id):
+                matched.setdefault(row["doc_id"], None)
+
+        # Page before deriving title and page count: those cost two queries
+        # per document, and a page should not pay for the whole store.
+        ordered = sorted(matched)
+        end = None if limit is None else offset + limit
         out: list[DocSummary] = []
-        for d in docs:
-            title, page_count = self._derived_doc_fields(d.doc_id)
+        for doc_id in ordered[offset:end]:
+            title, page_count = self._derived_doc_fields(doc_id)
+            d = matched[doc_id]
+            if d is None:
+                out.append(DocSummary(doc_id=doc_id, doc_title=title, page_count=page_count))
+                continue
             out.append(
                 DocSummary(
                     doc_id=d.doc_id,
@@ -242,25 +289,7 @@ class LocalBackend(RagBackend):
                     page_count=page_count,
                 )
             )
-
-        # The sidecar row is optional: it is written by the metadata-tagging
-        # step, which ingestion does not require. A document that skipped it
-        # is still chunked, searchable and reachable by every other read path,
-        # so list it too — with the sidecar fields left null — rather than
-        # reporting an empty catalogue for a store that plainly has documents
-        # in it. Filters on group, mpn or manufacturer suppress the fallback:
-        # those fields live nowhere but the sidecar, so a document without one
-        # cannot match them.
-        if group_name is None and mpn is None and manufacturer is None:
-            listed = {d.doc_id for d in out}
-            for row in get_ingested_docs(self._get_conn(), project_id=project_id):
-                doc_id = row["doc_id"]
-                if doc_id in listed:
-                    continue
-                title, page_count = self._derived_doc_fields(doc_id)
-                out.append(DocSummary(doc_id=doc_id, doc_title=title, page_count=page_count))
-            out.sort(key=lambda d: d.doc_id)
-        return out
+        return DocPage(documents=out, total=len(ordered))
 
     def get_ingested_docs(self, *, project_id: str | None = None) -> list[IngestedDoc]:
         rows = get_ingested_docs(self._get_conn(), project_id=project_id)

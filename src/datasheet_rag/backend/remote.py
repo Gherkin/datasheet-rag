@@ -34,7 +34,9 @@ from datasheet_rag.backend.base import (
     SearchMode,
 )
 from datasheet_rag.backend.models import (
+    ChunkPage,
     ChunkVectors,
+    DocPage,
     DocSummary,
     FigureBytes,
     IngestedDoc,
@@ -279,6 +281,7 @@ class RemoteBackend(RagBackend):
         *,
         mode: SearchMode = "hybrid",
         k: int = 10,
+        offset: int = 0,
         filters: SearchFilters | None = None,
         query_vector: Sequence[float] | None = None,
     ) -> list[SearchResult]:
@@ -296,11 +299,19 @@ class RemoteBackend(RagBackend):
             "query": query,
             "mode": mode,
             "k": k,
+            "offset": offset,
             "filters": filters.model_dump(mode="json") if filters else None,
             "query_vector": list(query_vector) if query_vector is not None else None,
         }
         data = self._json("POST", "/search", json=body)
-        return [SearchResult.model_validate(r) for r in data["results"]]
+        rows: list[Any] = data["results"]
+        if offset and "offset" not in data:
+            # A server from before GH #42 ignores ``offset`` and answers with
+            # the top ``k``. Ask it for the top ``offset + k`` and slice. That
+            # server ranks by ``k``, so its pages are no steadier than before.
+            body["k"] = offset + k
+            rows = self._json("POST", "/search", json=body)["results"][offset:]
+        return [SearchResult.model_validate(r) for r in rows]
 
     # -- chunk reads ---------------------------------------------------
     def get_chunk(self, chunk_id: str) -> Chunk | None:
@@ -309,9 +320,13 @@ class RemoteBackend(RagBackend):
             return None
         return Chunk.model_validate(_decode(resp))
 
-    def get_children(self, chunk_id: str) -> list[Chunk]:
-        data = self._json("GET", f"/chunks/{chunk_id}/children")
-        return [Chunk.model_validate(c) for c in data["chunks"]]
+    def get_children(
+        self, chunk_id: str, *, limit: int | None = None, offset: int = 0
+    ) -> ChunkPage:
+        params = _drop_none(limit=limit, offset=offset or None)
+        data = self._json("GET", f"/chunks/{chunk_id}/children", params=params)
+        rows, total = _page_rows(data, "chunks", limit, offset)
+        return ChunkPage(chunks=[Chunk.model_validate(c) for c in rows], total=total)
 
     def count_chunks(self, *, doc_id: str | None = None, project_id: str | None = None) -> int:
         params = _drop_none(doc_id=doc_id, project_id=project_id)
@@ -325,15 +340,20 @@ class RemoteBackend(RagBackend):
         group_name: str | None = None,
         mpn: str | None = None,
         manufacturer: str | None = None,
-    ) -> list[DocSummary]:
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> DocPage:
         params = _drop_none(
             project_id=project_id,
             group_name=group_name,
             mpn=mpn,
             manufacturer=manufacturer,
+            limit=limit,
+            offset=offset or None,
         )
         data = self._json("GET", "/documents", params=params)
-        return [DocSummary.model_validate(d) for d in data["documents"]]
+        rows, total = _page_rows(data, "documents", limit, offset)
+        return DocPage(documents=[DocSummary.model_validate(d) for d in rows], total=total)
 
     def get_ingested_docs(self, *, project_id: str | None = None) -> list[IngestedDoc]:
         params = _drop_none(project_id=project_id)
@@ -816,6 +836,22 @@ def _decode(resp: httpx.Response) -> Any:
 
 def _drop_none(**kw: Any) -> dict[str, Any]:
     return {k: v for k, v in kw.items() if v is not None}
+
+
+def _page_rows(
+    data: dict[str, Any], key: str, limit: int | None, offset: int
+) -> tuple[list[Any], int]:
+    """The rows and total of a paged listing response.
+
+    A server from before GH #42 ignores ``limit`` and ``offset`` and answers
+    with the whole list and no ``total``. Slice that here, so paging behaves
+    the same against either server; only the transfer is not saved.
+    """
+    rows: list[Any] = data[key]
+    if "total" in data:
+        return rows, int(data["total"])
+    end = None if limit is None else offset + limit
+    return rows[offset:end], len(rows)
 
 
 def _chunk_excludes(graph: ChunkGraph) -> dict[str, Any]:

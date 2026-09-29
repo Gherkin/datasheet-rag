@@ -21,7 +21,8 @@ from pathlib import Path
 from typing import Literal
 
 from datasheet_rag.backend.models import (
-    DocSummary,
+    ChunkPage,
+    DocPage,
     FigureBytes,
     IngestedDoc,
     IngestResult,
@@ -34,6 +35,12 @@ from datasheet_rag.models.chunk import Chunk, ChunkGraph
 from datasheet_rag.store import DocMetadata, SearchFilters, SearchResult, TitleSource
 
 SearchMode = Literal["hybrid", "vector", "keyword"]
+
+#: How many hits one search ranks. Every page of a query is cut from this
+#: same ranking, so pages neither repeat nor skip hits (GH #42); the store's
+#: over-fetch grows with ``k``, so ranking the top ``offset + k`` instead
+#: would reorder hits between pages. Paging ends here.
+SEARCH_POOL = 200
 
 # chunk_id -> (image_bytes, extension) for figures uploaded during ingest.
 FigureUploads = Mapping[str, tuple[bytes, str]]
@@ -50,10 +57,14 @@ class RagBackend(ABC):
         *,
         mode: SearchMode = "hybrid",
         k: int = 10,
+        offset: int = 0,
         filters: SearchFilters | None = None,
         query_vector: Sequence[float] | None = None,
     ) -> list[SearchResult]:
         """Search the store, embedding ``query`` unless a vector is supplied.
+
+        Returns hits ``offset`` to ``offset + k`` of the query's ranking of
+        the best :data:`SEARCH_POOL` hits, so nothing past the pool.
 
         ``query_vector`` short-circuits the embedding step for the vector and
         hybrid modes — the caller has already embedded the text itself. That is
@@ -67,7 +78,15 @@ class RagBackend(ABC):
     def get_chunk(self, chunk_id: str) -> Chunk | None: ...
 
     @abstractmethod
-    def get_children(self, chunk_id: str) -> list[Chunk]: ...
+    def get_children(
+        self, chunk_id: str, *, limit: int | None = None, offset: int = 0
+    ) -> ChunkPage:
+        """One page of ``chunk_id``'s children, in document order.
+
+        ``limit=None`` returns every child from ``offset`` on. A parent can
+        have hundreds of children, so the MCP layer always passes a limit
+        (GH #42).
+        """
 
     @abstractmethod
     def count_chunks(self, *, doc_id: str | None = None, project_id: str | None = None) -> int: ...
@@ -81,7 +100,13 @@ class RagBackend(ABC):
         group_name: str | None = None,
         mpn: str | None = None,
         manufacturer: str | None = None,
-    ) -> list[DocSummary]: ...
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> DocPage:
+        """One page of the matching documents, in ``doc_id`` order.
+
+        ``limit=None`` returns every match from ``offset`` on.
+        """
 
     @abstractmethod
     def get_ingested_docs(self, *, project_id: str | None = None) -> list[IngestedDoc]: ...

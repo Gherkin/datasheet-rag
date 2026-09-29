@@ -1753,7 +1753,11 @@ def search(
 ) -> None:
     """Search the RAG store (local sqlite or remote server) with hybrid /
     vector / keyword retrieval. The query is embedded by the backend."""
+    from datasheet_rag.backend import SEARCH_POOL
     from datasheet_rag.models.chunk import ChunkLevel
+
+    if not 1 <= top_k <= SEARCH_POOL:
+        raise click.BadParameter(f"must be 1 to {SEARCH_POOL}", param_hint="-k")
     from datasheet_rag.project_config import resolve_cli_project_id
     from datasheet_rag.store import SearchFilters
 

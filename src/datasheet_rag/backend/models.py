@@ -15,6 +15,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from datasheet_rag.models.chunk import Chunk
+
 
 class DocSummary(BaseModel):
     """A document listing row: sidecar metadata + a couple derived fields."""
@@ -29,6 +31,27 @@ class DocSummary(BaseModel):
     tags: list[str] = Field(default_factory=list)
     doc_title: str | None = None
     page_count: int | None = None
+
+
+class DocPage(BaseModel):
+    """One page of ``list_documents``, in ``doc_id`` order.
+
+    ``total`` counts every document the filters match, not just this page's,
+    so a caller can tell a short page from the end of the list (GH #42).
+    """
+
+    documents: list[DocSummary] = Field(default_factory=list)
+    total: int = 0
+
+
+class ChunkPage(BaseModel):
+    """One page of a chunk's children, in document order.
+
+    ``total`` counts every child, not just this page's (GH #42).
+    """
+
+    chunks: list[Chunk] = Field(default_factory=list)
+    total: int = 0
 
 
 class IngestedDoc(BaseModel):

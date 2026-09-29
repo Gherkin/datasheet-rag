@@ -67,6 +67,7 @@ from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 from datasheet_rag import pdf_viewer
 from datasheet_rag.backend import (
+    SEARCH_POOL,
     FigureNotFoundError,
     FigureUnavailableError,
     RagBackend,
@@ -373,6 +374,92 @@ def _chunk_fields_help(source_page_tool: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Paging (GH #42)
+#
+# Every tool that returns a list returns one page of it, so a single call
+# cannot flood the caller's context: one ``zoom_in`` on a real store used to
+# hand back 313 chunks, 506 kB of JSON, in one go. There is no cap on
+# ``limit``: the default keeps an unasked-for page small, and a caller that
+# asks for more has decided it wants more.
+#
+# What is capped is the size of one response, in bytes. The MCP result limit
+# is 1 MB, and the SDK sends a dict result twice — as pretty-printed text and
+# again as ``structuredContent`` — so a page of ~500 kB compact JSON already
+# fails on the wire. A page that would outgrow the budget ends early, and
+# ``next_offset`` picks up where it stopped.
+# ---------------------------------------------------------------------------
+
+#: Page size for the listing tools when the caller gives no ``limit``.
+DEFAULT_PAGE_SIZE = 20
+
+#: ``search`` is ranked, and relevance falls off fast; its default stays at
+#: the handful of hits it has always returned.
+DEFAULT_SEARCH_LIMIT = 5
+
+#: Budget for one page's items as compact JSON. Pretty-printing plus the
+#: structured copy multiply that on the wire: measured 2.1x on a page of real
+#: chunks and 2.4x on a page of documents, whose short fields pay more in
+#: indentation. 300 kB keeps even a 3x page under the 1 MB result limit.
+_PAGE_BYTE_BUDGET = 300_000
+
+_PAGING_HELP = f"""Results come one page at a time, as `{{items, total, next_offset}}`:
+
+- `items` — this page.
+- `total` — how many there are in all (`null` for `search`, which ranks
+  the best {SEARCH_POOL} hits and stops paging there).
+- `next_offset` — `null` when this is the last page. Otherwise call
+  again with `offset=next_offset` for the next one.
+
+A page can hold fewer than `limit` items when they would not fit in one
+response; `next_offset` still says where to carry on.
+"""
+
+
+def _check_page_args(limit: int, offset: int) -> None:
+    if limit < 1:
+        raise ValueError(f"limit must be at least 1, got {limit}.")
+    if offset < 0:
+        raise ValueError(f"offset must not be negative, got {offset}.")
+
+
+def _fit_budget(items: list[dict[str, Any]], budget: int) -> list[dict[str, Any]]:
+    """The leading items that fit in ``budget`` bytes of compact JSON.
+
+    Always keeps the first item, however large, so paging cannot stall.
+    """
+    kept: list[dict[str, Any]] = []
+    used = 0
+    for item in items:
+        size = len(json.dumps(item, ensure_ascii=False, separators=(",", ":")).encode())
+        if kept and used + size > budget:
+            break
+        kept.append(item)
+        used += size
+    return kept
+
+
+def _page(
+    items: list[dict[str, Any]],
+    *,
+    offset: int,
+    total: int | None,
+    more: bool,
+    budget: int = _PAGE_BYTE_BUDGET,
+) -> dict[str, Any]:
+    """Wrap one page of results, trimmed to the byte budget.
+
+    ``more`` says whether anything follows ``items`` before trimming.
+    """
+    kept = _fit_budget(items, budget)
+    has_next = more or len(kept) < len(items)
+    return {
+        "items": kept,
+        "total": total,
+        "next_offset": offset + len(kept) if has_next else None,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Tool impls — pure functions, tested directly
 # ---------------------------------------------------------------------------
 
@@ -383,7 +470,8 @@ def _search_impl(
     query: str,
     *,
     mode: SearchMode = "hybrid",
-    k: int = 5,
+    limit: int = DEFAULT_SEARCH_LIMIT,
+    offset: int = 0,
     project_id: str | None = None,
     doc_id: str | None = None,
     level: str | None = None,
@@ -391,10 +479,11 @@ def _search_impl(
     backend: RagBackend | None = None,
     conn: Any | None = None,
     embedder: Any | None = None,
-) -> list[dict[str, Any]]:
-    """Run a search and return a list of result dicts."""
+) -> dict[str, Any]:
+    """Run a search and return one page of result dicts."""
     if not query or not query.strip():
         raise ValueError("query must not be empty")
+    _check_page_args(limit, offset)
 
     be = _backend(backend, conn, embedder)
 
@@ -405,8 +494,14 @@ def _search_impl(
         layout_types=_resolve_layout_types(layout_types),
     )
 
-    results = be.search(query, mode=mode, k=k, filters=filters)
-    return [_shape_chunk(r) for r in results]
+    # One hit past the page says whether another page follows.
+    results = be.search(query, mode=mode, k=limit + 1, offset=offset, filters=filters)
+    return _page(
+        [_shape_chunk(r) for r in results[:limit]],
+        offset=offset,
+        total=None,
+        more=len(results) > limit,
+    )
 
 
 def _get_chunk_impl(
@@ -445,21 +540,30 @@ def _navigate_impl(
     chunk_id: str,
     direction: Direction,
     *,
+    limit: int = DEFAULT_PAGE_SIZE,
+    offset: int = 0,
     backend: RagBackend | None = None,
     conn: Any | None = None,
-) -> list[dict[str, Any]]:
-    """Step through the chunk graph.
+) -> dict[str, Any]:
+    """Step through the chunk graph, returning one page of the result.
 
-    Returns a list because ``children`` is one-to-many; the other directions
-    return at most one element.
+    Paged because ``children`` is one-to-many; the other directions return
+    at most one item, and ``limit``/``offset`` do not apply to them.
     """
+    _check_page_args(limit, offset)
     be = _backend(backend, conn)
     chunk = be.get_chunk(chunk_id)
     if chunk is None:
-        return []
+        return _page([], offset=0, total=0, more=False)
 
     if direction == "children":
-        return [_shape_chunk(c) for c in be.get_children(chunk_id)]
+        page = be.get_children(chunk_id, limit=limit, offset=offset)
+        return _page(
+            [_shape_chunk(c) for c in page.chunks],
+            offset=offset,
+            total=page.total,
+            more=offset + len(page.chunks) < page.total,
+        )
 
     target_id: str | None
     if direction == "parent":
@@ -475,10 +579,9 @@ def _navigate_impl(
             f"Unknown direction '{direction}'. Use: parent, children, prev, next, chapter_root."
         )
 
-    if target_id is None:
-        return []
-    target = be.get_chunk(target_id)
-    return [_shape_chunk(target)] if target else []
+    target = be.get_chunk(target_id) if target_id is not None else None
+    items = [_shape_chunk(target)] if target else []
+    return _page(items, offset=0, total=len(items), more=False)
 
 
 def _list_documents_impl(
@@ -487,18 +590,23 @@ def _list_documents_impl(
     group: str | None = None,
     mpn: str | None = None,
     manufacturer: str | None = None,
+    limit: int = DEFAULT_PAGE_SIZE,
+    offset: int = 0,
     backend: RagBackend | None = None,
     conn: Any | None = None,
-) -> list[dict[str, Any]]:
-    """List the store's documents, optionally filtered by sidecar metadata."""
+) -> dict[str, Any]:
+    """List one page of the store's documents, optionally filtered by sidecar metadata."""
+    _check_page_args(limit, offset)
     be = _backend(backend, conn)
-    docs = be.list_documents(
+    page = be.list_documents(
         project_id=_resolve_project(project_id),
         group_name=group,
         mpn=mpn,
         manufacturer=manufacturer,
+        limit=limit,
+        offset=offset,
     )
-    return [
+    items = [
         {
             "doc_id": d.doc_id,
             "project_id": d.project_id,
@@ -511,8 +619,14 @@ def _list_documents_impl(
             **({"doc_title": d.doc_title} if d.doc_title else {}),
             **({"page_count": d.page_count} if d.page_count is not None else {}),
         }
-        for d in docs
+        for d in page.documents
     ]
+    return _page(
+        items,
+        offset=offset,
+        total=page.total,
+        more=offset + len(page.documents) < page.total,
+    )
 
 
 def _get_document_metadata_impl(
@@ -523,7 +637,7 @@ def _get_document_metadata_impl(
 ) -> dict[str, Any] | None:
     be = _backend(backend, conn)
     meta = be.get_metadata(doc_id)
-    summary = next((d for d in be.list_documents() if d.doc_id == doc_id), None)
+    summary = next((d for d in be.list_documents().documents if d.doc_id == doc_id), None)
     if meta is None and summary is None:
         return None
 
@@ -741,6 +855,15 @@ def build_server(
         fn.__doc__ = cleandoc(fn.__doc__ or "") + "\n\n" + chunk_fields_help
         return fn
 
+    def with_paging(fn: _ToolFn) -> _ToolFn:
+        """Append the shared paging reference to a listing tool's description.
+
+        Applied under ``with_chunk_fields`` where both apply, so the paging
+        text sits next to the tool's own summary.
+        """
+        fn.__doc__ = cleandoc(fn.__doc__ or "") + "\n\n" + _PAGING_HELP
+        return fn
+
     settings = get_settings()
     project_hint = settings.default_project_id or "(unscoped)"
     mcp = MCPServer(
@@ -822,20 +945,25 @@ def build_server(
 
     @mcp.tool()
     @with_chunk_fields
+    @with_paging
     def search(
         query: str,
         mode: SearchMode = "hybrid",
-        k: int = 5,
+        limit: int = DEFAULT_SEARCH_LIMIT,
+        offset: int = 0,
         project_id: str | None = None,
         doc_id: str | None = None,
         level: str | None = None,
         layout_types: list[str] | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> dict[str, Any]:
         """Search the RAG database for chunks relevant to a query.
 
         Hybrid mode (default) combines BM25 keyword + dense vector with
         Reciprocal Rank Fusion. Use `keyword` for exact part numbers /
         register names, `vector` for conceptual questions.
+
+        `limit` is how many hits per page, best first; `offset` skips that
+        many of the best.
 
         Optional filters:
         - `project_id`: override the server's default project.
@@ -847,7 +975,8 @@ def build_server(
         return _search_impl(
             query,
             mode=mode,
-            k=k,
+            limit=limit,
+            offset=offset,
             project_id=project_id,
             doc_id=doc_id,
             level=level,
@@ -863,30 +992,48 @@ def build_server(
 
     @mcp.tool()
     @with_chunk_fields
-    def navigate(chunk_id: str, direction: Direction) -> list[dict[str, Any]]:
-        """Step through the chunk graph: parent | children | prev | next | chapter_root."""
-        return _navigate_impl(chunk_id, direction, backend=backend)
+    @with_paging
+    def navigate(
+        chunk_id: str,
+        direction: Direction,
+        limit: int = DEFAULT_PAGE_SIZE,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """Step through the chunk graph: parent | children | prev | next | chapter_root.
+
+        Only `children` can return more than one chunk, so `limit` and
+        `offset` only matter there.
+        """
+        return _navigate_impl(chunk_id, direction, limit=limit, offset=offset, backend=backend)
 
     @mcp.tool()
     @with_chunk_fields
-    def zoom_in(chunk_id: str) -> list[dict[str, Any]]:
+    @with_paging
+    def zoom_in(chunk_id: str, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0) -> dict[str, Any]:
         """Get finer-grained child chunks (e.g. macro -> meso, meso -> micro)."""
-        return _navigate_impl(chunk_id, "children", backend=backend)
+        return _navigate_impl(chunk_id, "children", limit=limit, offset=offset, backend=backend)
 
     @mcp.tool()
     @with_chunk_fields
-    def zoom_out(chunk_id: str) -> list[dict[str, Any]]:
-        """Get the parent chunk (broader context, e.g. micro -> meso, meso -> macro)."""
+    @with_paging
+    def zoom_out(chunk_id: str) -> dict[str, Any]:
+        """Get the parent chunk (broader context, e.g. micro -> meso, meso -> macro).
+
+        There is at most one parent, so this is always a single page.
+        """
         return _navigate_impl(chunk_id, "parent", backend=backend)
 
     @mcp.tool()
+    @with_paging
     def list_documents(
         project_id: str | None = None,
         group: str | None = None,
         mpn: str | None = None,
         manufacturer: str | None = None,
-    ) -> list[dict[str, Any]]:
-        """List documents in the current (or specified) project.
+        limit: int = DEFAULT_PAGE_SIZE,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """List documents in the current (or specified) project, by doc_id.
 
         Every ingested document appears, whether or not metadata has been
         assigned to it; untagged ones come back with null sidecar fields.
@@ -898,6 +1045,8 @@ def build_server(
             group=group,
             mpn=mpn,
             manufacturer=manufacturer,
+            limit=limit,
+            offset=offset,
             backend=backend,
         )
 
