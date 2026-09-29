@@ -7,8 +7,11 @@ S3 upload, and generates a manifest for downstream multi-modal embedding.
 
 from __future__ import annotations
 
+import ctypes
 import json
 import os
+import platform
+import sys
 from collections import defaultdict, deque
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -339,6 +342,35 @@ def _render_budget_mb() -> int:
         return int(Settings.model_fields["render_memory_budget_mb"].default)
 
 
+# Allocations at or above this size get their own mmap, and free unmaps them.
+# Page pixmaps, their PIL copies and decoded embedded images are all well
+# above it; ordinary Python objects are well below it.
+_MMAP_THRESHOLD_BYTES = 1024 * 1024
+_M_MMAP_THRESHOLD = -3  # from glibc's malloc.h
+
+
+def _return_freed_pages_to_os() -> None:
+    """Make glibc give freed page buffers back to the OS (GH #80).
+
+    By default glibc raises its mmap threshold after each large free, up to
+    32 MB, so after the first page the buffers come from the heap arenas
+    instead. With several worker threads they spread over several arenas,
+    and after the run 100-180 MB stayed in RSS that malloc_trim(0) did not
+    release. The MCP server is long-lived, so it kept that after every
+    ingest. A fixed threshold also turns off the automatic raise.
+
+    This is process-wide and stays in force after the render. It cost about
+    13% of render time in a benchmark that only renders pages. Other C
+    libraries (musl) and other platforms are left alone.
+    """
+    if sys.platform != "linux" or platform.libc_ver()[0] != "glibc":
+        return
+    try:
+        ctypes.CDLL("libc.so.6").mallopt(_M_MMAP_THRESHOLD, _MMAP_THRESHOLD_BYTES)
+    except (OSError, AttributeError):
+        pass  # the page still renders; it just keeps the memory
+
+
 # Only used to size a slot when the document itself cannot be measured.
 _A4_WIDTH_PT, _A4_HEIGHT_PT = 595, 842
 
@@ -485,6 +517,7 @@ def iter_pdf_pages(
             "Lower --dpi, or raise RAG_RENDER_MEMORY_BUDGET_MB."
         )
 
+    _return_freed_pages_to_os()
     mat_scale = dpi / 72
     pdf_path_str = str(pdf_path)
 
