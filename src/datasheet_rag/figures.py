@@ -511,6 +511,12 @@ def iter_pdf_pages(
             raise PageRenderError(
                 stage="rendering a page", path=pdf_path, page=page_no, cause=exc
             ) from exc
+        # MuPDF's store keeps each decoded embedded image after the page is
+        # done, and the slot does not count it (GH #79). Nothing is lost by
+        # emptying it: store entries belong to one document, and each page
+        # opens its own. Emptying only drops the store's reference, so an image
+        # another worker is still drawing stays alive until that worker is done.
+        fitz.TOOLS.store_shrink(100)
         if cache_file is not None:
             try:
                 _save_image_atomic(img, cache_file)
