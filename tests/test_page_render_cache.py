@@ -490,15 +490,20 @@ def _page_colour(page_no: int) -> tuple[int, int, int]:
     return (page_no * 20 % 256, 255 - page_no * 20 % 256, page_no * 7 % 256)
 
 
-def _write_image_pdf(path: Path) -> None:
+def _write_image_pdf(path: Path, images_per_page: int = 1) -> None:
+    """With more than one image, each is squeezed into its own horizontal band."""
     import fitz
 
     doc = fitz.open()
     for page_no in range(1, _IMAGE_PAGES + 1):
-        rgb = bytes(_page_colour(page_no)) * (_IMAGE_PX * _IMAGE_PX)
-        pix = fitz.Pixmap(fitz.csRGB, _IMAGE_PX, _IMAGE_PX, rgb, False)
         page = doc.new_page(width=_IMAGE_PX, height=_IMAGE_PX)
-        page.insert_image(page.rect, pixmap=pix)
+        band = _IMAGE_PX / images_per_page
+        for k in range(images_per_page):
+            colour = _page_colour(page_no + k * _IMAGE_PAGES)
+            rgb = bytes(colour) * (_IMAGE_PX * _IMAGE_PX)
+            pix = fitz.Pixmap(fitz.csRGB, _IMAGE_PX, _IMAGE_PX, rgb, False)
+            rect = fitz.Rect(0, k * band, _IMAGE_PX, (k + 1) * band)
+            page.insert_image(rect, pixmap=pix, keep_proportion=False)
     doc.save(str(path), deflate=True)
     doc.close()
 
@@ -579,3 +584,68 @@ def test_decoded_images_do_not_pile_up_across_pages(tmp_path: Path) -> None:
     # (one page's pixmap, its PIL copy, its own decoded image — GH #81 — and
     # allocator slack), about 17 without. The line sits between the two.
     assert grew < 10 * one_image
+
+
+_RETAINED_PROBE = """
+import sys
+from pathlib import Path
+import fitz
+from datasheet_rag.figures import iter_pdf_pages
+
+def rss_bytes():
+    with open("/proc/self/status") as f:
+        return next(int(l.split()[1]) for l in f if l.startswith("VmRSS:")) * 1024
+
+tmp = Path(sys.argv[1])
+warm = fitz.open()
+warm.new_page().insert_text((50, 50), "warm")
+warm.save(str(tmp / "warm.pdf"))
+warm.close()
+
+def render(name):
+    for _, img in iter_pdf_pages(tmp / name, dpi=72, memory_budget_mb=4096):
+        img.load()
+        del img
+
+render("warm.pdf")
+base = rss_bytes()
+render("images.pdf")
+print(rss_bytes() - base, file=sys.stderr)
+"""
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="reads VmRSS from /proc")
+def test_freed_page_memory_goes_back_to_the_os(tmp_path: Path) -> None:
+    """Once the pages are freed, the process shrinks back to its size before.
+
+    glibc kept the freed page buffers in its worker-thread arenas, and
+    malloc_trim did not return them (GH #80). The MCP server is long-lived,
+    so every large ingest left it holding them. It runs in a fresh interpreter
+    so that no earlier test has already grown the arenas.
+    """
+    import os
+
+    from datasheet_rag.figures import _page_slot_bytes, _render_window_size
+
+    path = tmp_path / "images.pdf"
+    # Two images a page, each drawn at half its height: with one full-page
+    # image a page, glibc kept only about two images' worth even before.
+    _write_image_pdf(path, images_per_page=2)
+    pages = list(range(1, _IMAGE_PAGES + 1))
+    budget = 4096 * 1024 * 1024
+    workers = _render_window_size(_page_slot_bytes(path, pages, 72), budget, len(pages))
+    if workers < 2:
+        pytest.skip(f"only {os.cpu_count()} CPU(s): one worker retained little anyway")
+
+    out = subprocess.run(
+        [sys.executable, "-c", _RETAINED_PROBE, str(tmp_path)],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stderr.splitlines()  # stdout carries the progress bar
+    retained = int(out[-1])
+
+    one_image = _IMAGE_PX * _IMAGE_PX * 3
+    # Measured with 8 workers: 7 to 13 images' worth without the fixed mmap
+    # threshold.
+    assert retained < 3 * one_image
