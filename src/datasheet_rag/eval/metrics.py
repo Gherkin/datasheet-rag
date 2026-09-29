@@ -184,7 +184,7 @@ class QueryOutcome(BaseModel):
 
     question: str
     category: Category
-    doc_id: str
+    doc_id: str | None
     num_retrieved: int
     retrieved_chunk_ids: list[str] = Field(default_factory=list)
     first_relevant_rank: int | None = None

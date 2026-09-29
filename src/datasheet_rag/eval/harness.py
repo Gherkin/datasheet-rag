@@ -22,6 +22,7 @@ from typing import Literal, Protocol
 from pydantic import BaseModel, Field
 
 from datasheet_rag.eval.dataset import EvalSet
+from datasheet_rag.eval.gold import resolve_gold_chunk_ids
 from datasheet_rag.eval.metrics import (
     DEFAULT_KS,
     CategoryMetrics,
@@ -92,6 +93,10 @@ class RunReport(BaseModel):
     config: RunConfig
     outcomes: list[QueryOutcome] = Field(default_factory=list)
     by_category: dict[str, CategoryMetrics] = Field(default_factory=dict)
+    # Questions whose evidence no chunk in the store holds: they score zero
+    # because the store lost the text (a parser gap), not because search
+    # ranked badly. Reported so the two failures are not confused.
+    unresolved_gold: list[str] = Field(default_factory=list)
 
 
 def _search(
@@ -153,15 +158,25 @@ def run_eval(
     ks = config.ks
     fetch_n = max(config.k, max(ks))
 
+    # An unanswerable item has nothing to retrieve; it is for answer-level
+    # evals, where the right answer is "not in the documents".
+    items = [i for i in eval_set.items if i.answerable]
+
     # Per-doc lineage graphs, loaded once and reused across questions.
     graph_cache: dict[str, dict[str, GraphNode]] = {}
     relevant_by_item: list[set[str]] = []
-    for item in eval_set.items:
+    unresolved: list[str] = []
+    for item in items:
+        if item.doc_id is None:
+            raise ValueError(f"answerable item has no doc_id: {item.question!r}")
         graph = graph_cache.get(item.doc_id)
         if graph is None:
             graph = _load_doc_graph(conn, item.doc_id)
             graph_cache[item.doc_id] = graph
-        relevant_by_item.append(lineage_relevant_ids(item.gold_chunk_ids, graph))
+        gold = resolve_gold_chunk_ids(conn, item) if item.evidence else item.gold_chunk_ids
+        if item.evidence and not gold:
+            unresolved.append(item.question)
+        relevant_by_item.append(lineage_relevant_ids(gold, graph))
     trace_fh = None
     if trace_path is not None:
         tp = Path(trace_path)
@@ -170,7 +185,7 @@ def run_eval(
 
     outcomes: list[QueryOutcome] = []
     try:
-        for item, relevant_ids in zip(eval_set.items, relevant_by_item):
+        for item, relevant_ids in zip(items, relevant_by_item):
             t0 = time.perf_counter()
             results = _search(conn, config, item.question, embedder=embedder, fetch_n=fetch_n)
             latency_ms = (time.perf_counter() - t0) * 1000.0
@@ -218,4 +233,5 @@ def run_eval(
         config=config,
         outcomes=outcomes,
         by_category=aggregate_by_category(outcomes, ks=ks),
+        unresolved_gold=unresolved,
     )

@@ -38,17 +38,38 @@ CATEGORIES: tuple[Category, ...] = (
 )
 
 
+class Evidence(BaseModel):
+    """A verbatim quote from one physical PDF page (1-based) that states
+    (part of) the answer. Quotes survive re-chunking; chunk ids do not."""
+
+    page: int
+    quote: str
+
+
 class GoldenItem(BaseModel):
     """One labeled evaluation question with its ground-truth location."""
 
     question: str
     category: Category
-    doc_id: str
+    # None only for an unanswerable item: no stored document holds the answer.
+    doc_id: str | None
     gold_chunk_ids: list[str] = Field(default_factory=list)
     gold_pages: list[int] = Field(default_factory=list)
     answer_notes: str = ""
-    # 'auto' = LLM-generated (needs review), 'human' = reviewed / hand-written.
-    source: Literal["auto", "human"] = "auto"
+    # 'auto' = LLM-generated (needs review), 'human' = reviewed / hand-written,
+    # 'mined' = a real query an agent made, keyed against the PDF (GH #92).
+    source: Literal["auto", "human", "mined"] = "auto"
+    # Items that are rephrasings of one information need share a need_id, so
+    # statistics can treat them as one cluster rather than as independent.
+    need_id: str | None = None
+    # False when the corpus does not hold the answer: the right behaviour is
+    # to say so. Retrieval metrics skip these; answer-level evals use them.
+    answerable: bool = True
+    # When set, gold chunks are resolved from these against the current store
+    # (see datasheet_rag.eval.gold) instead of trusting gold_chunk_ids.
+    evidence: list[Evidence] = Field(default_factory=list)
+    # How an answer is graded end to end (numeric / set / text); free-form.
+    grading: dict[str, object] | None = None
 
 
 class EvalSet(BaseModel):
