@@ -157,6 +157,16 @@ def test_search_unknown_doc_id_is_a_clean_error(db_path: Path) -> None:
     assert result.exception is None or isinstance(result.exception, SystemExit)
 
 
+@pytest.mark.parametrize("k", ["0", "201"])
+def test_search_k_past_the_pool_is_a_clean_error(db_path: Path, k: str) -> None:
+    # The backend ranks only SEARCH_POOL hits; a bigger -k would be cut silently.
+    result = CliRunner().invoke(
+        cli, ["search", "x", "--mode", "keyword", "-k", k, "--db", str(db_path)]
+    )
+    assert result.exit_code == 2, result.output
+    assert "must be 1 to 200" in result.output
+
+
 @pytest.mark.parametrize("extra", [(), ("--mpn", "X1")], ids=["read", "write"])
 def test_metadata_unknown_doc_id_is_a_clean_error(db_path: Path, extra: tuple[str, ...]) -> None:
     result = CliRunner().invoke(cli, ["metadata", "zzzz", *extra, "--db", str(db_path)])
