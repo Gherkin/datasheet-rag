@@ -3886,7 +3886,21 @@ def fix_titles_cmd(
 # ---------------------------------------------------------------------------
 
 
-@cli.group("eval", hidden=True, short_help="Evaluate retrieval quality.")
+class _EvalGroup(click.Group):
+    """Reports a broken keyword index as one line, like the root group's
+    user errors (GH #36). Kept here, not in the root group, so every other
+    command does not pay for importing the store."""
+
+    def invoke(self, ctx: click.Context) -> Any:
+        from datasheet_rag.store.schema import FtsOutOfSyncError
+
+        try:
+            return super().invoke(ctx)
+        except FtsOutOfSyncError as e:
+            raise click.ClickException(str(e)) from e
+
+
+@cli.group("eval", cls=_EvalGroup, hidden=True, short_help="Evaluate retrieval quality.")
 def eval_group() -> None:
     """Retrieval-layer evaluation: golden set, metrics, ablations."""
 

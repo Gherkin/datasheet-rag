@@ -21,6 +21,7 @@ from typing import Literal, Protocol
 
 from pydantic import BaseModel, Field
 
+from datasheet_rag.backend.base import SEARCH_POOL
 from datasheet_rag.eval.dataset import EvalSet
 from datasheet_rag.eval.metrics import (
     DEFAULT_KS,
@@ -31,6 +32,7 @@ from datasheet_rag.eval.metrics import (
     lineage_relevant_ids,
 )
 from datasheet_rag.models.chunk import ChunkLevel
+from datasheet_rag.store.schema import require_fts_in_sync
 from datasheet_rag.store.search import (
     SearchFilters,
     SearchResult,
@@ -102,27 +104,33 @@ def _search(
     embedder: Embedder | None,
     fetch_n: int,
 ) -> list[SearchResult]:
+    """The top ``fetch_n`` of the query's ``SEARCH_POOL`` ranking.
+
+    Live search ranks a fixed pool and cuts it (``LocalBackend._rank``). The
+    store's over-fetch grows with ``k``, so asking it for ``fetch_n`` directly
+    ranks differently from what agents get (GH #90).
+    """
     filters = config.filters()
     if config.mode == "keyword":
-        return keyword_search(conn, question, k=fetch_n, filters=filters)
+        return keyword_search(conn, question, k=SEARCH_POOL, filters=filters)[:fetch_n]
 
     if embedder is None:
         raise ValueError(f"mode={config.mode!r} requires an embedder")
     query_vec = embedder.embed_one(question)
 
     if config.mode == "vector":
-        return vector_search(conn, query_vec, k=fetch_n, filters=filters)
+        return vector_search(conn, query_vec, k=SEARCH_POOL, filters=filters)[:fetch_n]
 
     return hybrid_search(
         conn,
         query_vec,
         question,
-        k=fetch_n,
+        k=SEARCH_POOL,
         filters=filters,
         rrf_k=config.rrf_k,
         vector_weight=config.vector_weight,
         keyword_weight=config.keyword_weight,
-    )
+    )[:fetch_n]
 
 
 def _load_doc_graph(conn: sqlite3.Connection, doc_id: str) -> dict[str, GraphNode]:
@@ -152,6 +160,12 @@ def run_eval(
     """
     ks = config.ks
     fetch_n = max(config.k, max(ks))
+    if fetch_n > SEARCH_POOL:
+        raise ValueError(f"k={fetch_n} is past the {SEARCH_POOL}-hit pool live search ranks")
+    if config.mode != "vector":
+        # A desynced index makes keyword return nothing and hybrid collapse to
+        # vector-only, and the report would still say "hybrid" (GH #91).
+        require_fts_in_sync(conn)
 
     # Per-doc lineage graphs, loaded once and reused across questions.
     graph_cache: dict[str, dict[str, GraphNode]] = {}

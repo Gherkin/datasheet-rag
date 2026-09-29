@@ -167,6 +167,25 @@ def test_search_k_past_the_pool_is_a_clean_error(db_path: Path, k: str) -> None:
     assert "must be 1 to 200" in result.output
 
 
+def test_eval_on_a_broken_keyword_index_is_a_clean_error(db_path: Path, tmp_path: Path) -> None:
+    # GH #91: the eval refuses a store whose keyword index is out of sync.
+    conn = connect(db_path)
+    conn.execute("INSERT INTO chunk_fts(chunk_fts) VALUES('delete-all')")
+    conn.commit()
+    conn.close()
+    golden = tmp_path / "golden.jsonl"
+    golden.write_text(
+        f'{{"question": "t", "category": "identifier", "doc_id": "{DOC_A}"}}\n',
+        encoding="utf-8",
+    )
+    result = CliRunner().invoke(
+        cli, ["eval", "run", "--mode", "keyword", "--set", str(golden), "--db", str(db_path)]
+    )
+    assert result.exit_code == 1, result.output
+    assert "rag repair fts" in result.output
+    assert _PREFACE not in result.output
+
+
 @pytest.mark.parametrize("extra", [(), ("--mpn", "X1")], ids=["read", "write"])
 def test_metadata_unknown_doc_id_is_a_clean_error(db_path: Path, extra: tuple[str, ...]) -> None:
     result = CliRunner().invoke(cli, ["metadata", "zzzz", *extra, "--db", str(db_path)])

@@ -358,6 +358,26 @@ def fts_status(conn: sqlite3.Connection) -> FtsStatus:
     return FtsStatus(chunks=chunks, indexed=indexed)
 
 
+class FtsOutOfSyncError(RuntimeError):
+    """The keyword index does not cover the chunks, and the caller cannot
+    give a meaningful answer without it (the eval harness — GH #91)."""
+
+    def __init__(self, status: FtsStatus):
+        self.status = status
+        super().__init__(
+            f"Keyword index out of sync: chunk_fts covers {status.indexed} of "
+            f"{status.chunks} chunks, so keyword and hybrid results would be "
+            f"wrong. Run `rag repair fts` to rebuild it."
+        )
+
+
+def require_fts_in_sync(conn: sqlite3.Connection) -> None:
+    """Raise :class:`FtsOutOfSyncError` unless the keyword index is whole."""
+    status = fts_status(conn)
+    if not status.healthy:
+        raise FtsOutOfSyncError(status)
+
+
 def rebuild_fts(conn: sqlite3.Connection) -> FtsStatus:
     """Repopulate ``chunk_fts`` from ``chunks`` and return the status after.
 
