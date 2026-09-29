@@ -15,10 +15,13 @@ updates:
       actions:
         patterns: ["*"]
 
-  # uv.lock. Grouped the same way, with security fixes split out so an
-  # advisory is not queued behind a routine version bump.
+  # Both uv locks: the root project's, and the .mcpb bundle's, which runs the
+  # same server source against its own resolution. Grouped the same way, with
+  # security fixes split out so an advisory is not queued behind a routine
+  # version bump. A group does not span directories, so this is one PR per lock;
+  # `group-by: dependency-name` would merge them, but at one PR per dependency.
   - package-ecosystem: uv
-    directory: /
+    directories: ["/", "/mcp-bundle/server"]
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
