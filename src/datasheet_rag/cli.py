@@ -209,9 +209,12 @@ def _require_local_db(db_path: Path | None) -> Path:
 
 def _friendly_server_error(e: RagServerError) -> click.ClickException:
     """Turn a RagServerError into an actionable CLI message (esp. auth)."""
+    import httpx
+
     code = getattr(e, "status_code", None)
-    if code == 0:
-        # No HTTP status at all: the request never got an answer.
+    if code == 0 and isinstance(e.__cause__, httpx.HTTPError):
+        # The request never got an answer. Status 0 alone is not enough: the
+        # embedding-dimension checks also use it for an answer they did get.
         return click.ClickException(
             f"Could not get an answer from the RAG server ({e.detail}). Check that "
             "it is running and that RAG_SERVER_URL points at it."

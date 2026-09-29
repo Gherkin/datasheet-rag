@@ -99,13 +99,31 @@ _COMMANDS = [
 ]
 
 
+def _timeout() -> RagServerError:
+    """A RagServerError as RemoteBackend._request raises it for a timeout."""
+    err = RagServerError(0, "timed out")
+    err.__cause__ = httpx.ReadTimeout("timed out")
+    return err
+
+
 @pytest.mark.parametrize("args", _COMMANDS, ids=[" ".join(a[:2]) for a in _COMMANDS])
 def test_server_timeout_is_a_clean_error(monkeypatch: pytest.MonkeyPatch, args: tuple) -> None:
-    result = _run_with(monkeypatch, RagServerError(0, "timed out"), *args)
+    result = _run_with(monkeypatch, _timeout(), *args)
     assert result.exit_code == 1, result.output
     assert "Could not get an answer from the RAG server (timed out)" in result.output
     assert "Traceback" not in result.output
     assert _PREFACE not in result.output
+
+
+def test_status_0_with_an_answer_is_not_called_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The embedding-dimension checks raise status 0 for an answer the server gave.
+    err = RagServerError(0, "the server's store holds 768-dimensional vectors")
+    result = _run_with(monkeypatch, err, "list", "--global")
+    assert result.exit_code == 1
+    assert "768-dimensional" in result.output
+    assert "Could not get an answer" not in result.output
 
 
 def test_server_401_keeps_its_specific_message(monkeypatch: pytest.MonkeyPatch) -> None:
