@@ -636,21 +636,22 @@ def _get_document_metadata_impl(
     conn: Any | None = None,
 ) -> dict[str, Any] | None:
     be = _backend(backend, conn)
-    meta = be.get_metadata(doc_id)
-    summary = next((d for d in be.list_documents().documents if d.doc_id == doc_id), None)
-    if meta is None and summary is None:
+    # ``get_document`` covers both ways a document exists (sidecar row or
+    # ingested chunks), so it alone decides "no such document".
+    summary = be.get_document(doc_id)
+    if summary is None:
         return None
+    meta = be.get_metadata(doc_id)
 
     # An ingested document need not have a sidecar row. Answering with the
     # empty row says "this document exists, nothing is tagged on it", which
     # is the truth; ``None`` reads as "no such document" and sends the caller
     # hunting for a doc_id that search and stats just handed them.
     result = (meta or DocMetadata(doc_id=doc_id)).model_dump(exclude_none=False)
-    if summary is not None:
-        if summary.doc_title:
-            result["doc_title"] = summary.doc_title
-        if summary.page_count is not None:
-            result["page_count"] = summary.page_count
+    if summary.doc_title:
+        result["doc_title"] = summary.doc_title
+    if summary.page_count is not None:
+        result["page_count"] = summary.page_count
     return result
 
 

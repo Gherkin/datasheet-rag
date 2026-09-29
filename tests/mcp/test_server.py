@@ -471,6 +471,23 @@ def test_get_document_metadata_returns_empty_row_for_untagged_doc(conn: Any) -> 
     assert out["tags"] == []
 
 
+def test_get_document_metadata_does_not_list_the_store(
+    conn: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One document's metadata must not cost a walk over every document (GH #86)."""
+    from datasheet_rag.backend.local import LocalBackend
+
+    def _no_listing(*a: Any, **kw: Any) -> Any:
+        raise AssertionError("get_document_metadata listed the whole store")
+
+    monkeypatch.setattr(LocalBackend, "list_documents", _no_listing)
+    set_metadata(conn, "docA", mpn="STM32H743")
+
+    assert _get_document_metadata_impl("docA", conn=conn)["mpn"] == "STM32H743"
+    assert _get_document_metadata_impl("docB", conn=conn)["doc_id"] == "docB"
+    assert _get_document_metadata_impl("nope", conn=conn) is None
+
+
 def test_stats_total_and_by_level(conn: Any) -> None:
     out = _stats_impl(project_id="p1", conn=conn)
     assert out["total_chunks"] == 6  # 1 MACRO + 2 MESO + 3 MICRO

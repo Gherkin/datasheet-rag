@@ -268,28 +268,37 @@ class LocalBackend(RagBackend):
         # per document, and a page should not pay for the whole store.
         ordered = sorted(matched)
         end = None if limit is None else offset + limit
-        out: list[DocSummary] = []
-        for doc_id in ordered[offset:end]:
-            title, page_count = self._derived_doc_fields(doc_id)
-            d = matched[doc_id]
-            if d is None:
-                out.append(DocSummary(doc_id=doc_id, doc_title=title, page_count=page_count))
-                continue
-            out.append(
-                DocSummary(
-                    doc_id=d.doc_id,
-                    project_id=d.project_id,
-                    group_name=d.group_name,
-                    mpn=d.mpn,
-                    manufacturer=d.manufacturer,
-                    subsystem=d.subsystem,
-                    doc_type=d.doc_type,
-                    tags=d.tags,
-                    doc_title=title,
-                    page_count=page_count,
-                )
-            )
+        out = [self._doc_summary(doc_id, matched[doc_id]) for doc_id in ordered[offset:end]]
         return DocPage(documents=out, total=len(ordered))
+
+    def get_document(self, doc_id: str) -> DocSummary | None:
+        meta = get_metadata(self._get_conn(), doc_id)
+        if meta is None:
+            row = (
+                self._get_conn()
+                .execute("SELECT 1 FROM chunks WHERE doc_id = ? LIMIT 1", (doc_id,))
+                .fetchone()
+            )
+            if row is None:
+                return None
+        return self._doc_summary(doc_id, meta)
+
+    def _doc_summary(self, doc_id: str, d: DocMetadata | None) -> DocSummary:
+        title, page_count = self._derived_doc_fields(doc_id)
+        if d is None:
+            return DocSummary(doc_id=doc_id, doc_title=title, page_count=page_count)
+        return DocSummary(
+            doc_id=d.doc_id,
+            project_id=d.project_id,
+            group_name=d.group_name,
+            mpn=d.mpn,
+            manufacturer=d.manufacturer,
+            subsystem=d.subsystem,
+            doc_type=d.doc_type,
+            tags=d.tags,
+            doc_title=title,
+            page_count=page_count,
+        )
 
     def get_ingested_docs(self, *, project_id: str | None = None) -> list[IngestedDoc]:
         rows = get_ingested_docs(self._get_conn(), project_id=project_id)

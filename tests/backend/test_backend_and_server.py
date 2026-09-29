@@ -678,6 +678,47 @@ def test_server_pages_children_and_documents(client, conn: sqlite3.Connection) -
     assert client.get("/documents", params={"limit": 0}).status_code == 422
 
 
+def test_server_answers_one_document_summary(client, conn: sqlite3.Connection) -> None:
+    """``/documents/{doc_id}/summary`` returns one row, 204 for no such document (GH #86)."""
+    _three_children(conn)
+
+    r = client.get("/documents/d2/summary")
+    assert r.status_code == 200
+    assert r.json()["doc_id"] == "d2"
+    assert client.get("/documents/nope/summary").status_code == 204
+
+
+def test_remote_get_document_reads_the_summary_route(client, conn: sqlite3.Connection) -> None:
+    """Against a current server, a row decodes and 204 means no such document."""
+    from datasheet_rag.backend.remote import RemoteBackend
+
+    _three_children(conn)
+    be = RemoteBackend.__new__(RemoteBackend)
+    be._client = client
+
+    doc = be.get_document("d2")
+    assert doc is not None and doc.doc_id == "d2"
+    assert be.get_document("nope") is None
+
+
+def test_remote_get_document_falls_back_on_an_old_server() -> None:
+    """A pre-#86 server has no summary route; scan the listing as before."""
+    from datasheet_rag.backend.base import RagServerError
+    from datasheet_rag.backend.remote import RemoteBackend
+
+    be = RemoteBackend.__new__(RemoteBackend)
+
+    def _request(method: str, path: str, **kw: object) -> object:
+        raise RagServerError(404, "Not Found")
+
+    be._request = _request  # type: ignore[method-assign]
+    be._json = lambda *a, **kw: {"documents": [{"doc_id": "d1"}, {"doc_id": "d2"}]}  # type: ignore[method-assign]
+
+    doc = be.get_document("d2")
+    assert doc is not None and doc.doc_id == "d2"
+    assert be.get_document("nope") is None
+
+
 def test_remote_backend_pages_a_server_that_does_not() -> None:
     """A pre-#42 server sends everything and no total; page it client-side."""
     from datasheet_rag.backend.remote import RemoteBackend
