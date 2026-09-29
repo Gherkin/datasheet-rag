@@ -320,6 +320,15 @@ _RGB_BYTES_PER_PX = 3
 # not raise the peak past this sum. Measured at 300 DPI on an A2 page (GH #63).
 _PIL_RGB_BYTES_PER_PX = 4
 _SLOT_BYTES_PER_PX = _RGB_BYTES_PER_PX + _PIL_RGB_BYTES_PER_PX
+# While MuPDF draws a page it also holds memory that the page area does not
+# show (GH #81). Each embedded image it decodes stays in its store until the
+# page is done, so those add up. A soft-masked image, an image drawn smaller
+# than its native size, and a transparency group each get a buffer the size of
+# their area on the page while they are drawn. Those are freed one after
+# another, so only the largest counts. A group measured 5 B/px at 300 DPI. On
+# 16 pages of real datasheets the peak then came to 0.87-0.98 of the slot,
+# where the page area alone gave up to 1.87.
+_BUFFER_BYTES_PER_PX = 5
 
 
 def _render_budget_mb() -> int:
@@ -375,12 +384,81 @@ def _return_freed_pages_to_os() -> None:
 _A4_WIDTH_PT, _A4_HEIGHT_PT = 595, 842
 
 
+def _page_drawing_bytes(doc: Any, page: Any, scale: float, is_group: dict[int, bool]) -> int:
+    """What MuPDF holds while it draws *page*, on top of the page itself.
+
+    Images are read from what the page actually draws, not from its resource
+    dictionary: pages can share one dictionary that lists images they never
+    draw. An image is counted at its full size even when MuPDF decodes a
+    smaller copy, so this errs high. *is_group* caches the group check per
+    form, since pages often share their forms.
+    """
+    import fitz  # pymupdf
+
+    def device_px(rect: Any) -> float:
+        on_page = fitz.Rect(rect) & page.rect
+        return float(max(on_page.width, 0) * max(on_page.height, 0)) * scale * scale
+
+    # get_image_info decodes the page's images into MuPDF's store, and nothing
+    # else ties a drawn image to its size and its mask. Emptying the store
+    # right away keeps the sizing pass to one page's images instead of letting
+    # every page's pile up before the render starts. It also drops the fonts
+    # the store holds, so it is skipped on pages without images: emptying it
+    # after every page made sizing a 2234-page datasheet 5x slower.
+    drawn_images = page.get_image_info(xrefs=True)
+    if drawn_images:
+        fitz.TOOLS.store_shrink(100)
+
+    decoded = 0
+    image_buffer = 0.0
+    for image in drawn_images:
+        native_px = image["width"] * image["height"]
+        channels = max(image["colorspace"], 1)  # 0 for a stencil mask
+        drawn_px = device_px(image["bbox"])
+        buffers = 0
+        if image["xref"] and doc.xref_get_key(image["xref"], "SMask")[0] == "xref":
+            decoded += native_px  # the mask, decoded next to the image
+            channels += 1
+            buffers += 1
+        if drawn_px < native_px:
+            buffers += 1  # the scaled copy
+        decoded += native_px * channels
+        image_buffer = max(image_buffer, drawn_px * buffers)
+
+    # A group's buffer is still held while the groups inside it are drawn, so
+    # a chain of nested groups adds up. Each form is counted at its own box,
+    # clipped to the page; where it is placed is not read, so a form drawn
+    # scaled up would be undercounted.
+    group_px: dict[int, float] = {}
+    invoker_of: dict[int, int] = {}
+    for xref, _name, invoker, bbox in page.get_xobjects():
+        if xref not in is_group:
+            is_group[xref] = doc.xref_get_key(xref, "Group/S") == ("name", "/Transparency")
+        invoker_of[xref] = invoker
+        if is_group[xref]:
+            group_px[xref] = device_px(bbox)
+    group_buffer = 0.0
+    for xref in group_px:
+        chain, seen = 0.0, set()
+        while xref and xref not in seen:
+            seen.add(xref)
+            chain += group_px.get(xref, 0.0)
+            xref = invoker_of.get(xref, 0)
+        group_buffer = max(group_buffer, chain)
+
+    # An image may be drawn inside a group, so both buffers are counted.
+    return decoded + int((image_buffer + group_buffer) * _BUFFER_BYTES_PER_PX)
+
+
 def _page_slot_bytes(pdf_path: Path, pages: list[int], dpi: int) -> int:
     """Approximate peak bytes one in-flight page occupies, at *dpi*.
 
     Sized off the largest of the *target* pages rather than an assumed A4: a
     fold-out block diagram or a B4 reference manual is several times the area
-    of a letter page, and the window has to shrink accordingly.
+    of a letter page, and the window has to shrink accordingly. Each page also
+    counts what MuPDF holds while drawing it: decoded images and transparency
+    buffers (GH #81). A page whose drawing cannot be read is counted by its
+    area alone, and the worker reports it if it does not render either.
 
     This only picks a window size, so it must not be the step that decides a
     document is unreadable. When *nothing* could be measured it falls back to
@@ -396,13 +474,20 @@ def _page_slot_bytes(pdf_path: Path, pages: list[int], dpi: int) -> int:
 
     scale = dpi / 72
     largest = 0
+    is_group: dict[int, bool] = {}
     try:
         with fitz.open(str(pdf_path)) as doc:
             for page_no in pages:
                 if not 1 <= page_no <= len(doc):
                     continue  # out-of-range pages fail later, with a proper error
-                rect = doc[page_no - 1].rect
-                largest = max(largest, int(rect.width * scale) * int(rect.height * scale))
+                page = doc[page_no - 1]
+                rect = page.rect
+                slot = int(rect.width * scale) * int(rect.height * scale) * _SLOT_BYTES_PER_PX
+                try:
+                    slot += _page_drawing_bytes(doc, page, scale, is_group)
+                except Exception:
+                    pass  # the area alone still counts
+                largest = max(largest, slot)
     except Exception:
         # Whatever was measured before the failure is kept: a document that
         # opens and then dies on a damaged page has usually already shown us
@@ -410,8 +495,8 @@ def _page_slot_bytes(pdf_path: Path, pages: list[int], dpi: int) -> int:
         # undersize the slot and widen the window past the budget.
         pass
     if largest == 0:
-        largest = int(_A4_WIDTH_PT * scale) * int(_A4_HEIGHT_PT * scale)
-    return largest * _SLOT_BYTES_PER_PX
+        largest = int(_A4_WIDTH_PT * scale) * int(_A4_HEIGHT_PT * scale) * _SLOT_BYTES_PER_PX
+    return largest
 
 
 def _render_window_size(slot_bytes: int, budget_bytes: int, n_pages: int) -> int:
