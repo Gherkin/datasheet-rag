@@ -20,6 +20,7 @@ from fastapi import (
     File,
     Form,
     HTTPException,
+    Query,
     Request,
     Response,
     UploadFile,
@@ -259,8 +260,14 @@ def build_app() -> FastAPI:
         return {"count": be.count_chunks(doc_id=doc_id, project_id=project_id)}
 
     @app.get("/chunks/{chunk_id}/children", dependencies=dep)
-    def chunk_children(chunk_id: str, be: LocalBackend = Depends(get_backend)) -> dict[str, Any]:
-        return {"chunks": [_chunk_json(c) for c in be.get_children(chunk_id)]}
+    def chunk_children(
+        chunk_id: str,
+        limit: int | None = Query(None, ge=1),
+        offset: int = Query(0, ge=0),
+        be: LocalBackend = Depends(get_backend),
+    ) -> dict[str, Any]:
+        page = be.get_children(chunk_id, limit=limit, offset=offset)
+        return {"chunks": [_chunk_json(c) for c in page.chunks], "total": page.total}
 
     @app.get("/chunks/{chunk_id}", dependencies=dep)
     def chunk(chunk_id: str, be: LocalBackend = Depends(get_backend)) -> Response:
@@ -398,15 +405,22 @@ def build_app() -> FastAPI:
         group_name: str | None = None,
         mpn: str | None = None,
         manufacturer: str | None = None,
+        limit: int | None = Query(None, ge=1),
+        offset: int = Query(0, ge=0),
         be: LocalBackend = Depends(get_backend),
     ) -> dict[str, Any]:
-        docs = be.list_documents(
+        page = be.list_documents(
             project_id=project_id,
             group_name=group_name,
             mpn=mpn,
             manufacturer=manufacturer,
+            limit=limit,
+            offset=offset,
         )
-        return {"documents": [d.model_dump(mode="json") for d in docs]}
+        return {
+            "documents": [d.model_dump(mode="json") for d in page.documents],
+            "total": page.total,
+        }
 
     # -- metadata listing ------------------------------------------------
     @app.get("/metadata", dependencies=dep)

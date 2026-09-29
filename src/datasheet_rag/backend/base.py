@@ -21,7 +21,8 @@ from pathlib import Path
 from typing import Literal
 
 from datasheet_rag.backend.models import (
-    DocSummary,
+    ChunkPage,
+    DocPage,
     FigureBytes,
     IngestedDoc,
     IngestResult,
@@ -67,7 +68,15 @@ class RagBackend(ABC):
     def get_chunk(self, chunk_id: str) -> Chunk | None: ...
 
     @abstractmethod
-    def get_children(self, chunk_id: str) -> list[Chunk]: ...
+    def get_children(
+        self, chunk_id: str, *, limit: int | None = None, offset: int = 0
+    ) -> ChunkPage:
+        """One page of ``chunk_id``'s children, in document order.
+
+        ``limit=None`` returns every child from ``offset`` on. A parent can
+        have hundreds of children, so the MCP layer always passes a limit
+        (GH #42).
+        """
 
     @abstractmethod
     def count_chunks(self, *, doc_id: str | None = None, project_id: str | None = None) -> int: ...
@@ -81,7 +90,13 @@ class RagBackend(ABC):
         group_name: str | None = None,
         mpn: str | None = None,
         manufacturer: str | None = None,
-    ) -> list[DocSummary]: ...
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> DocPage:
+        """One page of the matching documents, in ``doc_id`` order.
+
+        ``limit=None`` returns every match from ``offset`` on.
+        """
 
     @abstractmethod
     def get_ingested_docs(self, *, project_id: str | None = None) -> list[IngestedDoc]: ...

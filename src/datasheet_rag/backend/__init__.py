@@ -23,7 +23,9 @@ from datasheet_rag.backend.base import (
 )
 from datasheet_rag.backend.local import LocalBackend
 from datasheet_rag.backend.models import (
+    ChunkPage,
     ChunkVectors,
+    DocPage,
     DocSummary,
     FigureBytes,
     IngestedDoc,
@@ -35,7 +37,9 @@ from datasheet_rag.backend.models import (
 from datasheet_rag.config import get_settings
 
 __all__ = [
+    "ChunkPage",
     "ChunkVectors",
+    "DocPage",
     "DocSummary",
     "FigureBytes",
     "FigureNotFoundError",

@@ -137,7 +137,7 @@ def test_path_segment_scopes_the_search_to_one_project(client: TestClient, app_a
         result = _tool_call(
             client, "search", {"query": "thermal shutdown", "mode": "keyword"}, path=path
         )
-        return {row["doc_id"] for row in result["structuredContent"]["result"]}
+        return {row["doc_id"] for row in result["structuredContent"]["items"]}
 
     assert ids("/mcp/proj-a") == {a}
     assert ids("/mcp/proj-b") == {b}
@@ -155,7 +155,7 @@ def test_project_header_scopes_when_the_path_does_not(client: TestClient, app_an
         {"query": "thermal shutdown", "mode": "keyword"},
         headers={"X-RAG-Project": "proj-a"},
     )
-    assert {r["doc_id"] for r in result["structuredContent"]["result"]} == {a}
+    assert {r["doc_id"] for r in result["structuredContent"]["items"]} == {a}
 
 
 def test_explicit_project_argument_beats_the_url(client: TestClient, app_and_backend) -> None:
@@ -168,7 +168,7 @@ def test_explicit_project_argument_beats_the_url(client: TestClient, app_and_bac
         {"query": "thermal shutdown", "mode": "keyword", "project_id": "proj-b"},
         path="/mcp/proj-a",
     )
-    assert {r["doc_id"] for r in result["structuredContent"]["result"]} == {b}
+    assert {r["doc_id"] for r in result["structuredContent"]["items"]} == {b}
 
 
 def test_scoping_does_not_leak_between_requests(client: TestClient, app_and_backend) -> None:
@@ -179,7 +179,7 @@ def test_scoping_does_not_leak_between_requests(client: TestClient, app_and_back
     b = _seed(backend, "b", "proj-b", "thermal shutdown threshold")
     _tool_call(client, "search", {"query": "thermal", "mode": "keyword"}, path="/mcp/proj-a")
     result = _tool_call(client, "search", {"query": "thermal", "mode": "keyword"})
-    assert {r["doc_id"] for r in result["structuredContent"]["result"]} == {a, b}
+    assert {r["doc_id"] for r in result["structuredContent"]["items"]} == {a, b}
 
 
 # ---- auth ----------------------------------------------------------------
