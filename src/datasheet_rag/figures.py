@@ -405,7 +405,9 @@ def _page_drawing_bytes(doc: Any, page: Any, scale: float, is_group: dict[int, b
     # every page's pile up before the render starts. It also drops the fonts
     # the store holds, so it is skipped on pages without images: emptying it
     # after every page made sizing a 2234-page datasheet 5x slower.
-    drawn_images = page.get_image_info(xrefs=True)
+    # Not xrefs=True: to find them PyMuPDF decodes every image in the page's
+    # resource dictionary, which is the list this function avoids.
+    drawn_images = page.get_image_info()
     if drawn_images:
         fitz.TOOLS.store_shrink(100)
 
@@ -416,7 +418,7 @@ def _page_drawing_bytes(doc: Any, page: Any, scale: float, is_group: dict[int, b
         channels = max(image["colorspace"], 1)  # 0 for a stencil mask
         drawn_px = device_px(image["bbox"])
         buffers = 0
-        if image["xref"] and doc.xref_get_key(image["xref"], "SMask")[0] == "xref":
+        if image["has-mask"]:
             decoded += native_px  # the mask, decoded next to the image
             channels += 1
             buffers += 1
