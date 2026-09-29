@@ -27,7 +27,7 @@ from fastapi import (
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from datasheet_rag.backend.base import FigureNotFoundError, FigureUnavailableError, RagServerError
 from datasheet_rag.backend.local import LocalBackend
@@ -92,6 +92,7 @@ class SearchRequest(BaseModel):
     query: str
     mode: str = "hybrid"
     k: int = 10
+    offset: int = Field(0, ge=0)
     filters: SearchFilters | None = None
     # Set by a client that embeds its own queries (RAG_COMPUTE=client, GH #43).
     # The text is still sent — hybrid keyword matching needs it.
@@ -245,10 +246,12 @@ def build_app() -> FastAPI:
             req.query,
             mode=req.mode,  # type: ignore[arg-type]
             k=req.k,
+            offset=req.offset,
             filters=req.filters,
             query_vector=req.query_vector,
         )
-        return {"results": [_result_json(r) for r in results]}
+        # ``offset`` echoed back tells a client this server pages (GH #42).
+        return {"results": [_result_json(r) for r in results], "offset": req.offset}
 
     # -- chunks ----------------------------------------------------------
     @app.get("/chunks/count", dependencies=dep)

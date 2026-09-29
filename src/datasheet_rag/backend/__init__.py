@@ -15,6 +15,7 @@ import sys
 from functools import lru_cache
 
 from datasheet_rag.backend.base import (
+    SEARCH_POOL,
     FigureNotFoundError,
     FigureUnavailableError,
     RagBackend,
@@ -37,6 +38,7 @@ from datasheet_rag.backend.models import (
 from datasheet_rag.config import get_settings
 
 __all__ = [
+    "SEARCH_POOL",
     "ChunkPage",
     "ChunkVectors",
     "DocPage",

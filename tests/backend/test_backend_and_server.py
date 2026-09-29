@@ -11,6 +11,7 @@ import json
 import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -704,6 +705,58 @@ def test_remote_backend_trusts_a_paging_server() -> None:
     page = be.get_children("x", limit=4, offset=8)
     assert page.total == 9
     assert seen["params"] == {"limit": 4, "offset": 8}
+
+
+def _result(chunk_id: str) -> dict[str, object]:
+    chunk = Chunk(
+        id=chunk_id,
+        doc_id="d",
+        level=ChunkLevel.MICRO,
+        text="t",
+        metadata=ChunkMetadata(doc_id="d"),
+    )
+    return {
+        "chunk_id": chunk_id,
+        "score": 1.0,
+        "chunk": chunk.model_dump(mode="json"),
+        "match_source": "keyword",
+    }
+
+
+def test_remote_backend_pages_search_on_a_server_that_does_not() -> None:
+    """A pre-#42 server ignores ``offset``; ask it for more and slice."""
+    from datasheet_rag.backend.remote import RemoteBackend
+
+    be = RemoteBackend.__new__(RemoteBackend)
+    be._compute = "server"
+    asked: list[object] = []
+
+    def _json(method: str, path: str, **kw: Any) -> dict[str, object]:
+        k = kw["json"]["k"]
+        asked.append(k)
+        return {"results": [_result(f"r{i}") for i in range(k)]}
+
+    be._json = _json  # type: ignore[method-assign]
+    hits = be.search("q", mode="keyword", k=2, offset=3)
+    assert [h.chunk_id for h in hits] == ["r3", "r4"]
+    assert asked == [2, 5]
+
+
+def test_remote_backend_trusts_a_paging_search_server() -> None:
+    from datasheet_rag.backend.remote import RemoteBackend
+
+    be = RemoteBackend.__new__(RemoteBackend)
+    be._compute = "server"
+    calls: list[dict[str, Any]] = []
+
+    def _json(method: str, path: str, **kw: Any) -> dict[str, object]:
+        calls.append(kw["json"])
+        return {"results": [_result("r3")], "offset": 3}
+
+    be._json = _json  # type: ignore[method-assign]
+    hits = be.search("q", mode="keyword", k=1, offset=3)
+    assert [h.chunk_id for h in hits] == ["r3"]
+    assert [(c["k"], c["offset"]) for c in calls] == [(1, 3)]
 
 
 def test_remote_backend_reraises_figure_not_found() -> None:

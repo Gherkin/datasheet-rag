@@ -17,6 +17,7 @@ from threading import Lock
 from typing import TYPE_CHECKING, Any
 
 from datasheet_rag.backend.base import (
+    SEARCH_POOL,
     FigureNotFoundError,
     FigureUnavailableError,
     FigureUploads,
@@ -137,11 +138,25 @@ class LocalBackend(RagBackend):
         *,
         mode: SearchMode = "hybrid",
         k: int = 10,
+        offset: int = 0,
         filters: SearchFilters | None = None,
         query_vector: Sequence[float] | None = None,
     ) -> list[SearchResult]:
         if not query or not query.strip():
             raise ValueError("query must not be empty")
+        ranked = self._rank(query, mode=mode, filters=filters, query_vector=query_vector)
+        return ranked[offset : offset + k]
+
+    def _rank(
+        self,
+        query: str,
+        *,
+        mode: SearchMode,
+        filters: SearchFilters | None,
+        query_vector: Sequence[float] | None,
+    ) -> list[SearchResult]:
+        """The query's ranking of the best ``SEARCH_POOL`` hits."""
+        k = SEARCH_POOL
         conn = self._get_conn()
         if mode in ("vector", "hybrid"):
             # A caller-supplied vector means the embedding already happened

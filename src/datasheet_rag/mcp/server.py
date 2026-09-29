@@ -67,6 +67,7 @@ from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 from datasheet_rag import pdf_viewer
 from datasheet_rag.backend import (
+    SEARCH_POOL,
     FigureNotFoundError,
     FigureUnavailableError,
     RagBackend,
@@ -401,11 +402,11 @@ DEFAULT_SEARCH_LIMIT = 5
 #: indentation. 300 kB keeps even a 3x page under the 1 MB result limit.
 _PAGE_BYTE_BUDGET = 300_000
 
-_PAGING_HELP = """Results come one page at a time, as `{items, total, next_offset}`:
+_PAGING_HELP = f"""Results come one page at a time, as `{{items, total, next_offset}}`:
 
 - `items` — this page.
-- `total` — how many there are in all (`null` for `search`, whose
-  ranking has no fixed end).
+- `total` — how many there are in all (`null` for `search`, which ranks
+  the best {SEARCH_POOL} hits and stops paging there).
 - `next_offset` — `null` when this is the last page. Otherwise call
   again with `offset=next_offset` for the next one.
 
@@ -493,15 +494,13 @@ def _search_impl(
         layout_types=_resolve_layout_types(layout_types),
     )
 
-    # Rankings have no stable cursor, so a later page re-runs the search for
-    # the top offset+limit and drops what earlier pages already showed.
-    results = be.search(query, mode=mode, k=offset + limit, filters=filters)
+    # One hit past the page says whether another page follows.
+    results = be.search(query, mode=mode, k=limit + 1, offset=offset, filters=filters)
     return _page(
-        [_shape_chunk(r) for r in results[offset:]],
+        [_shape_chunk(r) for r in results[:limit]],
         offset=offset,
         total=None,
-        # A full answer means the ranking may go on; a short one ran out.
-        more=len(results) == offset + limit,
+        more=len(results) > limit,
     )
 
 

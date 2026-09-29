@@ -281,6 +281,7 @@ class RemoteBackend(RagBackend):
         *,
         mode: SearchMode = "hybrid",
         k: int = 10,
+        offset: int = 0,
         filters: SearchFilters | None = None,
         query_vector: Sequence[float] | None = None,
     ) -> list[SearchResult]:
@@ -298,11 +299,19 @@ class RemoteBackend(RagBackend):
             "query": query,
             "mode": mode,
             "k": k,
+            "offset": offset,
             "filters": filters.model_dump(mode="json") if filters else None,
             "query_vector": list(query_vector) if query_vector is not None else None,
         }
         data = self._json("POST", "/search", json=body)
-        return [SearchResult.model_validate(r) for r in data["results"]]
+        rows: list[Any] = data["results"]
+        if offset and "offset" not in data:
+            # A server from before GH #42 ignores ``offset`` and answers with
+            # the top ``k``. Ask it for the top ``offset + k`` and slice. That
+            # server ranks by ``k``, so its pages are no steadier than before.
+            body["k"] = offset + k
+            rows = self._json("POST", "/search", json=body)["results"][offset:]
+        return [SearchResult.model_validate(r) for r in rows]
 
     # -- chunk reads ---------------------------------------------------
     def get_chunk(self, chunk_id: str) -> Chunk | None:

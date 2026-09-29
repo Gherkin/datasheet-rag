@@ -36,6 +36,12 @@ from datasheet_rag.store import DocMetadata, SearchFilters, SearchResult, TitleS
 
 SearchMode = Literal["hybrid", "vector", "keyword"]
 
+#: How many hits one search ranks. Every page of a query is cut from this
+#: same ranking, so pages neither repeat nor skip hits (GH #42); the store's
+#: over-fetch grows with ``k``, so ranking the top ``offset + k`` instead
+#: would reorder hits between pages. Paging ends here.
+SEARCH_POOL = 200
+
 # chunk_id -> (image_bytes, extension) for figures uploaded during ingest.
 FigureUploads = Mapping[str, tuple[bytes, str]]
 
@@ -51,10 +57,14 @@ class RagBackend(ABC):
         *,
         mode: SearchMode = "hybrid",
         k: int = 10,
+        offset: int = 0,
         filters: SearchFilters | None = None,
         query_vector: Sequence[float] | None = None,
     ) -> list[SearchResult]:
         """Search the store, embedding ``query`` unless a vector is supplied.
+
+        Returns hits ``offset`` to ``offset + k`` of the query's ranking of
+        the best :data:`SEARCH_POOL` hits, so nothing past the pool.
 
         ``query_vector`` short-circuits the embedding step for the vector and
         hybrid modes — the caller has already embedded the text itself. That is

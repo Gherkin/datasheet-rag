@@ -1147,16 +1147,40 @@ def test_list_documents_derives_fields_for_the_page_only(conn: Any) -> None:
     assert derived.call_count == 1
 
 
-def test_search_pages_continue_the_same_ranking(conn: Any) -> None:
-    # m1, s1 and s2 all carry the fixture's placeholder "text for <id>".
-    both = _search_impl("text", mode="keyword", limit=2, project_id="p1", conn=conn)
-    first = _search_impl("text", mode="keyword", limit=1, project_id="p1", conn=conn)
-    second = _search_impl(
-        "text", mode="keyword", limit=1, offset=first["next_offset"], project_id="p1", conn=conn
-    )
-    assert len(both["items"]) == 2
-    assert first["items"] + second["items"] == both["items"]
-    assert first["total"] is None
+def test_search_pages_continue_the_same_ranking() -> None:
+    """Pages must cut one ranking, even where the store's over-fetch grows with k.
+
+    200 chunks match; the best (most "beta") are inserted last, so the
+    keyword leg's unordered per-term LIMIT picks a different pool for a
+    bigger k. Paging by 5 used to miss 15 of the true top 30.
+    """
+    c = connect(":memory:", embedding_dim=EMB_DIM)
+    chunks = [
+        _make_chunk(f"x{i:03d}", text="alpha filler " + "beta " * (i // 20)) for i in range(200)
+    ]
+    insert_chunks(c, chunks, project_id="p1")
+
+    paged: list[dict[str, Any]] = []
+    offset: int | None = 0
+    while offset is not None and offset < 30:
+        page = _search_impl(
+            "alpha beta", mode="keyword", limit=5, offset=offset, project_id="p1", conn=c
+        )
+        assert page["total"] is None
+        paged += page["items"]
+        offset = page["next_offset"]
+    whole = _search_impl("alpha beta", mode="keyword", limit=30, project_id="p1", conn=c)
+    assert paged == whole["items"]
+
+
+def test_search_paging_ends_at_the_pool(conn: Any) -> None:
+    from datasheet_rag.backend import SEARCH_POOL, LocalBackend
+
+    be = LocalBackend(conn=conn)
+    fake = [mock.sentinel.hit] * SEARCH_POOL
+    with mock.patch.object(LocalBackend, "_rank", return_value=fake):
+        assert len(be.search("q", k=10, offset=SEARCH_POOL - 4)) == 4
+        assert be.search("q", k=10, offset=SEARCH_POOL) == []
 
 
 def test_search_says_when_the_ranking_ran_out(conn: Any) -> None:
