@@ -55,7 +55,11 @@ def _run_server() -> None:
     import uvicorn
 
     host = os.environ.get("RAG_SERVER_HOST", "0.0.0.0")
-    port = int(os.environ.get("RAG_SERVER_PORT", "8080"))
+    port_s = os.environ.get("RAG_SERVER_PORT", "8080")
+    try:
+        port = int(port_s)
+    except ValueError:
+        sys.exit(f"rag-server: RAG_SERVER_PORT must be a port number, got {port_s!r}")
     logging.basicConfig(level=logging.INFO)
     logger.info("rag-server starting on %s:%s — %s", host, port, _startup_posture())
     uvicorn.run(app, host=host, port=port, log_level="info")

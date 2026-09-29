@@ -209,7 +209,16 @@ def _require_local_db(db_path: Path | None) -> Path:
 
 def _friendly_server_error(e: RagServerError) -> click.ClickException:
     """Turn a RagServerError into an actionable CLI message (esp. auth)."""
+    import httpx
+
     code = getattr(e, "status_code", None)
+    if code == 0 and isinstance(e.__cause__, httpx.HTTPError):
+        # The request never got an answer. Status 0 alone is not enough: the
+        # embedding-dimension checks also use it for an answer they did get.
+        return click.ClickException(
+            f"Could not get an answer from the RAG server ({e.detail}). Check that "
+            "it is running and that RAG_SERVER_URL points at it."
+        )
     if code == 401:
         return click.ClickException(
             "Server rejected the credentials (401). Check RAG_SERVER_TOKEN — "
@@ -224,15 +233,14 @@ def _friendly_server_error(e: RagServerError) -> click.ClickException:
 
 
 def _backend_resolve(be: RagBackend, doc_id: str) -> str:
-    """Resolve a doc_id prefix via the backend, turning errors into ClickException."""
-    from datasheet_rag.backend import RagServerError
+    """Resolve a doc_id prefix via the backend, turning a miss into ClickException.
 
+    A server error is left to the root group, which reports it the same way.
+    """
     try:
         return be.resolve_doc_id(doc_id)
     except ValueError as e:
         raise click.ClickException(str(e)) from e
-    except RagServerError as e:
-        raise _friendly_server_error(e) from e
 
 
 def _short_chunk_id(chunk_id: str, doc_id: str) -> str:
@@ -314,14 +322,29 @@ class OrderedGroup(click.Group):
         return known + sorted(set(self.commands) - set(known))
 
     def invoke(self, ctx: click.Context) -> Any:
-        # A broken .rag.toml can surface from any command that resolves a
-        # project scope; report it as a plain CLI error, not a traceback.
+        # Errors a user can cause and fix — a broken .rag.toml, an unreachable
+        # or rejecting server — can surface from almost any command, so they
+        # are turned into a plain CLI message here once rather than in every
+        # command (GH #36). Anything else is a bug: its traceback is kept, with
+        # a line saying so, because that is what the developer needs to see.
+        from datasheet_rag.backend.base import RagServerError
         from datasheet_rag.project_config import ProjectConfigError
 
         try:
             return super().invoke(ctx)
         except ProjectConfigError as e:
             raise click.ClickException(str(e)) from e
+        except RagServerError as e:
+            raise _friendly_server_error(e) from e
+        except (click.ClickException, click.exceptions.Exit, click.Abort, EOFError):
+            # Click's own control flow; it reports these itself.
+            raise
+        except Exception:
+            click.echo(
+                "An unexpected error happened. Please report the following to the developer:",
+                err=True,
+            )
+            raise
 
 
 def _parse_attr_items(items: tuple[str, ...]) -> dict[str, str]:
@@ -894,7 +917,6 @@ def stats_cmd(
     A quick sanity check on corpus size (e.g. after ingesting: does the
     chunk count look right?). Same rollup as the MCP `stats` tool.
     """
-    from datasheet_rag.backend import RagServerError
     from datasheet_rag.project_config import resolve_cli_project_id
 
     project_id = resolve_cli_project_id(project_id, is_global=is_global)
@@ -902,10 +924,7 @@ def stats_cmd(
     if doc_id:
         doc_id = _backend_resolve(be, doc_id)
 
-    try:
-        result = be.stats(project_id=project_id, doc_id=doc_id)
-    except RagServerError as e:
-        raise _friendly_server_error(e) from e
+    result = be.stats(project_id=project_id, doc_id=doc_id)
 
     scope_bits = []
     if result.project_id:
@@ -1068,8 +1087,6 @@ def get_doc_cmd(
             pdf_viewer.prime_pdf_cache(doc_id, be.get_pdf_bytes(doc_id))
         except FileNotFoundError as exc:
             raise click.ClickException(str(exc)) from exc
-        except Exception as exc:
-            raise click.ClickException(str(exc)) from exc
 
         port = pdf_viewer.ensure_pdf_server()
         local_url = f"http://127.0.0.1:{port}/viewer/{doc_id}#page={page}"
@@ -1101,8 +1118,6 @@ def get_doc_cmd(
     try:
         data = be.get_pdf_bytes(doc_id)
     except FileNotFoundError as exc:
-        raise click.ClickException(str(exc)) from exc
-    except Exception as exc:  # RagServerError, etc.
         raise click.ClickException(str(exc)) from exc
 
     short_id = doc_id[:SHORT_DOC_ID_LEN]
@@ -1171,8 +1186,6 @@ def get_page_cmd(
         pdf_bytes = be.get_pdf_bytes(doc_id)
     except FileNotFoundError as exc:
         raise click.ClickException(str(exc)) from exc
-    except Exception as exc:
-        raise click.ClickException(str(exc)) from exc
 
     try:
         images = convert_from_bytes(pdf_bytes, first_page=page, last_page=page, dpi=dpi)
@@ -1239,10 +1252,7 @@ def delete_doc_cmd(doc_id: str, db_path: Path | None, dry_run: bool, assume_yes:
             console.print("[yellow]Aborted.[/]")
             return
 
-    try:
-        deleted = be.delete_doc(doc_id)
-    except Exception as exc:  # RagServerError, etc.
-        raise click.ClickException(str(exc)) from exc
+    deleted = be.delete_doc(doc_id)
 
     console.print(f"[green]Deleted[/] {deleted} chunk(s) for {label}.")
 
@@ -1669,25 +1679,20 @@ def embed(
         "Embedding & writing via the backend "
         f"(the embedding model runs {'here' if compute_mode() == 'client' else 'on the server'})…"
     )
-    from datasheet_rag.backend import RagServerError
-
-    try:
-        result = be.ingest_chunk_graph(
-            graph,
-            figures=figures_upload,
-            project_id=project_id,
-            group_name=group_name,
-            metadata=MetadataPatch(),
-            embed=True,
-            describe_figures=False,
-            # The parse that produced this cached graph ran here, so the PDF
-            # is in this machine's pdf_dir and a remote store has never seen
-            # it. Only offered if it is actually there — a graph can outlive
-            # the file it came from (GH #43).
-            source_pdf=local_pdf if local_pdf.is_file() else None,
-        )
-    except RagServerError as e:
-        raise _friendly_server_error(e) from e
+    result = be.ingest_chunk_graph(
+        graph,
+        figures=figures_upload,
+        project_id=project_id,
+        group_name=group_name,
+        metadata=MetadataPatch(),
+        embed=True,
+        describe_figures=False,
+        # The parse that produced this cached graph ran here, so the PDF
+        # is in this machine's pdf_dir and a remote store has never seen
+        # it. Only offered if it is actually there — a graph can outlive
+        # the file it came from (GH #43).
+        source_pdf=local_pdf if local_pdf.is_file() else None,
+    )
     console.print(f"[green]Inserted[/] {result.inserted} chunks.")
     _report_pruned(result.pruned, indent="")
     # Vectors now match the stored text again.
@@ -1748,7 +1753,6 @@ def search(
 ) -> None:
     """Search the RAG store (local sqlite or remote server) with hybrid /
     vector / keyword retrieval. The query is embedded by the backend."""
-    from datasheet_rag.backend import RagServerError
     from datasheet_rag.models.chunk import ChunkLevel
     from datasheet_rag.project_config import resolve_cli_project_id
     from datasheet_rag.store import SearchFilters
@@ -1756,7 +1760,7 @@ def search(
     project_id = resolve_cli_project_id(project_id, is_global=is_global)
     be = _backend_for(db_path)
 
-    resolved_doc_ids = [be.resolve_doc_id(d) for d in doc_ids]
+    resolved_doc_ids = [_backend_resolve(be, d) for d in doc_ids]
 
     level_enum = None
     if level:
@@ -1773,10 +1777,7 @@ def search(
         level=level_enum,
     )
 
-    try:
-        results = be.search(query, mode=mode, k=top_k, filters=filters)
-    except RagServerError as e:
-        raise _friendly_server_error(e) from e
+    results = be.search(query, mode=mode, k=top_k, filters=filters)
 
     if not results:
         console.print("[yellow]No results.[/]")
@@ -1914,16 +1915,10 @@ def get_chunk_cmd(
     prefix, e.g. ``ab12cd34ef56:L2:143`` as printed by `rag search` /
     `rag inspect figures`.
     """
-    from datasheet_rag.backend import RagServerError
-
     be = _backend_for(db_path)
     full_id = _resolve_chunk_id(be, chunk_id)
 
-    try:
-        chunk = be.get_chunk(full_id)
-    except RagServerError as e:
-        raise _friendly_server_error(e) from e
-
+    chunk = be.get_chunk(full_id)
     if chunk is None:
         raise click.ClickException(f"No chunk found with id {full_id!r}.")
 
@@ -1937,10 +1932,7 @@ def get_chunk_cmd(
             if not nid:
                 console.print("[dim]— none —[/]")
                 continue
-            try:
-                nchunk = be.get_chunk(nid)
-            except RagServerError as e:
-                raise _friendly_server_error(e) from e
+            nchunk = be.get_chunk(nid)
             if nchunk is None:
                 console.print(f"[dim]{nid} (not found)[/]")
                 continue
@@ -2075,15 +2067,11 @@ def get_figure_cmd(chunk_id: str, output_path: Path | None, db_path: Path | None
     prefix, e.g. ``ab12cd34ef56:L2:143`` as printed by `rag inspect figures` /
     `rag search`. This is the CLI equivalent of the MCP `get_figure` tool.
     """
-    from datasheet_rag.backend import RagServerError
-
     be = _backend_for(db_path)
     full_id = _resolve_chunk_id(be, chunk_id)
 
     try:
         fig = be.get_figure_bytes(full_id)
-    except RagServerError as e:
-        raise _friendly_server_error(e) from e
     except (ValueError, FileNotFoundError) as e:
         raise click.ClickException(str(e)) from e
 
@@ -3050,13 +3038,19 @@ def _report_pruned(pruned: int, indent: str = "  ") -> None:
 def _parse_page_range(spec: str) -> tuple[int, int]:
     """Parse '36' or '36-40' into a 1-based inclusive (start, end) pair."""
     spec = spec.strip()
-    if "-" in spec:
-        start_s, _, end_s = spec.partition("-")
-        start, end = int(start_s), int(end_s)
-    else:
-        start = end = int(spec)
+    bad = click.BadParameter(
+        f"invalid page range {spec!r} (expected e.g. '36' or '36-40')", param_hint="--pages"
+    )
+    try:
+        if "-" in spec:
+            start_s, _, end_s = spec.partition("-")
+            start, end = int(start_s), int(end_s)
+        else:
+            start = end = int(spec)
+    except ValueError:
+        raise bad from None
     if start < 1 or end < start:
-        raise click.BadParameter(f"invalid page range {spec!r} (expected e.g. '36' or '36-40')")
+        raise bad
     return start, end
 
 
@@ -3508,7 +3502,10 @@ def repair_tables_cmd(
     for el, reason in candidates:
         by_page.setdefault(el.page, []).append((el, reason))
 
-    pdf_bytes = load_pdf_bytes(did)
+    try:
+        pdf_bytes = load_pdf_bytes(did)
+    except FileNotFoundError as exc:
+        raise click.ClickException(str(exc)) from exc
 
     repaired_count = 0
     llm_count = 0
@@ -3711,7 +3708,7 @@ def metadata_cmd(
     )
     if is_read:
         be = _backend_for(db_path)
-        existing = be.get_metadata(be.resolve_doc_id(doc_id))
+        existing = be.get_metadata(_backend_resolve(be, doc_id))
         if existing is None:
             console.print(f"[yellow]No metadata recorded for[/] {doc_id}")
             return
@@ -3739,7 +3736,7 @@ def metadata_cmd(
         attributes[key] = None
 
     be = _backend_for(db_path)
-    doc_id = be.resolve_doc_id(doc_id)
+    doc_id = _backend_resolve(be, doc_id)
 
     # Merge --mpn-alias values into the mpn field as a comma-separated list.
     if mpn_aliases:
@@ -4355,11 +4352,18 @@ def _admin_request(method: str, path: str, *, token: str | None, **kwargs: Any) 
         raise click.ClickException("401: missing/invalid token (need an admin key).")
     if resp.status_code == 403:
         raise click.ClickException("403: this token lacks the 'admin' scope.")
+    try:
+        body: dict[str, Any] = resp.json()
+    except ValueError:
+        body = {}
+        if resp.status_code < 400:
+            raise click.ClickException(
+                f"{base} did not return JSON — is RAG_SERVER_URL pointing at a RAG server?"
+            ) from None
     if resp.status_code == 404:
-        raise click.ClickException(f"404: {resp.json().get('detail', resp.text)}")
+        raise click.ClickException(f"404: {body.get('detail', resp.text)}")
     if resp.status_code >= 400:
         raise click.ClickException(f"{resp.status_code}: {resp.text}")
-    body: dict[str, Any] = resp.json()
     return body
 
 
