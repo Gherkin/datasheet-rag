@@ -270,7 +270,7 @@ class RemoteBackend(RagBackend):
         return resp
 
     def _json(self, method: str, path: str, **kw: Any) -> Any:
-        return self._request(method, path, **kw).json()
+        return _decode(self._request(method, path, **kw))
 
     # -- search --------------------------------------------------------
     def search(
@@ -307,7 +307,7 @@ class RemoteBackend(RagBackend):
         resp = self._request("GET", f"/chunks/{chunk_id}")
         if resp.status_code == 204:
             return None
-        return Chunk.model_validate(resp.json())
+        return Chunk.model_validate(_decode(resp))
 
     def get_children(self, chunk_id: str) -> list[Chunk]:
         data = self._json("GET", f"/chunks/{chunk_id}/children")
@@ -363,7 +363,7 @@ class RemoteBackend(RagBackend):
         resp = self._request("GET", f"/documents/{doc_id}/metadata")
         if resp.status_code == 204:
             return None
-        return DocMetadata.model_validate(resp.json())
+        return DocMetadata.model_validate(_decode(resp))
 
     def set_metadata(self, doc_id: str, patch: MetadataPatch) -> DocMetadata:
         data = self._json(
@@ -795,6 +795,23 @@ def _iter_sse(lines: Any) -> Iterator[tuple[str, dict[str, Any]]]:
             data_lines.append(value)
     if data_lines:  # stream ended without a trailing blank line
         yield event, json.loads("\n".join(data_lines))
+
+
+def _decode(resp: httpx.Response) -> Any:
+    """Parse a 2xx response body as JSON, or say plainly that it is not JSON.
+
+    A RAG_SERVER_URL that points at the wrong host, or at a proxy's own page,
+    answers 200 with HTML. Left to ``resp.json()`` that is a bare decode error
+    no caller catches; as a RagServerError it reaches the user as a server
+    problem they can act on (GH #36).
+    """
+    try:
+        return resp.json()
+    except ValueError as exc:
+        raise RagServerError(
+            resp.status_code,
+            f"{resp.request.url} did not return JSON — is RAG_SERVER_URL pointing at a RAG server?",
+        ) from exc
 
 
 def _drop_none(**kw: Any) -> dict[str, Any]:
