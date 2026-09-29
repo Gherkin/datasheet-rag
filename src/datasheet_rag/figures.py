@@ -311,10 +311,12 @@ def _find_preceding_text(
 # 300 DPI is ~26 MB of RGB before anything is cropped from it. Everything below
 # is written to keep a bounded number of them resident at once (GH #59).
 _RGB_BYTES_PER_PX = 3
-# A page costs more than its finished RGB buffer while it is being produced:
-# the PyMuPDF pixmap and the PIL copy coexist, and the PNG encoder allocates on
-# top of both. Three times the pixel data is the honest per-slot figure.
-_RENDER_OVERHEAD_FACTOR = 3
+# While a page is produced its PyMuPDF pixmap (packed RGB) and the PIL copy
+# coexist. PIL keeps "RGB" padded to four bytes a pixel, so that copy is the
+# bigger of the two. The pixmap is freed before the PNG save, and the save does
+# not raise the peak past this sum. Measured at 300 DPI on an A2 page (GH #63).
+_PIL_RGB_BYTES_PER_PX = 4
+_SLOT_BYTES_PER_PX = _RGB_BYTES_PER_PX + _PIL_RGB_BYTES_PER_PX
 
 
 def _render_budget_mb() -> int:
@@ -377,7 +379,7 @@ def _page_slot_bytes(pdf_path: Path, pages: list[int], dpi: int) -> int:
         pass
     if largest == 0:
         largest = int(_A4_WIDTH_PT * scale) * int(_A4_HEIGHT_PT * scale)
-    return largest * _RGB_BYTES_PER_PX * _RENDER_OVERHEAD_FACTOR
+    return largest * _SLOT_BYTES_PER_PX
 
 
 def _render_window_size(slot_bytes: int, budget_bytes: int, n_pages: int) -> int:
@@ -500,8 +502,11 @@ def iter_pdf_pages(
         try:
             with fitz.open(pdf_path_str) as doc:
                 pix = doc[page_no - 1].get_pixmap(matrix=fitz.Matrix(mat_scale, mat_scale))
-                img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
-                del pix  # the pixmap doubles this page's footprint until it goes
+                # samples_mv is a view on the pixmap, where .samples would copy
+                # it to bytes first. frombytes copies at once, so the view never
+                # outlives pix; frombuffer could alias it and must not be used.
+                img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples_mv)
+                del pix  # the pixmap adds to this page's footprint until it goes
         except Exception as exc:
             raise PageRenderError(
                 stage="rendering a page", path=pdf_path, page=page_no, cause=exc
