@@ -414,10 +414,16 @@ def test_slot_sizing_keeps_what_it_measured_before_a_failure(
     assert measured == a2_slot > a4_slot
 
 
-# The child reports, on stderr, how far one A2 page at 300 DPI pushed peak RSS above what
-# the process had already touched, next to the slot the window was sized with.
-# A warm-up render first pulls in the pool, the progress bar and PyMuPDF's
-# fonts, so the baseline holds everything except the page itself.
+# The child reports, on stderr, how far one page at 300 DPI pushed peak RSS
+# above what the process had already touched, next to the slot the window was
+# sized with and the slot the page area alone would give. A warm-up render
+# first pulls in the pool, the progress bar and PyMuPDF's fonts, so the
+# baseline holds everything except the page itself.
+#
+# The pages: "a2" is text on an A2 page. "image" is a letter page covered by a
+# 3000 x 3000 RGB image, which MuPDF decodes and then scales down. "group" is a
+# letter page drawn through a form with a transparency group, which gets its
+# own page-sized buffer. Real datasheets do both (GH #81).
 #
 # The peak is VmHWM, not ru_maxrss: ru_maxrss survives exec, so a child of a
 # pytest process that has grown past one page would report the parent's peak.
@@ -425,17 +431,37 @@ _PEAK_PROBE = """
 import sys
 from pathlib import Path
 import fitz
-from datasheet_rag.figures import _page_slot_bytes, iter_pdf_pages
+from datasheet_rag.figures import _SLOT_BYTES_PER_PX, _page_slot_bytes, iter_pdf_pages
 
 def peak_bytes():
     with open("/proc/self/status") as f:
         return next(int(l.split()[1]) for l in f if l.startswith("VmHWM:")) * 1024
 
-tmp = Path(sys.argv[1])
-for name, (w, h) in {"small": (100, 100), "a2": (1191, 1684)}.items():
+tmp, kind = Path(sys.argv[1]), sys.argv[2]
+LETTER = (612, 792)
+
+def text_page(name, size):
     doc = fitz.open()
-    doc.new_page(width=w, height=h).insert_text((50, 50), name)
-    doc.save(str(tmp / f"{name}.pdf"))
+    doc.new_page(width=size[0], height=size[1]).insert_text((50, 50), name)
+    return doc
+
+pdfs = {"small": text_page("small", (100, 100)), "a2": text_page("a2", (1191, 1684))}
+if kind == "image":
+    doc = fitz.open()
+    page = doc.new_page(width=LETTER[0], height=LETTER[1])
+    pix = fitz.Pixmap(fitz.csRGB, 3000, 3000, bytes((40, 90, 160)) * (3000 * 3000), False)
+    page.insert_image(page.rect, pixmap=pix, keep_proportion=False)
+    pdfs["image"] = doc
+if kind == "group":
+    content = text_page("group", LETTER)
+    doc = fitz.open()
+    page = doc.new_page(width=LETTER[0], height=LETTER[1])
+    page.show_pdf_page(page.rect, content, 0)
+    for xref, *_ in page.get_xobjects():
+        doc.xref_set_key(xref, "Group", "<</Type/Group/S/Transparency>>")
+    pdfs["group"] = doc
+for name, doc in pdfs.items():
+    doc.save(str(tmp / f"{name}.pdf"), deflate=True)
     doc.close()
 
 def render(name):
@@ -444,37 +470,45 @@ def render(name):
 
 render("small")
 base = peak_bytes()
-render("a2")
+render(kind)
 peak = peak_bytes()
-print(peak - base, _page_slot_bytes(tmp / "a2.pdf", [1], 300), file=sys.stderr)
+with fitz.open(str(tmp / f"{kind}.pdf")) as doc:
+    rect = doc[0].rect
+area_slot = int(rect.width * 300 / 72) * int(rect.height * 300 / 72) * _SLOT_BYTES_PER_PX
+print(peak - base, _page_slot_bytes(tmp / f"{kind}.pdf", [1], 300), area_slot, file=sys.stderr)
 """
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="reads VmHWM from /proc")
-def test_one_page_stays_within_its_slot(tmp_path: Path) -> None:
+@pytest.mark.parametrize("kind", ["a2", "image", "group"])
+def test_one_page_stays_within_its_slot(tmp_path: Path, kind: str) -> None:
     """Rendering and caching one page fits the slot the window budgets for it.
 
     The slot is what turns RAG_RENDER_MEMORY_BUDGET_MB into a worker count, so
     a slot smaller than the real footprint lets the pool overshoot the budget
     (GH #59). Reading the pixmap through ``.samples`` instead of
-    ``.samples_mv`` adds a third full copy and fails this (GH #63). It runs in
-    a fresh interpreter because the peak is a high-water mark for the whole
+    ``.samples_mv`` adds a third full copy and fails this (GH #63). Sizing the
+    image and group pages by their area alone fails it too (GH #81). It runs
+    in a fresh interpreter because the peak is a high-water mark for the whole
     process, and earlier tests would already have set it.
     """
     out = subprocess.run(
-        [sys.executable, "-c", _PEAK_PROBE, str(tmp_path)],
+        [sys.executable, "-c", _PEAK_PROBE, str(tmp_path), kind],
         capture_output=True,
         text=True,
         check=True,
     ).stderr.splitlines()  # stdout carries the progress bar
     # The report is the last line; a warning on stderr may come before it.
-    grew, slot = (int(v) for v in out[-1].split())
+    grew, slot, area_slot = (int(v) for v in out[-1].split())
 
     # The page must actually have been measured, or the check below is empty.
     assert grew > slot // 2
     # A few percent of slack for allocator rounding; the .samples copy would
     # add ~40%.
     assert grew <= slot * 1.05
+    if kind != "a2":
+        # Otherwise this page would pass without the drawing being counted.
+        assert grew > area_slot * 1.05
 
 
 # One solid-colour 2000 x 2000 image per page: 12 MB each once decoded, but
@@ -567,8 +601,9 @@ def test_decoded_images_do_not_pile_up_across_pages(tmp_path: Path) -> None:
     MuPDF's store used to keep them all, up to its own cap and outside the
     render budget (GH #79). Twelve pages of 12 MB images then grew the process
     by about 200 MB; with the store emptied after each page, only the page in
-    flight holds its image. It runs in a fresh interpreter because the peak is
-    a high-water mark for the whole process.
+    flight holds its image. Sizing the window reads every page's images first
+    (GH #81), and must not pile them up either. It runs in a fresh interpreter
+    because the peak is a high-water mark for the whole process.
     """
     _write_image_pdf(tmp_path / "images.pdf")
     out = subprocess.run(
