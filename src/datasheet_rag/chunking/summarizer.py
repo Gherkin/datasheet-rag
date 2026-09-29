@@ -44,6 +44,7 @@ CONTENT_WEIGHTS: dict[LayoutType, float] = {
     LayoutType.TABLE: 1.5,  # Tables with specs are high-value
     LayoutType.KEY_VALUE: 1.4,  # Key-value pairs (specs, params)
     LayoutType.FIGURE: 0.8,  # Figures contribute via captions
+    LayoutType.FORMULA: 1.0,  # Formulas relate the specs around them
     LayoutType.LIST: 1.0,  # Lists (feature lists, etc.)
     LayoutType.TEXT: 1.0,  # Regular text
     LayoutType.HEADER: 0.3,  # Headers are structural, less content
@@ -487,6 +488,8 @@ def _micro_digest_prompt(
         )
     elif layout_type == LayoutType.FIGURE:
         type_hint = "This is a figure or diagram. Describe what it shows."
+    elif layout_type == LayoutType.FORMULA:
+        type_hint = "This is a formula. State what it computes."
     elif layout_type == LayoutType.KEY_VALUE:
         type_hint = "This contains key-value specification pairs."
 

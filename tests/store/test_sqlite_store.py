@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 
@@ -792,6 +793,23 @@ def test_list_figure_chunks_filters_and_image_required(
     assert by_doc == []
 
 
+def test_list_figure_chunks_includes_formulas(conn: sqlite3.Connection, tmp_path: Path) -> None:
+    """A formula is cropped and described like a figure (GH #19)."""
+    from datasheet_rag.store import list_figure_chunks
+
+    img = tmp_path / "p042_formula000.png"
+    img.write_bytes(b"\x89PNGFAKE")
+    formula = _make_figure_chunk("fig:formula", image_path=str(img))
+    formula.metadata.layout_type = LayoutType.FORMULA
+    insert_chunks(conn, [_make_figure_chunk("fig:figure"), formula])
+
+    listed = {c.id: c for c in list_figure_chunks(conn, only_with_image=False)}
+    assert set(listed) == {"fig:figure", "fig:formula"}
+    assert listed["fig:formula"].metadata.layout_type == LayoutType.FORMULA
+    # Availability is checked for formulas too, so search can advertise them.
+    assert listed["fig:formula"].figure_available is True
+
+
 def test_update_figure_description_persists_and_folds_into_context(
     conn: sqlite3.Connection,
 ) -> None:
@@ -926,6 +944,27 @@ def test_reinsert_without_a_figure_source_keeps_the_stored_one(
     recropped = _make_figure_chunk("fig:keep", image_path="/tmp/figs/fig-1-v2.png")
     insert_chunks(conn, [recropped])
     assert get_chunk(conn, "fig:keep").figure_image_path == "/tmp/figs/fig-1-v2.png"
+
+
+def test_reinsert_as_another_layout_type_drops_the_stored_figure_fields(
+    conn: sqlite3.Connection,
+) -> None:
+    """Ids are positional: a formula landing on an old figure's id must not
+    inherit that figure's image or description (GH #19)."""
+    insert_chunks(conn, [_make_figure_chunk("pos:3", description="A timing diagram.")])
+
+    formula = _make_figure_chunk("pos:3", image_path=None, caption="")
+    formula.metadata.layout_type = LayoutType.FORMULA
+    formula.figure_s3_key = None
+    insert_chunks(conn, [formula])
+
+    after = get_chunk(conn, "pos:3")
+    assert after is not None
+    assert after.metadata.layout_type == LayoutType.FORMULA
+    assert after.figure_image_path is None
+    assert after.figure_s3_key is None
+    assert not after.figure_caption
+    assert after.figure_description is None
 
 
 def test_set_figure_source_relinks_and_preserves_a_curated_caption(

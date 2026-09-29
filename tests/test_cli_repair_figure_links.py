@@ -132,12 +132,32 @@ def test_a_page_whose_counts_disagree_is_left_alone(db_path: Path, figures_dir: 
 
     result = _run(db_path, "repair", "figure-links", "--apply")
     assert result.exit_code == 0, result.output
-    assert "page 3: 2 crop(s) vs 3 figure chunk(s)" in result.output
+    assert "page 3: 2 figure crop(s) vs 3 figure chunk(s)" in result.output
 
     conn = connect(db_path, embedding_dim=get_settings().embedding_dimensions)
     assert get_chunk(conn, f"{DOC}:L2:0").figure_image_path is None
     # Page 5 still paired off cleanly.
     assert get_chunk(conn, f"{DOC}:L2:2").figure_image_path is not None
+    conn.close()
+
+
+def test_a_formula_chunk_is_relinked_to_its_formula_crop(db_path: Path, figures_dir: Path) -> None:
+    """Page 5 holds a figure and a formula; each pairs with its own kind (GH #19)."""
+    (figures_dir / DOC / "p005_formula003.png").write_bytes(b"\x89PNGFORMULA")
+    formula = _figure_chunk(3, 5, text="[Formula]")
+    formula.metadata.layout_type = LayoutType.FORMULA
+    conn = connect(db_path, embedding_dim=get_settings().embedding_dimensions)
+    insert_chunks(conn, [formula], project_id="proj-a")
+    conn.commit()
+    conn.close()
+
+    result = _run(db_path, "repair", "figure-links", "--apply")
+    assert result.exit_code == 0, result.output
+    assert "Relinked 4" in result.output
+
+    conn = connect(db_path, embedding_dim=get_settings().embedding_dimensions)
+    assert get_chunk(conn, f"{DOC}:L2:2").figure_image_path.endswith("p005_fig002.png")
+    assert get_chunk(conn, f"{DOC}:L2:3").figure_image_path.endswith("p005_formula003.png")
     conn.close()
 
 

@@ -9,7 +9,7 @@ The context string includes:
   - Chapter title
   - Section title
   - Layout type hint (table, figure, etc.)
-  - For figures: caption and description
+  - For figures and formulas: caption and description
   - For tables: table title and column headers
 
 This produces two usable fields per chunk:
@@ -19,7 +19,7 @@ This produces two usable fields per chunk:
 
 from __future__ import annotations
 
-from datasheet_rag.models.chunk import Chunk, ChunkGraph, LayoutType
+from datasheet_rag.models.chunk import IMAGE_LAYOUT_TYPES, Chunk, ChunkGraph, LayoutType
 
 
 def enrich_context(graph: ChunkGraph) -> ChunkGraph:
@@ -57,6 +57,8 @@ def _build_context_string(chunk: Chunk, graph: ChunkGraph) -> str:
         parts.append("Content type: Table")
     elif meta.layout_type == LayoutType.FIGURE:
         parts.append("Content type: Figure/Diagram")
+    elif meta.layout_type == LayoutType.FORMULA:
+        parts.append("Content type: Formula")
     elif meta.layout_type == LayoutType.KEY_VALUE:
         parts.append("Content type: Specification/Key-Value")
     elif meta.layout_type == LayoutType.LIST:
@@ -89,8 +91,9 @@ def _build_context_text(chunk: Chunk, graph: ChunkGraph) -> str:
         parts.append(ctx)
         parts.append("---")
 
-    # Figure-specific context
-    if chunk.metadata.layout_type == LayoutType.FIGURE:
+    # Figure/formula context: a bare diagram or equation says little on its
+    # own, so the caption, description and neighbouring text carry it.
+    if chunk.metadata.layout_type in IMAGE_LAYOUT_TYPES:
         if chunk.figure_caption:
             parts.append(f"Caption: {chunk.figure_caption}")
         if chunk.figure_description:

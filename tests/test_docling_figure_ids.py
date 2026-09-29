@@ -96,6 +96,36 @@ def test_a_caption_after_a_dropped_picture_does_not_move_to_its_neighbour() -> N
     assert regions[0].caption == ""
 
 
+def test_a_docling_formula_reaches_the_index_as_a_linked_chunk() -> None:
+    """Parser to splitter: the formula's text and crop both survive (GH #19)."""
+    from datasheet_rag.chunking.splitter import split_document
+    from datasheet_rag.docling_parser import _build_outline
+    from datasheet_rag.models.chunk import LayoutType
+
+    items = [
+        _item(DocItemLabel.TITLE, text="Widget Manual"),
+        _item(DocItemLabel.TEXT, text="Ohm's law relates the three."),
+        _item(DocItemLabel.FORMULA, text="V = I * R"),
+    ]
+    region_ids = _region_ids(items)
+    manifest = {
+        "figures": [
+            {"block_id": bid, "page": 1, "image_path": f"/figs/{bid}.png"} for bid in region_ids
+        ]
+    }
+
+    graph = split_document(_build_outline(_doc(items), "doc1"), figure_manifest=manifest)
+
+    formulas = [
+        c
+        for c in graph.chunks.values()
+        if c.level.name == "MICRO" and c.metadata.layout_type == LayoutType.FORMULA
+    ]
+    assert [(c.text, c.figure_image_path) for c in formulas] == [
+        ("V = I * R", "/figs/docling_formula_1.png")
+    ]
+
+
 def test_formula_ids_use_their_own_counter() -> None:
     items = [
         _item(DocItemLabel.PICTURE),

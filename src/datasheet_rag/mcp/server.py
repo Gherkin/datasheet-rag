@@ -77,7 +77,7 @@ from datasheet_rag.backend import (
     get_backend,
 )
 from datasheet_rag.config import get_settings
-from datasheet_rag.models.chunk import ChunkLevel, LayoutType
+from datasheet_rag.models.chunk import IMAGE_LAYOUT_TYPES, ChunkLevel, LayoutType
 from datasheet_rag.store import DocMetadata, SearchFilters, SearchResult
 
 # ---------------------------------------------------------------------------
@@ -249,7 +249,8 @@ def _shape_chunk(result_or_chunk: Any, *, score: float | None = None) -> dict[st
     if pages:
         page = str(pages[0]) if len(pages) == 1 else f"{pages[0]}-{pages[-1]}"
 
-    is_figure = chunk.metadata.layout_type == LayoutType.FIGURE
+    # A formula is cropped like a figure, so it is served like one (GH #19).
+    is_figure = chunk.metadata.layout_type in IMAGE_LAYOUT_TYPES
     has_figure = is_figure and _figure_is_retrievable(chunk)
 
     out: dict[str, Any] = {
@@ -345,8 +346,10 @@ def _chunk_fields_help(source_page_tool: str) -> str:
 
     return f"""Fields a chunk result may carry, and what they mean:
 
-- `has_figure: true` — the chunk is a diagram, schematic or curve and
-  its image can be served. `show_figure(chunk_id)` renders it inline;
+- `has_figure: true` — the chunk is a diagram, schematic, curve or
+  formula and its image can be served. On a formula chunk,
+  `figure_description` is the formula in LaTeX, then a line starting
+  `Computes:` that says what it calculates. `show_figure(chunk_id)` renders it inline;
   `get_figure(chunk_id)` returns the bytes. Show a figure whenever it
   illustrates what the user asked about; offer it when unsure.
 - `figure_status: "image_not_stored"` — this chunk's image is absent
@@ -760,8 +763,8 @@ def build_server(
             "`navigate` with direction='next' to read sequentially. "
             "\n\n"
             "Figures: search and get_chunk results include `has_figure: "
-            "true` when the chunk is a diagram, schematic, or block-diagram "
-            "AND its image can actually be served. Use `figure_description` "
+            "true` when the chunk is a diagram, schematic, block-diagram or "
+            "formula AND its image can actually be served. Use `figure_description` "
             "and `figure_caption` to reason about the content without "
             "fetching it. A chunk whose text reads like a figure but which "
             "carries `has_figure: false` has no image behind it — its "
@@ -839,7 +842,7 @@ def build_server(
         - `doc_id`: restrict to a single document.
         - `level`: 'macro' (chapter summaries), 'meso' (subsections),
                    'micro' (paragraphs / tables).
-        - `layout_types`: restrict to text/table/figure/key_value/list.
+        - `layout_types`: restrict to text/table/figure/formula/key_value/list.
         """
         return _search_impl(
             query,

@@ -34,7 +34,7 @@ from datasheet_rag.backend.models import (
     TitleContext,
 )
 from datasheet_rag.config import get_settings
-from datasheet_rag.models.chunk import Chunk, ChunkGraph, ChunkLevel, LayoutType
+from datasheet_rag.models.chunk import IMAGE_LAYOUT_TYPES, Chunk, ChunkGraph, ChunkLevel
 from datasheet_rag.store import (
     DocMetadata,
     SearchFilters,
@@ -385,7 +385,7 @@ class LocalBackend(RagBackend):
         chunk = get_chunk(self._get_conn(), chunk_id)
         if chunk is None:
             raise FigureNotFoundError(f"unknown chunk_id: {chunk_id}")
-        if chunk.metadata.layout_type != LayoutType.FIGURE:
+        if chunk.metadata.layout_type not in IMAGE_LAYOUT_TYPES:
             raise FigureNotFoundError(
                 f"chunk {chunk_id} is not a figure (layout_type={chunk.metadata.layout_type.value})"
             )
@@ -566,7 +566,7 @@ class LocalBackend(RagBackend):
         #     COALESCE keep whatever good source the row already had.
         dropped = 0
         for chunk in graph.chunks.values():
-            if chunk.metadata.layout_type != LayoutType.FIGURE:
+            if chunk.metadata.layout_type not in IMAGE_LAYOUT_TYPES:
                 continue
             if chunk.figure_image_path and not figure_source_available(
                 chunk.figure_image_path, chunk.figure_s3_key

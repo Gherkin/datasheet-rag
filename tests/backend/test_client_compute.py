@@ -840,6 +840,25 @@ def test_reingest_does_not_redescribe_stored_figures(monkeypatch, tmp_path) -> N
     assert "Description: A buck regulator" in figure_json["context_text"]
 
 
+def test_reingest_does_not_restore_a_description_onto_another_layout_type() -> None:
+    """Ids are positional: a formula that lands on an old figure's id must not
+    take that figure's description, or describe would skip it (GH #19)."""
+    did = "d" * 64
+    graph = _graph(did, figure=True)
+    graph.chunks[f"{did}:L2:1"].metadata.layout_type = LayoutType.FORMULA
+
+    stored = _graph(did, figure=True).chunks[f"{did}:L2:1"]
+    stored.figure_description = "A buck regulator block diagram."
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"chunks": [stored.model_dump(mode="json")]})
+
+    rb = _client_backend(handler)
+    rb._restore_stored_descriptions(graph)
+
+    assert graph.chunks[f"{did}:L2:1"].figure_description is None
+
+
 def test_client_compute_uploads_the_source_pdf(monkeypatch, tmp_path) -> None:
     """Client-side parse still owes the server the PDF (rag show, show_pdf)."""
     did = "e" * 64

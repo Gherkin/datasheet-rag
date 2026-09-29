@@ -81,6 +81,14 @@ def _figure_chunk(
     )
 
 
+def _formula_chunk(chunk_id: str, *, image_path: str, text: str = "[Formula]") -> Chunk:
+    chunk = _figure_chunk(chunk_id, image_path=image_path, caption="")
+    chunk.metadata.layout_type = LayoutType.FORMULA
+    chunk.text = text
+    chunk.figure_caption = None
+    return chunk
+
+
 def _text_chunk(chunk_id: str, text: str) -> Chunk:
     md = ChunkMetadata(
         doc_id="docA",
@@ -298,6 +306,180 @@ def test_describe_chunks_ignores_non_figure_inputs(
     describer = FigureDescriber(client=fake_client)
     out = describer.describe_chunks([fig, text], conn)
     assert set(out.keys()) == {"c-fig"}
+
+
+# ---------------------------------------------------------------------------
+# Formulas (GH #19) — transcribed into LaTeX, not described in prose
+# ---------------------------------------------------------------------------
+
+
+def _sent_request(client: Any) -> tuple[str, str]:
+    """The system prompt and user text of the last request sent."""
+    body = json.loads(client.invoke_model.call_args.kwargs["body"])
+    text = next(b["text"] for b in body["messages"][0]["content"] if b["type"] == "text")
+    return body["system"], text
+
+
+def test_a_formula_is_sent_with_the_latex_prompt(conn: Any, tmp_path: Any) -> None:
+    img = tmp_path / "formula.png"
+    img.write_bytes(b"\x89PNGFAKE")
+    formula = _formula_chunk("c-eq", image_path=str(img), text="V OUT = V REF (1 + R1 R2)")
+    insert_chunks(conn, [formula])
+
+    client = MagicMock()
+    client.invoke_model.return_value = _mock_bedrock_response(
+        "LATEX:\n"
+        r"V_{OUT} = V_{REF}\left(1 + \frac{R_1}{R_2}\right) \tag{1}"
+        "\nCOMPUTES:\nThe output voltage set by the feedback\ndivider R1/R2.\n"
+    )
+    out = FigureDescriber(client=client).describe_chunk_in_context(formula, conn)
+
+    # LaTeX for the symbols, one sentence for the quantity, both searchable.
+    assert out == (
+        r"V_{OUT} = V_{REF}\left(1 + \frac{R_1}{R_2}\right) \tag{1}"
+        "\nComputes: The output voltage set by the feedback divider R1/R2."
+    )
+    system, text = _sent_request(client)
+    assert "LaTeX" in system
+    assert "COMPUTES:" in system
+    assert "2-3 sentences" not in system
+    assert "Transcribe the formula" in text
+    # The parser's text is a useful hint for the model.
+    assert "V OUT = V REF (1 + R1 R2)" in text
+
+
+def test_a_formula_placeholder_is_not_offered_as_extracted_text(
+    conn: Any, fake_client: Any, tmp_path: Any
+) -> None:
+    img = tmp_path / "formula.png"
+    img.write_bytes(b"\x89PNGFAKE")
+    formula = _formula_chunk("c-eq", image_path=str(img), text="[Formula]")
+    insert_chunks(conn, [formula])
+
+    FigureDescriber(client=fake_client).describe_chunk_in_context(formula, conn)
+
+    _, text = _sent_request(fake_client)
+    assert "[Formula]" not in text
+    assert "extracted from the PDF" not in text
+
+
+def test_a_figure_still_gets_the_prose_prompt(conn: Any, fake_client: Any, tmp_path: Any) -> None:
+    img = tmp_path / "fig.png"
+    img.write_bytes(b"\x89PNGFAKE")
+    fig = _figure_chunk("c-fig", image_path=str(img))
+    insert_chunks(conn, [fig])
+
+    FigureDescriber(client=fake_client).describe_chunk_in_context(fig, conn)
+
+    system, text = _sent_request(fake_client)
+    assert "LaTeX" not in system
+    assert "Transcribe" not in text
+
+
+@pytest.mark.parametrize(
+    ("reply", "expected"),
+    [
+        ("```latex\nV = IR\n```", "V = IR"),
+        ("$$V = IR$$", "V = IR"),
+        ("\\[ V = IR \\]", "V = IR"),
+        # Two display blocks are two equations, not one wrapped one.
+        ("$$a = b$$ and $$c = d$$", "$$a = b$$ and $$c = d$$"),
+        ("V = IR", "V = IR"),
+        ("LATEX:\n```latex\nV = IR\n```\nCOMPUTES:\nOhm's law.", "V = IR\nComputes: Ohm's law."),
+        # Cut off at max_tokens before COMPUTES: keep the LaTeX, drop the tag.
+        ("LATEX:\nV = IR", "V = IR"),
+        # Docling labels table fragments and lone equation numbers as formulas.
+        ("NOT A FORMULA: A table fragment.", "Not a formula: A table fragment."),
+        # Seen on Bedrock: the model explains itself before the tag.
+        (
+            "I can only see fragments.\n\nNOT A FORMULA: Cut-off text.",
+            "Not a formula: Cut-off text.",
+        ),
+    ],
+)
+def test_a_formula_reply_is_normalised(reply: str, expected: str) -> None:
+    client = MagicMock()
+    client.invoke_model.return_value = _mock_bedrock_response(reply)
+    out = FigureDescriber(client=client).describe_one(
+        image_bytes=b"x", image_format="png", layout_type=LayoutType.FORMULA
+    )
+    assert out == expected
+
+
+def _chain(conn: Any, center: Chunk, before: list[str], after: list[str]) -> None:
+    """Insert *center* with text chunks linked before and after it, in order."""
+    ids = [f"b{i}" for i in range(len(before))] + [center.id] + [f"a{i}" for i in range(len(after))]
+    chunks = [_text_chunk(i, t) for i, t in zip(ids[: len(before)], before)]
+    chunks += [center] + [_text_chunk(i, t) for i, t in zip(ids[len(before) + 1 :], after)]
+    for prev, cur, nxt in zip([None, *ids[:-1]], ids, [*ids[1:], None]):
+        c = next(c for c in chunks if c.id == cur)
+        c.prev_id, c.next_id = prev, nxt
+    insert_chunks(conn, chunks)
+
+
+def test_a_formula_sees_the_where_list_after_it(conn: Any, tmp_path: Any) -> None:
+    """The symbols are defined one list item per chunk after the formula."""
+    from datasheet_rag.description.describer import surrounding_text_for
+
+    img = tmp_path / "eq.png"
+    img.write_bytes(b"\x89PNGEQ")
+    formula = _formula_chunk("c-eq", image_path=str(img))
+    _chain(
+        conn,
+        formula,
+        before=["x" * 700 + " The minimum input voltage is calculated as:"],
+        after=["(1)", "where", "RDS(ON) = High-side FET on-resistance", "RL = Inductor DCR"],
+    )
+
+    text = surrounding_text_for(conn, formula)
+
+    # The end of the paragraph before, not its start.
+    assert text.startswith("x") and "is calculated as:" in text
+    assert "RL = Inductor DCR" in text
+
+
+def test_a_figure_still_sees_only_its_next_sibling(conn: Any, tmp_path: Any) -> None:
+    from datasheet_rag.description.describer import surrounding_text_for
+
+    img = tmp_path / "fig.png"
+    img.write_bytes(b"\x89PNGFIG")
+    fig = _figure_chunk("c-fig", image_path=str(img))
+    _chain(conn, fig, before=["Intro. " + "y" * 700], after=["Next.", "Far away."])
+
+    text = surrounding_text_for(conn, fig)
+
+    assert text.startswith("Intro.")
+    assert "Next." in text
+    assert "Far away." not in text
+
+
+def test_describe_figures_in_store_transcribes_formulas_too(conn: Any, tmp_path: Any) -> None:
+    fig_img = tmp_path / "fig.png"
+    fig_img.write_bytes(b"\x89PNGFIG")
+    eq_img = tmp_path / "eq.png"
+    eq_img.write_bytes(b"\x89PNGEQ")
+    insert_chunks(
+        conn,
+        [
+            _figure_chunk("c-fig", image_path=str(fig_img)),
+            _formula_chunk("c-eq", image_path=str(eq_img)),
+        ],
+    )
+
+    client = MagicMock()
+    client.invoke_model.return_value = _mock_bedrock_response(
+        "LATEX:\nV = IR\nCOMPUTES:\nThe voltage across a resistor."
+    )
+    out = describe_figures_in_store(conn, describer=FigureDescriber(client=client))
+
+    assert set(out) == {"c-fig", "c-eq"}
+    from datasheet_rag.store import get_chunk
+
+    stored = get_chunk(conn, "c-eq")
+    assert stored is not None
+    assert stored.figure_description == "V = IR\nComputes: The voltage across a resistor."
+    # Both halves reach the embedded text, so either finds the formula.
+    assert "Description: V = IR\nComputes: The voltage across a resistor." in stored.context_text
 
 
 # ---------------------------------------------------------------------------
