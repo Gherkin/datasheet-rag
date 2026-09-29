@@ -466,8 +466,9 @@ def test_one_page_stays_within_its_slot(tmp_path: Path) -> None:
         capture_output=True,
         text=True,
         check=True,
-    ).stderr.split()  # stdout carries the progress bar
-    grew, slot = int(out[0]), int(out[1])
+    ).stderr.splitlines()  # stdout carries the progress bar
+    # The report is the last line; a warning on stderr may come before it.
+    grew, slot = (int(v) for v in out[-1].split())
 
     # The page must actually have been measured, or the check below is empty.
     assert grew > slot // 2
