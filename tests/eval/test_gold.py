@@ -94,6 +94,23 @@ def test_quote_the_store_lost_resolves_to_nothing(conn) -> None:
     assert resolve_gold_chunk_ids(conn, item) == []
 
 
+def test_a_figure_chunk_is_matched_on_its_description(conn) -> None:
+    # A drawing is stored as "[Figure]" text; its description is what search sees.
+    fig = Chunk(
+        id="doc1:L2:20",
+        doc_id="doc1",
+        level=ChunkLevel.MICRO,
+        text="[Figure]",
+        context_text="[Figure]",
+        token_count=1,
+        figure_description="Pinout shows 8 pins: DAT2, CD/DAT3, CMD, VDD, CLK, VSS, DAT0, DAT1.",
+        metadata=ChunkMetadata(doc_id="doc1", page_numbers=[70], layout_type=LayoutType.FIGURE),
+    )
+    insert_chunks(conn, [fig], vectors={fig.id: [1.0, 0.0, 0.0, 0.0]})
+    item = _item(evidence=[Evidence(page=70, quote="DAT2 CD/DAT3 CMD VDD CLK VSS DAT0 DAT1")])
+    assert resolve_gold_chunk_ids(conn, item) == ["doc1:L2:20"]
+
+
 def test_normalize_folds_extraction_variants() -> None:
     assert normalize("10 μA – 5 Ω") == normalize("10  µA - 5 Ω")
     # pdftotext renders an unmapped glyph as a control character.

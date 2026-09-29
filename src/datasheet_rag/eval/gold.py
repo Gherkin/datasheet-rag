@@ -66,8 +66,11 @@ def resolve_gold_chunk_ids(conn: sqlite3.Connection, item: GoldenItem) -> list[s
     """
     if not item.evidence or item.doc_id is None:
         return []
+    # A figure chunk's text is often just "[Figure]"; what search sees is its
+    # caption and vision description, so those count as the chunk's content.
     rows = conn.execute(
-        "SELECT id, level, page_numbers, text FROM chunks WHERE doc_id = ? ORDER BY rowid",
+        "SELECT id, level, page_numbers, text, figure_caption, figure_description "
+        "FROM chunks WHERE doc_id = ? ORDER BY rowid",
         (item.doc_id,),
     ).fetchall()
     gold: list[str] = []
@@ -75,11 +78,12 @@ def resolve_gold_chunk_ids(conn: sqlite3.Connection, item: GoldenItem) -> list[s
         want = tokens(ev.quote)
         if not want:
             continue
-        for chunk_id, level, pages_json, text in rows:
+        for chunk_id, level, pages_json, text, caption, description in rows:
             if level == ChunkLevel.MACRO.value or chunk_id in gold:
                 continue
             if ev.page not in json.loads(pages_json or "[]"):
                 continue
-            if len(want & tokens(text or "")) / len(want) >= COVERAGE:
+            have = tokens(" ".join(t for t in (text, caption, description) if t))
+            if len(want & have) / len(want) >= COVERAGE:
                 gold.append(chunk_id)
     return gold
