@@ -251,11 +251,14 @@ def keyword_search(
             JOIN chunks c ON c.rowid = chunk_fts.rowid
             WHERE chunk_fts MATCH ?
             {where_sql}
+            ORDER BY bm25(chunk_fts)
             LIMIT ?
         """
         params: list[object] = [escaped]
         params.extend(extra_params)
         # Over-fetch per keyword so rare-term matches aren't cut too early.
+        # The ORDER BY makes the limit keep the best matches: without it FTS5
+        # returns rowid order, and the limit kept the oldest chunks (GH #97).
         params.append(int(max(k * 4, 40)))
 
         for row in conn.execute(sql, params).fetchall():

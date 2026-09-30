@@ -483,6 +483,23 @@ def test_keyword_search_escapes_special_chars(conn: sqlite3.Connection) -> None:
     assert isinstance(results, list)
 
 
+def test_keyword_search_keeps_the_best_matches_not_the_oldest(conn: sqlite3.Connection) -> None:
+    """GH #97: each term's matches are cut to a limit; the cut must keep the
+    best, not the first-inserted. Sixty weak "vref" chunks come first and the
+    strongest match is inserted last, beyond the limit a small k gets."""
+    filler = "unrelated filler words about layout " * 8
+    chunks = [
+        _make_chunk(f"doc1:2:{i}", doc_id="doc1", level=ChunkLevel.MICRO, text=f"vref {filler}")
+        for i in range(60)
+    ]
+    chunks.append(
+        _make_chunk("doc9:2:0", doc_id="doc9", level=ChunkLevel.MICRO, text="vref vref vref")
+    )
+    insert_chunks(conn, chunks, vectors={c.id: _unit_vec(0) for c in chunks})
+
+    assert keyword_search(conn, "vref", k=5)[0].chunk_id == "doc9:2:0"
+
+
 def test_keyword_search_empty_query(conn: sqlite3.Connection) -> None:
     chunks = _seed_chunks()
     insert_chunks(conn, chunks, vectors=_seed_vectors(chunks))
