@@ -89,7 +89,10 @@ def paired_diff(
     a: Sequence[float],
     b: Sequence[float],
     clusters: Sequence[str],
-    **kw: object,
+    *,
+    n_resamples: int = N_RESAMPLES,
+    level: float = LEVEL,
+    seed: int = SEED,
 ) -> PairedDiff:
     """Compare two runs scored on the same items, in the same order.
 
@@ -103,7 +106,7 @@ def paired_diff(
     diff = sum(deltas) / len(deltas) if deltas else 0.0
     if deltas and all(d == 0.0 for d in deltas):
         return PairedDiff(diff=0.0, ci=Interval(lo=0.0, hi=0.0), verdict="no change")
-    ci = bootstrap_ci(deltas, clusters, **kw)  # type: ignore[arg-type]
+    ci = bootstrap_ci(deltas, clusters, n_resamples=n_resamples, level=level, seed=seed)
     if ci is None or ci.spans_zero():
         verdict: Verdict = "n too small"
     else:
