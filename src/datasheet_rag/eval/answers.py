@@ -117,6 +117,11 @@ def load_records(path: Path) -> list[AnswerRecord]:
         return [AnswerRecord.model_validate_json(line) for line in fh if line.strip()]
 
 
+def _temperatures(temps: Iterable[float | None]) -> str:
+    """``"0.0, default"``: None is the model's default temperature."""
+    return ", ".join(sorted("default" if t is None else str(t) for t in temps))
+
+
 def run_answers(
     needs: Sequence[Need],
     conditions: Sequence[Condition],
@@ -152,8 +157,8 @@ def run_answers(
     if other:
         raise ValueError(
             f"{out_path} already holds {model_id} runs at temperature "
-            f"{', '.join(str(t) for t in sorted(other, key=str))}; use a new --out for "
-            f"temperature {temperature}"
+            f"{_temperatures(other)}; use a new --out for temperature "
+            f"{_temperatures({temperature})}"
         )
     grade_pending(
         out_path,
@@ -579,7 +584,7 @@ def _graded_by_need(
     if len(temps) > 1:
         raise ValueError(
             f"condition {condition} was run at several temperatures "
-            f"({', '.join(str(t) for t in sorted(temps, key=str))}); compare one per file"
+            f"({_temperatures(temps)}); compare one per file"
         )
     return out
 

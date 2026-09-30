@@ -306,7 +306,7 @@ def test_temperature_is_recorded_and_not_mixed_in_one_file(tmp_path: Path) -> No
     assert [r.temperature for r in load_records(out)] == [0.0]
     # Resume at the same temperature is fine; the default would mix setups.
     _run(FakeModel(), out, _needs(2), conds=("C",), temperature=0.0)
-    with pytest.raises(ValueError, match="temperature"):
+    with pytest.raises(ValueError, match="at temperature 0.0; .* temperature default"):
         _run(FakeModel(), out, _needs(2), conds=("C",))
 
 
@@ -317,7 +317,7 @@ def test_compare_shows_each_sides_temperature(tmp_path: Path) -> None:
     cmp = compare_runs(load_records(base), load_records(variant), "C")
     assert (cmp.base.temperature, cmp.variant.temperature) == (None, 0.0)
     mixed = [*load_records(base), *load_records(variant)[:1]]
-    with pytest.raises(ValueError, match="several temperatures"):
+    with pytest.raises(ValueError, match=r"several temperatures \(0.0, default\)"):
         compare_runs(mixed, load_records(variant), "C")
 
 

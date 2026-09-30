@@ -4721,19 +4721,22 @@ def _run_answer_eval(
             f"${rec.cost_usd() or 0.0:.3f})"
         )
 
-    run_answers(
-        needs,
-        conds,
-        model_id=model_id,
-        judge_model=judge_model,
-        client=client,
-        toolset_for=toolset_for,
-        out_path=out_path,
-        workers=workers,
-        progress=progress,
-        max_usd=max_usd,
-        temperature=agent_temperature,
-    )
+    try:
+        run_answers(
+            needs,
+            conds,
+            model_id=model_id,
+            judge_model=judge_model,
+            client=client,
+            toolset_for=toolset_for,
+            out_path=out_path,
+            workers=workers,
+            progress=progress,
+            max_usd=max_usd,
+            temperature=agent_temperature,
+        )
+    except ValueError as e:
+        raise click.ClickException(str(e)) from e
     conn.close()
 
 
