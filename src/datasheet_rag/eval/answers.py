@@ -141,22 +141,16 @@ def run_answers(
     calls only, outside the cap: about a cent each). Their agent run is done
     and is not repeated.
     """
-    records = load_records(out_path)
-    ids = {n.need_id for n in needs}
-    if any(
-        _ungraded(r) and r.need_id in ids and r.condition in conditions and r.model == model_id
-        for r in records
-    ):
-        grade_pending(
-            out_path,
-            needs,
-            conditions,
-            model_id=model_id,
-            client=client,
-            judge_model=judge_model,
-            workers=workers,
-        )
-    done = {r.key for r in records if r.error is None}
+    grade_pending(
+        out_path,
+        needs,
+        conditions,
+        model_id=model_id,
+        client=client,
+        judge_model=judge_model,
+        workers=workers,
+    )
+    done = {r.key for r in load_records(out_path) if r.error is None}
     todo = [(n, c) for n in needs for c in conditions if (n.need_id, c, model_id) not in done]
     out_path.parent.mkdir(parents=True, exist_ok=True)
     write_lock = threading.Lock()
@@ -293,6 +287,8 @@ def _grade_records(
 ) -> tuple[int, list[str]]:
     records = load_records(path)
     targets = [r for r in records if select(r)]
+    if not targets:
+        return 0, []  # leave the file untouched
     failed: list[str] = []
     lock = threading.Lock()
 
@@ -421,7 +417,8 @@ def build_report(
             continue
         graded[r.condition][r.need_id] = r  # a later record wins
     # A run that failed and then succeeded on a rerun is not a failure.
-    failed = sorted(f"{n}/{c}" for n, c in errored if n not in graded[c])
+    # Nor is one whose rerun finished and only waits for its grade.
+    failed = sorted(f"{n}/{c}" for n, c in errored - pending if n not in graded[c])
     ungraded = sorted(f"{n}/{c}" for n, c in pending if n not in graded[c])
 
     all_ids = set().union(*(set(g) for g in graded.values())) if graded else set()

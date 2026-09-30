@@ -171,6 +171,15 @@ def test_judge_failing_again_leaves_the_answer_ungraded(tmp_path: Path) -> None:
     assert rec.grade is None and rec.grade_error and rec.error is None
 
 
+def test_failed_then_ungraded_is_listed_once(tmp_path: Path) -> None:
+    out = tmp_path / "answers.jsonl"
+    # The agent fails, then on the rerun it finishes but the judge fails.
+    _run(FakeModel(fail_once="question 0"), out, _needs(1), conds=("B",))
+    _run(FakeModel(judge_failures=1), out, _needs(1), conds=("B",))
+    report = build_report(load_records(out), ["B"], M)
+    assert report.ungraded == ["N0/B"] and report.failed == []
+
+
 def test_report_rates_and_paired_differences(tmp_path: Path) -> None:
     out = tmp_path / "answers.jsonl"
     _run(FakeModel(), out, _needs(12))

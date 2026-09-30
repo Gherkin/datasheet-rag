@@ -4565,7 +4565,7 @@ def eval_answer(
         )
         console.print(f"[cyan]Regraded[/] {n} answer(s) in {out_path} with {judge}.")
         for f in failed:
-            console.print(f"  [red]judge failed, old grade kept[/] {f}")
+            console.print(f"  [red]judge failed, old grade (if any) kept[/] {f}")
     elif not report_only:
         from datasheet_rag.costs import CLAUDE_TOKEN_PRICES
 
