@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from datasheet_rag.chunking.layout_parser import DocumentOutline
     from datasheet_rag.costs import CostEstimate
     from datasheet_rag.eval.ablation import IndexVariant
-    from datasheet_rag.eval.answers import AnswerReport, RunComparison
+    from datasheet_rag.eval.answers import AnswerRecord, AnswerReport, RunComparison
     from datasheet_rag.eval.harness import RunReport
     from datasheet_rag.eval.metrics import PairedComparison
     from datasheet_rag.eval.stats import Interval, PairedDiff
@@ -4517,21 +4517,8 @@ def eval_answer(
     """
     from datasheet_rag.eval.agent import Condition
     from datasheet_rag.eval.answers import build_report, load_records
-    from datasheet_rag.eval.dataset import load_need_ids, load_needs
 
-    needs = load_needs(needs_path)
-    wanted = set(need_ids)
-    if need_list is not None:
-        wanted |= set(load_need_ids(need_list))
-    if wanted:
-        unknown = wanted - {n.need_id for n in needs}
-        if unknown:
-            raise click.ClickException(f"unknown need id(s): {', '.join(sorted(unknown))}")
-        needs = [n for n in needs if n.need_id in wanted]
-    if limit is not None:
-        needs = needs[:limit]
-    if not needs:
-        raise click.ClickException("no needs selected")
+    needs = _select_needs(needs_path, need_ids, need_list, limit)
 
     if compare_path is not None:
         if report_only or regrade:
@@ -4608,6 +4595,52 @@ def eval_answer(
         console.print(f"[green]Report JSON →[/] {json_out}")
 
 
+def _select_needs(
+    needs_path: Path, need_ids: tuple[str, ...], need_list: Path | None, limit: int | None
+) -> list[Any]:
+    """The needs a run covers: all, or those named by --need-id / --need-list."""
+    from datasheet_rag.eval.dataset import load_need_ids, load_needs
+
+    needs = load_needs(needs_path)
+    wanted = set(need_ids)
+    if need_list is not None:
+        wanted |= set(load_need_ids(need_list))
+    if wanted:
+        unknown = wanted - {n.need_id for n in needs}
+        if unknown:
+            raise click.ClickException(f"unknown need id(s): {', '.join(sorted(unknown))}")
+        needs = [n for n in needs if n.need_id in wanted]
+    if limit is not None:
+        needs = needs[:limit]
+    if not needs:
+        raise click.ClickException("no needs selected")
+    return needs
+
+
+def _print_answer_progress(rec: AnswerRecord) -> None:
+    """One line per finished run."""
+    if rec.error is not None:
+        console.print(f"  [red]error[/] {rec.need_id} {rec.condition}: {rec.error.splitlines()[0]}")
+        return
+    assert rec.run is not None
+    if rec.grade is None:
+        console.print(
+            f"  [yellow]judge failed[/] {rec.need_id} {rec.condition}: {rec.grade_error} "
+            "(answer kept; the next run grades it)"
+        )
+        return
+    mark = (
+        "[green]grounded[/]"
+        if rec.grade.grounded
+        else ("[yellow]correct[/]" if rec.grade.correct else "[red]wrong[/]")
+    )
+    console.print(
+        f"  {rec.condition} {rec.need_id}: {mark} ({rec.grade.grader}, "
+        f"{len(rec.run.tool_calls)} calls, {rec.run.wall_s:.0f} s, "
+        f"${rec.cost_usd() or 0.0:.3f})"
+    )
+
+
 def _run_answer_eval(
     db_path: Path | None,
     needs: list[Any],
@@ -4632,7 +4665,7 @@ def _run_answer_eval(
         RagTools,
         ToolSet,
     )
-    from datasheet_rag.eval.answers import AnswerRecord, LockedEmbedder, run_answers
+    from datasheet_rag.eval.answers import LockedEmbedder, run_answers
     from datasheet_rag.store import connect, require_fts_in_sync
 
     # Building the MCP server turns on INFO logging, and the model download
@@ -4697,30 +4730,6 @@ def _run_answer_eval(
         + f", judge {judge_model}, cap ${max_usd:.2f} → {out_path}"
     )
 
-    def progress(rec: AnswerRecord) -> None:
-        if rec.error is not None:
-            console.print(
-                f"  [red]error[/] {rec.need_id} {rec.condition}: {rec.error.splitlines()[0]}"
-            )
-            return
-        assert rec.run is not None
-        if rec.grade is None:
-            console.print(
-                f"  [yellow]judge failed[/] {rec.need_id} {rec.condition}: {rec.grade_error} "
-                "(answer kept; the next run grades it)"
-            )
-            return
-        mark = (
-            "[green]grounded[/]"
-            if rec.grade.grounded
-            else ("[yellow]correct[/]" if rec.grade.correct else "[red]wrong[/]")
-        )
-        console.print(
-            f"  {rec.condition} {rec.need_id}: {mark} ({rec.grade.grader}, "
-            f"{len(rec.run.tool_calls)} calls, {rec.run.wall_s:.0f} s, "
-            f"${rec.cost_usd() or 0.0:.3f})"
-        )
-
     try:
         run_answers(
             needs,
@@ -4731,13 +4740,262 @@ def _run_answer_eval(
             toolset_for=toolset_for,
             out_path=out_path,
             workers=workers,
-            progress=progress,
+            progress=_print_answer_progress,
             max_usd=max_usd,
             temperature=agent_temperature,
         )
     except ValueError as e:
         raise click.ClickException(str(e)) from e
     conn.close()
+
+
+@eval_group.command(
+    "claude-code", short_help="The answer eval through Claude Code, paced on the usage meter."
+)
+@click.option(
+    "--needs",
+    "needs_path",
+    type=click.Path(exists=True, path_type=Path),
+    default=Path("eval/needs-mined.jsonl"),
+    help="Information needs with answer keys (JSONL).",
+)
+@click.option(
+    "--condition",
+    "conditions",
+    type=click.Choice(["A", "B", "C"]),
+    multiple=True,
+    help="A = no tool, B = raw PDF, C = datasheet-rag. Repeat; default all three.",
+)
+@click.option(
+    "--model",
+    "model_alias",
+    default="sonnet",
+    show_default=True,
+    help="Agent model, as Claude Code's --model takes it.",
+)
+@click.option(
+    "--judge-model",
+    "judge_alias",
+    default="opus",
+    show_default=True,
+    help="Judge model, as Claude Code's --model takes it.",
+)
+@click.option(
+    "--out",
+    "out_path",
+    type=click.Path(path_type=Path),
+    default=Path("eval/answers-claude-code.jsonl"),
+    show_default=True,
+    help="Graded runs are appended here; every invocation resumes from it.",
+)
+@click.option("--need-id", "need_ids", multiple=True, help="Run only these needs. Repeatable.")
+@click.option(
+    "--need-list",
+    type=click.Path(exists=True, path_type=Path),
+    default=None,
+    help="Run only the needs listed in this file, e.g. eval/needs-ab.txt.",
+)
+@click.option("--limit", default=None, type=int, help="Run only the first N needs.")
+@click.option(
+    "--stop-at",
+    type=click.IntRange(1, 100),
+    default=85,
+    show_default=True,
+    help="Start no new run once the 5-hour usage meter is at this percent.",
+)
+@click.option(
+    "--weekly-ceiling",
+    type=click.IntRange(1, 100),
+    default=80,
+    show_default=True,
+    help="Start no new run once the weekly usage meter is at this percent.",
+)
+@click.option(
+    "--workers",
+    default=2,
+    type=int,
+    show_default=True,
+    help="Runs in parallel. The meter can pass --stop-at by up to this many runs.",
+)
+@click.option(
+    "--workspace",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Where runs start: PDF copies and the MCP config (default: <rag_home>/eval-claude-code).",
+)
+@click.option("--report-only", is_flag=True, help="Report on --out without running anything.")
+@click.option(
+    "--regrade",
+    is_flag=True,
+    help="Grade the saved answers again with --judge-model (no agent runs), then report.",
+)
+@click.option("--json-out", type=click.Path(path_type=Path), default=None, help="Report JSON.")
+def eval_claude_code(
+    needs_path: Path,
+    conditions: tuple[str, ...],
+    model_alias: str,
+    judge_alias: str,
+    out_path: Path,
+    need_ids: tuple[str, ...],
+    need_list: Path | None,
+    limit: int | None,
+    stop_at: int,
+    weekly_ceiling: int,
+    workers: int,
+    workspace: Path | None,
+    report_only: bool,
+    regrade: bool,
+    json_out: Path | None,
+) -> None:
+    """Run the answer eval as Claude Code runs on your subscription.
+
+    Each agent run and each judge call is a `claude -p` process, so it uses
+    your Claude usage limits instead of Bedrock money. Every run reports the
+    5-hour and weekly meters; no new run starts once either reaches its
+    limit. Run the same command again in a later window: it resumes where
+    it stopped and says how much is left.
+
+    \b
+    Condition C starts your own `rag-mcp` against the RAG server, as your
+    Claude Code sessions do. B gets real copies of the project's PDFs.
+    Your CLAUDE.md, settings and other MCP servers are not loaded.
+    """
+    from datasheet_rag.eval.agent import CONDITION_NAMES, Condition
+    from datasheet_rag.eval.answers import (
+        build_report,
+        load_records,
+        regrade_records,
+        run_answers,
+    )
+    from datasheet_rag.eval.claude_code import (
+        MODEL_PREFIX,
+        ClaudeJudge,
+        Meter,
+        Workspace,
+        probe,
+        run_condition,
+    )
+
+    needs = _select_needs(needs_path, need_ids, need_list, limit)
+    conds: list[Condition] = list(conditions or ("A", "B", "C"))  # type: ignore[arg-type]
+    if report_only and regrade:
+        raise click.UsageError("--report-only and --regrade exclude each other")
+    ids = {n.need_id for n in needs}
+
+    def report(model_id: str | None) -> None:
+        records = [r for r in load_records(out_path) if r.need_id in ids]
+        models = {r.model for r in records if r.model.startswith(MODEL_PREFIX)}
+        if model_id is None:
+            if len(models) != 1:
+                raise click.ClickException(
+                    f"{out_path} holds {len(models)} Claude Code models; nothing to report"
+                    if not models
+                    else f"{out_path} holds several models ({', '.join(sorted(models))})"
+                )
+            model_id = models.pop()
+        graded = sum(
+            1
+            for r in records
+            if r.model == model_id and r.grade is not None and r.condition in conds
+        )
+        console.print(f"[cyan]Progress[/]: {graded} of {len(needs) * len(conds)} runs graded.")
+        rep = build_report(records, conds, model_id)
+        _render_answer_report(rep)
+        if json_out:
+            json_out.parent.mkdir(parents=True, exist_ok=True)
+            json_out.write_text(rep.model_dump_json(indent=2), encoding="utf-8")
+            console.print(f"[green]Report JSON →[/] {json_out}")
+
+    if report_only:
+        report(None)
+        return
+
+    from datasheet_rag.config import get_settings
+
+    ws = Workspace(workspace or get_settings().rag_home / "eval-claude-code")
+    ws.root.mkdir(parents=True, exist_ok=True)
+    meter = Meter(stop_at / 100, weekly_ceiling / 100)
+    # Resolve the aliases once: they move to newer models over time, and the
+    # records must say which model answered. Also gives the first meter reading.
+    agent_model = probe(model_alias, workdir=ws.root, meter=meter)
+    judge_model = probe(judge_alias, workdir=ws.root, meter=meter)
+    model_id, judge_id = MODEL_PREFIX + agent_model, MODEL_PREFIX + judge_model
+    console.print(f"[cyan]Usage now[/]: {meter.describe()}")
+    earlier = {r.model for r in load_records(out_path) if r.model.startswith(MODEL_PREFIX)}
+    if earlier - {model_id}:
+        # Resume keys on the model: a newer model behind the same alias would
+        # quietly start the whole set again and mix two models in one file.
+        old = ", ".join(sorted(m.removeprefix(MODEL_PREFIX) for m in earlier - {model_id}))
+        raise click.ClickException(
+            f"{out_path} holds runs of {old}, but --model {model_alias} is now {agent_model}. "
+            f"Pass --model {old} to finish that run, or use a new --out."
+        )
+    judge = ClaudeJudge(judge_model, workdir=ws.root, meter=meter)
+
+    if regrade:
+        n, failed = regrade_records(out_path, needs, client=judge, judge_model=judge_id)
+        console.print(f"[cyan]Regraded[/] {n} answer(s) with {judge_id}.")
+        for f in failed:
+            console.print(f"  [red]judge failed, old grade (if any) kept[/] {f}")
+        report(model_id)
+        return
+
+    if not meter.allows():
+        console.print(f"[yellow]Not starting[/]: {meter.stop_reason()}.")
+        report(model_id if any(r.model == model_id for r in load_records(out_path)) else None)
+        return
+
+    if any(c in conds for c in ("B", "C")):
+        from datasheet_rag.backend import get_backend
+
+        backend = get_backend()
+        projects = {
+            d.project_id
+            for d in (backend.get_document(i) for i in {n.doc_id for n in needs if n.doc_id})
+            if d is not None
+        }
+        if len(projects) != 1 or None in projects:
+            raise click.ClickException(
+                f"the needs' documents should sit in one project, found {projects or 'none'}"
+            )
+        project = str(projects.pop())
+        listing = backend.list_documents(project_id=project).documents
+        docs = [{"doc_id": d.doc_id, "title": d.doc_title, "mpn": d.mpn} for d in listing]
+        copied = ws.prepare(docs, backend.get_pdf_bytes, project)
+        console.print(
+            f"[cyan]Workspace[/] {ws.root}: {len(docs)} PDFs of project {project}"
+            + (f" ({copied} copied now)" if copied else "")
+        )
+
+    names = ", ".join(f"{c} = {CONDITION_NAMES[c]}" for c in conds)
+    console.print(
+        f"[cyan]Answer eval via Claude Code[/]: {len(needs)} needs × {len(conds)} conditions "
+        f"({names}), agent {agent_model}, judge {judge_model}; stop at {stop_at}% of the "
+        f"5-hour meter or {weekly_ceiling}% of the week → {out_path}"
+    )
+    try:
+        run_answers(
+            needs,
+            conds,
+            model_id=model_id,
+            judge_model=judge_id,
+            client=judge,
+            agent=lambda need, cond, run: run_condition(
+                need, cond, run, model=agent_model, workspace=ws, meter=meter
+            ),
+            gate=meter.allows,
+            out_path=out_path,
+            workers=workers,
+            progress=_print_answer_progress,
+        )
+    except ValueError as e:
+        raise click.ClickException(str(e)) from e
+    reason = meter.stop_reason()
+    console.print(
+        f"[cyan]Usage now[/]: {meter.describe()}"
+        + (f". Stopped: {reason}; run again later to continue." if reason else "")
+    )
+    report(model_id)
 
 
 def _render_answer_report(report: AnswerReport) -> None:

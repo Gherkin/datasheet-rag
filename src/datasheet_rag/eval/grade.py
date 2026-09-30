@@ -61,6 +61,8 @@ class Grade(BaseModel):
     # What the judge call used; zero when the code graded it.
     judge_input_tokens: int = 0
     judge_output_tokens: int = 0
+    # The judge call's cost when its runner reported one (claude-code).
+    judge_cost_usd: float | None = None
 
 
 class Verdict(BaseModel):
@@ -68,6 +70,7 @@ class Verdict(BaseModel):
     reason: str
     input_tokens: int = 0
     output_tokens: int = 0
+    cost_usd: float | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -302,6 +305,8 @@ def judge(
                 reason=str(data.get("reason", "")),
                 input_tokens=int(usage.get("inputTokens", 0)),
                 output_tokens=int(usage.get("outputTokens", 0)),
+                # Not part of Converse: a claude-code adapter adds it.
+                cost_usd=resp.get("costUsd"),
             )
     raise RuntimeError(f"judge returned no verdict: {json.dumps(resp['output'])[:300]}")
 
@@ -372,4 +377,5 @@ def grade(
         reason=v.reason,
         judge_input_tokens=v.input_tokens,
         judge_output_tokens=v.output_tokens,
+        judge_cost_usd=v.cost_usd,
     )
