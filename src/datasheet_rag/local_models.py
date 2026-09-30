@@ -387,6 +387,6 @@ def get_chat_client(
             return OllamaInvokeClient(model=model)
         return TransformersChatClient(model=model, is_vision=is_vision)
 
-    from datasheet_rag.embedding.embedder import _bedrock_runtime_client
+    from datasheet_rag.aws import bedrock_runtime_client
 
-    return _bedrock_runtime_client(region=region, profile=profile)
+    return bedrock_runtime_client(region=region, profile=profile)

@@ -37,6 +37,49 @@ HAIKU_VISION_USD_PER_FIGURE = 0.00075
 # A single small text completion (a few hundred tokens in and out).
 HAIKU_TITLE_INFERENCE_USD = 0.0005
 
+
+@dataclass(frozen=True)
+class TokenPrice:
+    """USD per million tokens, split the way Bedrock bills a Converse call."""
+
+    input: float
+    output: float
+    cache_read: float
+    cache_write: float
+
+
+#: From the Bedrock EU rate cards (``aws bedrock
+#: list-foundation-model-agreement-offers``), read 2026-09-30. A ``global.``
+#: profile bills the "Global" rows, an ``eu.`` profile the "Regional CRIS"
+#: rows, about 10% more. Cache writes are the 5-minute ones.
+CLAUDE_TOKEN_PRICES: dict[str, TokenPrice] = {
+    "global.anthropic.claude-sonnet-4-6": TokenPrice(3.0, 15.0, 0.3, 3.75),
+    "eu.anthropic.claude-sonnet-4-6": TokenPrice(3.3, 16.5, 0.33, 4.125),
+    "global.anthropic.claude-haiku-4-5-20251001-v1:0": TokenPrice(1.0, 5.0, 0.1, 1.25),
+    "eu.anthropic.claude-haiku-4-5-20251001-v1:0": TokenPrice(1.1, 5.5, 0.11, 1.375),
+}
+
+
+def token_cost_usd(
+    model_id: str,
+    *,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_tokens: int = 0,
+    cache_write_tokens: int = 0,
+) -> float | None:
+    """What a model's token use cost, or None for a model not in the table."""
+    p = CLAUDE_TOKEN_PRICES.get(model_id)
+    if p is None:
+        return None
+    return (
+        input_tokens * p.input
+        + output_tokens * p.output
+        + cache_read_tokens * p.cache_read
+        + cache_write_tokens * p.cache_write
+    ) / 1_000_000
+
+
 # Approximate — verify in your console; Textract does not publish a
 # per-feature price for LAYOUT in isolation, so this assumes it's billed
 # alongside base AnalyzeDocument page processing.

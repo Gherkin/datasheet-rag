@@ -24,7 +24,7 @@ empty and warn; chunks where both are empty are skipped with a warning.
 Retry strategy
 --------------
 We rely on botocore's built-in *adaptive* retry mode (configured below
-in :func:`_bedrock_runtime_client`). Adaptive mode handles
+in :func:`datasheet_rag.aws.bedrock_runtime_client`). Adaptive mode handles
 ``ThrottlingException`` with token-bucket-based backoff, which is the
 right thing for the bursty bedrock invoke pattern.
 
@@ -48,16 +48,13 @@ import json
 import math
 from collections.abc import Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from rich.console import Console
 from tenacity import Retrying, retry_if_exception, stop_after_attempt, wait_exponential
 
 from datasheet_rag.config import get_settings
 from datasheet_rag.models.chunk import Chunk, ChunkGraph
-
-if TYPE_CHECKING:
-    from mypy_boto3_bedrock_runtime import BedrockRuntimeClient
 
 console = Console()
 
@@ -98,46 +95,6 @@ def _is_transient_ollama_error(exc: BaseException) -> bool:
 # ---------------------------------------------------------------------------
 # Client factory
 # ---------------------------------------------------------------------------
-
-
-def _bedrock_runtime_client(
-    *,
-    region: str | None = None,
-    profile: str | None = None,
-) -> BedrockRuntimeClient:
-    """Build a configured ``bedrock-runtime`` client.
-
-    Lives here (rather than in :mod:`datasheet_rag.aws`) to keep this track
-    self-contained. Once another caller needs it, it should migrate over.
-    """
-    # Lazy import: this module also hosts the Ollama embedding path, so a
-    # fully-local install (no `aws` extra) must be able to import it. boto3 is
-    # only pulled in when a Bedrock embedding backend is actually used.
-    try:
-        import boto3
-        from botocore.config import Config
-    except ModuleNotFoundError as exc:  # pragma: no cover - guidance path
-        raise ModuleNotFoundError(
-            "The Bedrock embedding backend was selected but boto3 is not "
-            "installed. Install the AWS extra:  pip install 'datasheet-rag[aws]'"
-        ) from exc
-
-    settings = get_settings()
-    effective_profile = profile if profile is not None else settings.aws_profile
-    session = boto3.Session(
-        region_name=region or settings.aws_region,
-        profile_name=effective_profile or None,
-    )
-
-    # Adaptive retries handle ThrottlingException with token-bucket
-    # backoff. 60s timeouts are generous for what is normally a sub-second
-    # call but allow headroom under throttling.
-    config = Config(
-        connect_timeout=60,
-        read_timeout=60,
-        retries={"max_attempts": 5, "mode": "adaptive"},
-    )
-    return session.client("bedrock-runtime", config=config)
 
 
 # ---------------------------------------------------------------------------
@@ -256,7 +213,9 @@ class BedrockEmbedder(_ChunkEmbeddingMixin):
         if client is not None:
             self.client = client
         else:
-            self.client = _bedrock_runtime_client(region=region, profile=profile)
+            from datasheet_rag.aws import bedrock_runtime_client
+
+            self.client = bedrock_runtime_client(region=region, profile=profile)
 
         # --- Metrics -----------------------------------------------------
         self.total_tokens_in: int = 0

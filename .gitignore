@@ -28,6 +28,7 @@ test-project/
 # Eval run outputs (commit golden.jsonl only)
 eval/*.json
 eval/trace.jsonl
+eval/answers*.jsonl
 
 # Local planning notes + investigation assets — not part of the shipped
 # product, kept out of history because of size/churn (binary crops, a
