@@ -55,10 +55,12 @@ class FakeModel:
     the gold page, and as judge it accepts every answer it is shown (20 in,
     2 out). ``fail_once`` makes the first call for that question raise."""
 
-    def __init__(self, fail_once: str | None = None):
+    def __init__(self, fail_once: str | None = None, judge_failures: int = 0):
         self.calls = 0
         self.judge_calls = 0
         self.fail_once = fail_once
+        # The first this-many judge calls raise, as a throttled judge would.
+        self.judge_failures = judge_failures
         self._lock = threading.Lock()
 
     def converse(self, **kw: Any) -> dict[str, Any]:
@@ -72,6 +74,9 @@ class FakeModel:
         if "verdict" in tools:
             with self._lock:
                 self.judge_calls += 1
+                if self.judge_failures > 0:
+                    self.judge_failures -= 1
+                    raise RuntimeError("judge ThrottlingException")
             verdict = {"toolUse": {"input": {"correct": True, "reason": "ok"}}}
             return {
                 "output": {"message": {"content": [verdict]}},
@@ -134,6 +139,45 @@ def test_failed_run_is_recorded_then_retried(tmp_path: Path) -> None:
     report = build_report(load_records(out), ["A"], M)
     assert report.failed == []
     assert report.conditions[0].n == 2
+
+
+def test_judge_failure_keeps_the_answer_and_grades_it_next_run(tmp_path: Path) -> None:
+    out = tmp_path / "answers.jsonl"
+    # One need under B: the agent finishes, then its judge call fails.
+    first = FakeModel(judge_failures=1)
+    [rec] = _run(first, out, _needs(1), conds=("B",))
+    assert rec.error is None and rec.grade is None and rec.grade_error
+    assert rec.run is not None and rec.run.final is not None
+    report = build_report(load_records(out), ["B"], M)
+    assert report.ungraded == ["N0/B"] and report.failed == []
+
+    # The next run grades the kept answer and does not run the agent again.
+    second = FakeModel()
+    assert _run(second, out, _needs(1), conds=("B",)) == []
+    assert (second.calls, second.judge_calls) == (1, 1)
+    [rec] = load_records(out)
+    assert rec.grade is not None and rec.grade.grounded and rec.grade_error is None
+    report = build_report(load_records(out), ["B"], M)
+    assert report.ungraded == [] and report.conditions[0].n == 1
+
+
+def test_judge_failing_again_leaves_the_answer_ungraded(tmp_path: Path) -> None:
+    out = tmp_path / "answers.jsonl"
+    _run(FakeModel(judge_failures=1), out, _needs(1), conds=("B",))
+    again = FakeModel(judge_failures=1)
+    _run(again, out, _needs(1), conds=("B",))
+    assert again.calls == again.judge_calls == 1
+    [rec] = load_records(out)
+    assert rec.grade is None and rec.grade_error and rec.error is None
+
+
+def test_failed_then_ungraded_is_listed_once(tmp_path: Path) -> None:
+    out = tmp_path / "answers.jsonl"
+    # The agent fails, then on the rerun it finishes but the judge fails.
+    _run(FakeModel(fail_once="question 0"), out, _needs(1), conds=("B",))
+    _run(FakeModel(judge_failures=1), out, _needs(1), conds=("B",))
+    report = build_report(load_records(out), ["B"], M)
+    assert report.ungraded == ["N0/B"] and report.failed == []
 
 
 def test_report_rates_and_paired_differences(tmp_path: Path) -> None:
