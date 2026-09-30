@@ -74,6 +74,9 @@ class AnswerRecord(BaseModel):
     # Set when the run itself failed (an API error, not a wrong answer).
     # Such a record is retried on the next run.
     error: str | None = None
+    # Set when the agent finished but the judge call failed. The answer is
+    # kept, and the next run grades it without paying for the agent again.
+    grade_error: str | None = None
 
     @property
     def key(self) -> tuple[str, str, str]:
@@ -133,8 +136,27 @@ def run_answers(
     ``max_usd`` caps this call's spend: once the finished runs reach it, no
     new run starts (the ones in flight finish). Work is ordered need by need
     with every condition together, so a stop leaves whole pairs behind.
+
+    Answers saved earlier whose judge call failed are graded first (judge
+    calls only, outside the cap: about a cent each). Their agent run is done
+    and is not repeated.
     """
-    done = {r.key for r in load_records(out_path) if r.error is None}
+    records = load_records(out_path)
+    ids = {n.need_id for n in needs}
+    if any(
+        _ungraded(r) and r.need_id in ids and r.condition in conditions and r.model == model_id
+        for r in records
+    ):
+        grade_pending(
+            out_path,
+            needs,
+            conditions,
+            model_id=model_id,
+            client=client,
+            judge_model=judge_model,
+            workers=workers,
+        )
+    done = {r.key for r in records if r.error is None}
     todo = [(n, c) for n in needs for c in conditions if (n.need_id, c, model_id) not in done]
     out_path.parent.mkdir(parents=True, exist_ok=True)
     write_lock = threading.Lock()
@@ -161,12 +183,20 @@ def run_answers(
             judge_model=judge_model,
             run=AgentRun(),
         )
+        assert rec.run is not None
         try:
-            assert rec.run is not None
             run_agent(client, model_id, need.question, tools(cond), run=rec.run)
-            rec.grade = grade_answer(need, rec.run.final, client=client, judge_model=judge_model)
         except Exception as e:  # noqa: BLE001 - recorded and retried next run
             rec.error = f"{type(e).__name__}: {e}\n{traceback.format_exc(limit=3)}"
+        else:
+            # A separate try: a failed judge call must not throw away the
+            # finished (and paid for) agent run.
+            try:
+                rec.grade = grade_answer(
+                    need, rec.run.final, client=client, judge_model=judge_model
+                )
+            except Exception as e:  # noqa: BLE001 - graded again next run
+                rec.grade_error = f"{type(e).__name__}: {e}"
         with write_lock:
             # An unpriced model cannot be capped; the CLI refuses that pairing.
             spent += rec.cost_usd() or 0.0
@@ -187,6 +217,11 @@ def run_answers(
     return new
 
 
+def _ungraded(r: AnswerRecord) -> bool:
+    """The agent finished but no grade was recorded (the judge call failed)."""
+    return r.error is None and r.run is not None and r.grade is None
+
+
 def regrade_records(
     path: Path,
     needs: Sequence[Need],
@@ -205,8 +240,59 @@ def regrade_records(
     judge call, not the one it replaced.
     """
     by_id = {n.need_id: n for n in needs}
+    return _grade_records(
+        path,
+        by_id,
+        lambda r: r.need_id in by_id and r.error is None and r.run is not None,
+        client=client,
+        judge_model=judge_model,
+        workers=workers,
+    )
+
+
+def grade_pending(
+    path: Path,
+    needs: Sequence[Need],
+    conditions: Sequence[Condition],
+    *,
+    model_id: str,
+    client: Converse,
+    judge_model: str,
+    workers: int = 4,
+) -> tuple[int, list[str]]:
+    """Grade the answers in ``path`` whose judge call failed earlier.
+
+    Only records of ``needs``, ``conditions`` and ``model_id`` with a
+    finished agent run and no grade. Returns the same as
+    :func:`regrade_records`; a record that fails again stays ungraded.
+    """
+    by_id = {n.need_id: n for n in needs}
+    return _grade_records(
+        path,
+        by_id,
+        lambda r: (
+            _ungraded(r)
+            and r.need_id in by_id
+            and r.condition in conditions
+            and r.model == model_id
+        ),
+        client=client,
+        judge_model=judge_model,
+        workers=workers,
+    )
+
+
+def _grade_records(
+    path: Path,
+    by_id: dict[str, Need],
+    select: Callable[[AnswerRecord], bool],
+    *,
+    client: Converse,
+    judge_model: str,
+    workers: int,
+) -> tuple[int, list[str]]:
     records = load_records(path)
-    targets = [r for r in records if r.need_id in by_id and r.error is None and r.run is not None]
+    targets = [r for r in records if select(r)]
     failed: list[str] = []
     lock = threading.Lock()
 
@@ -219,8 +305,11 @@ def regrade_records(
         except Exception as e:  # noqa: BLE001 - keep the old grade, report it
             with lock:
                 failed.append(f"{rec.need_id}/{rec.condition}: {type(e).__name__}: {e}")
+            if rec.grade is None:
+                rec.grade_error = f"{type(e).__name__}: {e}"
             return
         rec.grade = new
+        rec.grade_error = None
         rec.judge_model = judge_model
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -286,6 +375,9 @@ class AnswerReport(BaseModel):
     # "need_id/condition" runs that errored (API failure) and were never
     # graded. A rerun retries them.
     failed: list[str] = Field(default_factory=list)
+    # "need_id/condition" answers kept but not graded (the judge call
+    # failed). A rerun grades them without rerunning the agent.
+    ungraded: list[str] = Field(default_factory=list)
     # Everything these records cost, failed and superseded runs included.
     total_cost_usd: float | None = None
 
@@ -317,8 +409,12 @@ def build_report(
     so each condition is measured on the same questions and pairs cleanly."""
     graded: dict[Condition, dict[str, AnswerRecord]] = {c: {} for c in conditions}
     errored: set[tuple[str, Condition]] = set()
+    pending: set[tuple[str, Condition]] = set()
     for r in records:
         if r.model != model_id or r.condition not in graded:
+            continue
+        if _ungraded(r):
+            pending.add((r.need_id, r.condition))
             continue
         if r.error is not None or r.grade is None or r.run is None:
             errored.add((r.need_id, r.condition))
@@ -326,6 +422,7 @@ def build_report(
         graded[r.condition][r.need_id] = r  # a later record wins
     # A run that failed and then succeeded on a rerun is not a failure.
     failed = sorted(f"{n}/{c}" for n, c in errored if n not in graded[c])
+    ungraded = sorted(f"{n}/{c}" for n, c in pending if n not in graded[c])
 
     all_ids = set().union(*(set(g) for g in graded.values())) if graded else set()
     common = sorted(i for i in all_ids if all(i in g for g in graded.values()))
@@ -401,6 +498,7 @@ def build_report(
         comparisons=comparisons,
         incomplete=incomplete,
         failed=failed,
+        ungraded=ungraded,
         total_cost_usd=None if any(c is None for c in spent) else sum(c or 0.0 for c in spent),
     )
 

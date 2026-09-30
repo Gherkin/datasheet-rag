@@ -4682,7 +4682,13 @@ def _run_answer_eval(
                 f"  [red]error[/] {rec.need_id} {rec.condition}: {rec.error.splitlines()[0]}"
             )
             return
-        assert rec.grade is not None and rec.run is not None
+        assert rec.run is not None
+        if rec.grade is None:
+            console.print(
+                f"  [yellow]judge failed[/] {rec.need_id} {rec.condition}: {rec.grade_error} "
+                "(answer kept; the next run grades it)"
+            )
+            return
         mark = (
             "[green]grounded[/]"
             if rec.grade.grounded
@@ -4788,6 +4794,13 @@ def _render_answer_report(report: AnswerReport) -> None:
     if report.failed:
         console.print(f"[red]{len(report.failed)} run(s) failed[/] (rerun retries them):")
         for f in report.failed:
+            console.print(f"  - {f}")
+    if report.ungraded:
+        console.print(
+            f"[yellow]{len(report.ungraded)} answer(s) not graded[/] (the judge call failed; "
+            "the next run grades them without rerunning the agent):"
+        )
+        for f in report.ungraded:
             console.print(f"  - {f}")
     if report.total_cost_usd is not None:
         console.print(
