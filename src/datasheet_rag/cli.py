@@ -4083,6 +4083,10 @@ def eval_run(
     json_out: Path | None,
 ) -> None:
     """Run the golden set through one search config and print metrics."""
+    from datasheet_rag.backend import SEARCH_POOL
+
+    if not 1 <= top_k <= SEARCH_POOL:
+        raise click.BadParameter(f"must be 1 to {SEARCH_POOL}", param_hint="-k")
     from datasheet_rag.eval.dataset import EvalSet
     from datasheet_rag.eval.harness import RunConfig, run_eval
     from datasheet_rag.store import connect
@@ -4175,6 +4179,10 @@ def eval_ablate(
     verbose: bool,
 ) -> None:
     """Run the ablation matrix and print which concepts move the needle."""
+    from datasheet_rag.backend import SEARCH_POOL
+
+    if not 1 <= top_k <= SEARCH_POOL:
+        raise click.BadParameter(f"must be 1 to {SEARCH_POOL}", param_hint="-k")
     from datasheet_rag.embedding import get_embedder
     from datasheet_rag.eval.ablation import (
         build_macro_summarizer_variant_store,
@@ -4184,9 +4192,12 @@ def eval_ablate(
     )
     from datasheet_rag.eval.dataset import EvalSet
     from datasheet_rag.eval.harness import RunConfig, run_eval
-    from datasheet_rag.store import connect
+    from datasheet_rag.store import connect, require_fts_in_sync
 
     conn = connect(_require_local_db(db_path))
+    # run_eval checks this too, but an index ablation would first pay Bedrock
+    # to re-embed the whole store (GH #91).
+    require_fts_in_sync(conn)
     eval_set = EvalSet.load(set_path)
     embedder = get_embedder()
 

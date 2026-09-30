@@ -186,6 +186,50 @@ def test_eval_on_a_broken_keyword_index_is_a_clean_error(db_path: Path, tmp_path
     assert _PREFACE not in result.output
 
 
+def test_index_ablation_refuses_a_broken_keyword_index_before_re_embedding(
+    db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # GH #91: refuse before the variant store is built, not after paying for it.
+    import datasheet_rag.eval.ablation as ablation
+
+    def _no_build(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("variant store built on a broken keyword index")
+
+    monkeypatch.setattr(ablation, "build_variant_store", _no_build)
+    conn = connect(db_path)
+    conn.execute("INSERT INTO chunk_fts(chunk_fts) VALUES('delete-all')")
+    conn.commit()
+    conn.close()
+    golden = tmp_path / "golden.jsonl"
+    golden.write_text(
+        f'{{"question": "t", "category": "identifier", "doc_id": "{DOC_A}"}}\n',
+        encoding="utf-8",
+    )
+    args = ["--index-ablation", "context-vs-raw", "--variant-db", str(tmp_path / "v.sqlite")]
+    result = CliRunner().invoke(
+        cli, ["eval", "ablate", *args, "--set", str(golden), "--db", str(db_path)]
+    )
+    assert result.exit_code == 1, result.output
+    assert "rag repair fts" in result.output
+    assert _PREFACE not in result.output
+
+
+@pytest.mark.parametrize("command", ["run", "ablate"])
+def test_eval_k_past_the_pool_is_a_clean_error(db_path: Path, tmp_path: Path, command: str) -> None:
+    # GH #90: the eval scores the live search pool, so a k past it is refused.
+    golden = tmp_path / "golden.jsonl"
+    golden.write_text(
+        f'{{"question": "t", "category": "identifier", "doc_id": "{DOC_A}"}}\n',
+        encoding="utf-8",
+    )
+    result = CliRunner().invoke(
+        cli, ["eval", command, "-k", "201", "--set", str(golden), "--db", str(db_path)]
+    )
+    assert result.exit_code == 2, result.output
+    assert "must be 1 to 200" in result.output
+    assert _PREFACE not in result.output
+
+
 @pytest.mark.parametrize("extra", [(), ("--mpn", "X1")], ids=["read", "write"])
 def test_metadata_unknown_doc_id_is_a_clean_error(db_path: Path, extra: tuple[str, ...]) -> None:
     result = CliRunner().invoke(cli, ["metadata", "zzzz", *extra, "--db", str(db_path)])
