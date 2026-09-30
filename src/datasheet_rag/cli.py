@@ -4500,6 +4500,9 @@ def eval_answer(
 
     A/B testing a datasheet-rag change needs only condition C: run it into a
     new --out on the variant, then --compare the baseline file against it.
+    Day to day, and sparingly: --condition C --need-list eval/needs-ab.txt
+    --model global.anthropic.claude-haiku-4-5-20251001-v1:0 (about $3.40).
+    For big changes, measure with the default Sonnet on all needs.
     """
     from datasheet_rag.eval.agent import Condition
     from datasheet_rag.eval.answers import build_report, load_records
