@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from datasheet_rag.chunking.layout_parser import DocumentOutline
     from datasheet_rag.costs import CostEstimate
     from datasheet_rag.eval.ablation import IndexVariant
+    from datasheet_rag.eval.answers import AnswerReport
     from datasheet_rag.eval.harness import RunReport
     from datasheet_rag.eval.metrics import PairedComparison
     from datasheet_rag.eval.stats import Interval, PairedDiff
@@ -4406,6 +4407,285 @@ def _dump_reports_json(reports: list[RunReport], path: Path, headline_k: int) ->
         encoding="utf-8",
     )
     console.print(f"[green]Reports JSON →[/] {path}")
+
+
+#: Agent and judge model for the answer eval: a capable agent at moderate cost.
+_ANSWER_MODEL = "global.anthropic.claude-sonnet-5-5"
+
+
+@eval_group.command("answer", short_help="Grounded answer rate: no tool vs raw PDF vs RAG.")
+@_db_option
+@click.option(
+    "--needs",
+    "needs_path",
+    type=click.Path(exists=True, path_type=Path),
+    default=Path("eval/needs-mined.jsonl"),
+    help="Information needs with answer keys (JSONL).",
+)
+@click.option(
+    "--condition",
+    "conditions",
+    type=click.Choice(["A", "B", "C"]),
+    multiple=True,
+    help="A = no tool, B = raw PDF, C = datasheet-rag. Repeat; default all three.",
+)
+@click.option("--model", "model_id", default=_ANSWER_MODEL, help="Bedrock model for the agent.")
+@click.option("--judge-model", default=None, help="Bedrock model for the judge (default: --model).")
+@click.option(
+    "--out",
+    "out_path",
+    type=click.Path(path_type=Path),
+    default=Path("eval/answers.jsonl"),
+    help="Graded runs are appended here; a rerun resumes from it.",
+)
+@click.option("--need-id", "need_ids", multiple=True, help="Run only these needs. Repeatable.")
+@click.option("--limit", default=None, type=int, help="Run only the first N needs.")
+@click.option("--workers", default=4, type=int, help="Agent runs in parallel.")
+@click.option("--report-only", is_flag=True, help="Report on --out without running anything.")
+@click.option(
+    "--json-out",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Write the report JSON here.",
+)
+def eval_answer(
+    db_path: Path | None,
+    needs_path: Path,
+    conditions: tuple[str, ...],
+    model_id: str,
+    judge_model: str | None,
+    out_path: Path,
+    need_ids: tuple[str, ...],
+    limit: int | None,
+    workers: int,
+    report_only: bool,
+    json_out: Path | None,
+) -> None:
+    """Ask each need's question under three conditions and grade the answers.
+
+    The headline is the grounded answer rate: correct and citing a gold page.
+    Runs call Bedrock (agent and judge); PDFs come from settings.pdf_dir.
+    """
+    from datasheet_rag.eval.agent import Condition
+    from datasheet_rag.eval.answers import build_report, load_records
+    from datasheet_rag.eval.dataset import load_needs
+
+    conds: list[Condition] = list(conditions or ("A", "B", "C"))  # type: ignore[arg-type]
+    needs = load_needs(needs_path)
+    if need_ids:
+        needs = [n for n in needs if n.need_id in set(need_ids)]
+    if limit is not None:
+        needs = needs[:limit]
+    if not needs:
+        raise click.ClickException("no needs selected")
+
+    if not report_only:
+        _run_answer_eval(
+            db_path, needs, conds, model_id, judge_model or model_id, out_path, workers
+        )
+
+    wanted = {n.need_id for n in needs}
+    records = [r for r in load_records(out_path) if r.need_id in wanted]
+    report = build_report(records, conds, model_id)
+    _render_answer_report(report)
+    if json_out:
+        json_out.parent.mkdir(parents=True, exist_ok=True)
+        json_out.write_text(report.model_dump_json(indent=2), encoding="utf-8")
+        console.print(f"[green]Report JSON →[/] {json_out}")
+
+
+def _run_answer_eval(
+    db_path: Path | None,
+    needs: list[Any],
+    conds: list[Any],
+    model_id: str,
+    judge_model: str,
+    out_path: Path,
+    workers: int,
+) -> None:
+    import logging
+
+    from datasheet_rag import pdf_viewer
+    from datasheet_rag.aws import bedrock_runtime_client
+    from datasheet_rag.backend import LocalBackend
+    from datasheet_rag.eval.agent import (
+        CONDITION_NAMES,
+        NoTools,
+        PdfText,
+        PdfTools,
+        RagTools,
+        ToolSet,
+    )
+    from datasheet_rag.eval.answers import AnswerRecord, LockedEmbedder, run_answers
+    from datasheet_rag.store import connect, require_fts_in_sync
+
+    # Building the MCP server turns on INFO logging, and the model download
+    # checks then bury the per-run progress lines.
+    for name in ("httpx", "sentence_transformers"):
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+    db = _require_local_db(db_path)
+    conn = connect(db)
+    doc_ids = sorted({n.doc_id for n in needs if n.doc_id})
+    marks = ",".join("?" * len(doc_ids))
+    projects = [
+        r[0]
+        for r in conn.execute(
+            f"SELECT DISTINCT project_id FROM chunks WHERE doc_id IN ({marks})", doc_ids
+        ).fetchall()
+    ]
+    if len(projects) != 1:
+        raise click.ClickException(
+            f"the needs' documents should sit in one project, found {projects or 'none'}"
+        )
+    project = projects[0]
+    listing = LocalBackend(conn=conn).list_documents(project_id=project).documents
+    docs = [
+        {
+            "doc_id": d.doc_id,
+            "title": d.doc_title,
+            "mpn": d.mpn,
+            "manufacturer": d.manufacturer,
+            "pages": d.page_count,
+        }
+        for d in listing
+    ]
+
+    embedder = None
+    if "C" in conds:
+        # A desynced keyword index would quietly turn hybrid search into
+        # vector-only search for the agent (GH #91).
+        require_fts_in_sync(conn)
+        from datasheet_rag.embedding import get_embedder
+
+        embedder = LockedEmbedder(get_embedder())
+    pdf_text = PdfText(pdf_viewer.load_pdf_bytes)
+
+    def toolset_for(cond: Any) -> ToolSet:
+        if cond == "A":
+            return NoTools()
+        if cond == "B":
+            return PdfTools(docs, pdf_text)
+        from datasheet_rag.mcp.server import build_server
+
+        backend = LocalBackend(conn=connect(db), embedder=embedder)
+        return RagTools(build_server(backend, local_client=False), project)
+
+    # An agent turn can write thousands of tokens; the 60 s default is short.
+    client = bedrock_runtime_client(read_timeout=300, max_attempts=10)
+    names = ", ".join(f"{c} = {CONDITION_NAMES[c]}" for c in conds)
+    console.print(
+        f"[cyan]Answer eval[/]: {len(needs)} needs × {len(conds)} conditions ({names}), "
+        f"project {project}, model {model_id}, judge {judge_model} → {out_path}"
+    )
+
+    def progress(rec: AnswerRecord) -> None:
+        if rec.error is not None:
+            console.print(
+                f"  [red]error[/] {rec.need_id} {rec.condition}: {rec.error.splitlines()[0]}"
+            )
+            return
+        assert rec.grade is not None and rec.run is not None
+        mark = (
+            "[green]grounded[/]"
+            if rec.grade.grounded
+            else ("[yellow]correct[/]" if rec.grade.correct else "[red]wrong[/]")
+        )
+        console.print(
+            f"  {rec.condition} {rec.need_id}: {mark} ({rec.grade.grader}, "
+            f"{len(rec.run.tool_calls)} calls, {rec.run.wall_s:.0f} s)"
+        )
+
+    run_answers(
+        needs,
+        conds,
+        model_id=model_id,
+        judge_model=judge_model,
+        client=client,
+        toolset_for=toolset_for,
+        out_path=out_path,
+        workers=workers,
+        progress=progress,
+    )
+    conn.close()
+
+
+def _render_answer_report(report: AnswerReport) -> None:
+    from datasheet_rag.eval.agent import CONDITION_NAMES
+    from datasheet_rag.eval.dataset import CATEGORIES
+
+    if not report.conditions or report.conditions[0].n == 0:
+        console.print("[yellow]No graded runs to report.[/]")
+        return
+    table = Table(
+        title=f"Answer eval · {report.model} · n = {report.conditions[0].n} needs "
+        f"(dim = 95% bootstrap interval over needs)"
+    )
+    table.add_column("condition", style="yellow")
+    table.add_column("grounded", justify="right", style="cyan")
+    table.add_column("correct", justify="right", style="green")
+    table.add_column("tokens in", justify="right")
+    table.add_column("tokens out", justify="right")
+    table.add_column("tool calls", justify="right")
+    table.add_column("wall s", justify="right")
+    table.add_column("graded by", style="dim")
+    for s in report.conditions:
+        table.add_row(
+            f"{s.condition} · {CONDITION_NAMES[s.condition]}",
+            _mean_cell(s.grounded.value, s.grounded.ci),
+            _mean_cell(s.correct.value, s.correct.ci),
+            f"{s.mean_input_tokens:,.0f}",
+            f"{s.mean_output_tokens:,.0f}",
+            f"{s.mean_tool_calls:.1f}",
+            f"{s.mean_wall_s:.0f}",
+            ", ".join(f"{k} {v}" for k, v in sorted(s.graders.items()))
+            + (f"; {s.not_submitted} never submitted" if s.not_submitted else ""),
+            end_section=True,
+        )
+    console.print(table)
+
+    if report.comparisons:
+        diffs = Table(title="Paired difference (same needs; 95% bootstrap interval over needs)")
+        diffs.add_column("comparison", style="yellow")
+        diffs.add_column("Δgrounded", justify="right")
+        diffs.add_column("Δcorrect", justify="right")
+        diffs.add_column("Δtokens in", justify="right")
+        diffs.add_column("Δwall s", justify="right")
+        for cmp in report.comparisons:
+            diffs.add_row(
+                f"{cmp.later} − {cmp.earlier}",
+                _diff_cell(cmp.grounded),
+                _diff_cell(cmp.correct),
+                f"{cmp.input_tokens:+,.0f}",
+                f"{cmp.wall_s:+.0f}",
+                end_section=True,
+            )
+        console.print(diffs)
+
+    cats = Table(title="Grounded answer rate by category")
+    cats.add_column("category", style="magenta")
+    for s in report.conditions:
+        cats.add_column(s.condition, justify="right")
+    for cat in CATEGORIES:
+        rates = [s.grounded_by_category.get(cat) for s in report.conditions]
+        if all(r is None for r in rates):
+            continue
+        cats.add_row(
+            cat,
+            *[_mean_cell(r.value, r.ci) if r else "—" for r in rates],
+            end_section=True,
+        )
+    console.print(cats)
+
+    if report.incomplete:
+        console.print(
+            f"[yellow]{len(report.incomplete)} need(s) left out[/]: not graded under every "
+            "condition yet — rerun to fill them in."
+        )
+    if report.failed:
+        console.print(f"[red]{len(report.failed)} run(s) failed[/] (rerun retries them):")
+        for f in report.failed:
+            console.print(f"  - {f}")
 
 
 @eval_group.command("review", short_help="Hand-review the golden set in a web app.")

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -70,6 +70,46 @@ class GoldenItem(BaseModel):
     evidence: list[Evidence] = Field(default_factory=list)
     # How an answer is graded end to end (numeric / set / text); free-form.
     grading: dict[str, object] | None = None
+
+
+class Need(BaseModel):
+    """One information need: the question an agent was trying to answer,
+    with its checked answer key (GH #92). The retrieval set holds the search
+    queries made for it; the answer-level eval (GH #93) asks the question."""
+
+    need_id: str
+    question: str
+    category: Category
+    answerable: bool = True
+    answer: str
+    # {"type": "numeric", value, unit, bound, tolerance} | {"type": "set", items}
+    # | {"type": "text", must_mention, must_not}
+    grading: dict[str, Any]
+    doc_id: str | None
+    pages: list[int] = Field(default_factory=list)
+    evidence: list[Evidence] = Field(default_factory=list)
+    queries: list[str] = Field(default_factory=list)
+    # What a grader must not accept, and other traps the key-checker found.
+    notes: str = ""
+    checked: str = ""
+    # True when the store lost the evidence text (a parser gap).
+    store_gap: bool = False
+
+
+def load_needs(path: Path | str) -> list[Need]:
+    """Read a needs JSONL file. Blank lines are skipped."""
+    p = Path(path)
+    needs: list[Need] = []
+    with p.open("r", encoding="utf-8") as fh:
+        for line_no, line in enumerate(fh, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                needs.append(Need.model_validate_json(line))
+            except Exception as e:  # noqa: BLE001 - want the line number
+                raise ValueError(f"{p}:{line_no}: invalid Need JSONL line: {e}") from e
+    return needs
 
 
 class EvalSet(BaseModel):
