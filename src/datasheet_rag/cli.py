@@ -3936,6 +3936,13 @@ def _render_report_table(report: object) -> None:
         row += [f"{m.mrr:.3f}", f"{m.ndcg:.3f}"]
         table.add_row(*row, end_section=(cat == "overall"))
     console.print(table)
+    if report.unresolved_gold:
+        console.print(
+            f"[yellow]{len(report.unresolved_gold)} item(s) score zero because no chunk in "
+            f"the store holds their evidence[/] (a parser gap, not a ranking miss):"
+        )
+        for q in report.unresolved_gold:
+            console.print(f"  - {q}")
 
 
 def _render_matrix_table(reports: list[RunReport], headline_k: int) -> None:
@@ -3979,7 +3986,9 @@ def _render_matrix_table(reports: list[RunReport], headline_k: int) -> None:
     "-o",
     "out_path",
     type=click.Path(path_type=Path),
-    default=Path("eval/golden.jsonl"),
+    # Not golden-mined.jsonl: generated items are written from the chunk they
+    # are scored against, so they never replace the mined set (GH #92).
+    default=Path("eval/golden-auto.jsonl"),
     help="Output JSONL path.",
 )
 @click.option("--append", is_flag=True, help="Append to the output file instead of overwriting.")
@@ -4029,7 +4038,7 @@ def eval_generate(
     "--set",
     "set_path",
     type=click.Path(exists=True, path_type=Path),
-    default=Path("eval/golden.jsonl"),
+    default=Path("eval/golden-mined.jsonl"),
     help="Golden set JSONL.",
 )
 @click.option(
@@ -4124,7 +4133,7 @@ def eval_run(
     "--set",
     "set_path",
     type=click.Path(exists=True, path_type=Path),
-    default=Path("eval/golden.jsonl"),
+    default=Path("eval/golden-mined.jsonl"),
     help="Golden set JSONL.",
 )
 @click.option("-k", "top_k", default=5, type=int, help="Headline k for the comparison.")
@@ -4322,7 +4331,9 @@ def _dump_reports_json(reports: list[RunReport], path: Path) -> None:
     "--set",
     "set_path",
     type=click.Path(exists=True, path_type=Path),
-    default=Path("eval/golden.jsonl"),
+    # Not golden-mined.jsonl: its gold comes from evidence quotes, which this
+    # app cannot edit, and Accept would relabel its items source="human".
+    default=Path("eval/golden-auto.jsonl"),
     help="Golden set JSONL to review.",
 )
 @click.option("--port", default=0, type=int, help="Port (0 = pick a free one).")
