@@ -47,6 +47,7 @@ from typing import NamedTuple
 from pydantic import BaseModel, Field
 
 from datasheet_rag.eval.dataset import Category, GoldenItem
+from datasheet_rag.eval.stats import Interval, PairedDiff, bootstrap_ci, paired_diff
 from datasheet_rag.models.chunk import Chunk
 from datasheet_rag.store.search import SearchResult
 
@@ -185,6 +186,8 @@ class QueryOutcome(BaseModel):
     question: str
     category: Category
     doc_id: str | None
+    # Rephrasings of one need share it; the bootstrap resamples by it.
+    need_id: str | None = None
     num_retrieved: int
     retrieved_chunk_ids: list[str] = Field(default_factory=list)
     first_relevant_rank: int | None = None
@@ -223,6 +226,7 @@ class QueryOutcome(BaseModel):
             question=item.question,
             category=item.category,
             doc_id=item.doc_id,
+            need_id=item.need_id,
             num_retrieved=len(results),
             retrieved_chunk_ids=[r.chunk_id for r in results],
             first_relevant_rank=first_relevant_rank(rel),
@@ -233,9 +237,19 @@ class QueryOutcome(BaseModel):
             latency_ms=latency_ms,
         )
 
+    @property
+    def cluster(self) -> str:
+        """The bootstrap unit: the need, or the question when it has none."""
+        return self.need_id or self.question
+
 
 class CategoryMetrics(BaseModel):
-    """Mean metrics over a group of queries (one category, or overall)."""
+    """Mean metrics over a group of queries (one category, or overall).
+
+    Each mean carries a 95% cluster-bootstrap interval (see
+    :mod:`datasheet_rag.eval.stats`); None when the group holds fewer than
+    two needs.
+    """
 
     n: int
     mrr: float
@@ -244,6 +258,10 @@ class CategoryMetrics(BaseModel):
     hit_rate_at_k: dict[int, float] = Field(default_factory=dict)
     hit_rate_at_k_loose: dict[int, float] = Field(default_factory=dict)
     mean_latency_ms: float = 0.0
+    mrr_ci: Interval | None = None
+    ndcg_ci: Interval | None = None
+    hit_rate_at_k_ci: dict[int, Interval | None] = Field(default_factory=dict)
+    hit_rate_at_k_loose_ci: dict[int, Interval | None] = Field(default_factory=dict)
 
     @classmethod
     def aggregate(
@@ -266,6 +284,11 @@ class CategoryMetrics(BaseModel):
         hit_rate = {k: sum(o.hit_at_ks.get(k, 0.0) for o in outcomes) / n for k in ks}
         hit_rate_loose = {k: sum(o.hit_at_ks_loose.get(k, 0.0) for o in outcomes) / n for k in ks}
         latency = sum(o.latency_ms for o in outcomes) / n
+        clusters = [o.cluster for o in outcomes]
+
+        def ci(values: list[float]) -> Interval | None:
+            return bootstrap_ci(values, clusters)
+
         return cls(
             n=n,
             mrr=mrr,
@@ -273,6 +296,12 @@ class CategoryMetrics(BaseModel):
             hit_rate_at_k=hit_rate,
             hit_rate_at_k_loose=hit_rate_loose,
             mean_latency_ms=latency,
+            mrr_ci=ci([o.reciprocal_rank for o in outcomes]),
+            ndcg_ci=ci([o.ndcg for o in outcomes]),
+            hit_rate_at_k_ci={k: ci([o.hit_at_ks.get(k, 0.0) for o in outcomes]) for k in ks},
+            hit_rate_at_k_loose_ci={
+                k: ci([o.hit_at_ks_loose.get(k, 0.0) for o in outcomes]) for k in ks
+            },
         )
 
 
@@ -288,3 +317,50 @@ def aggregate_by_category(
     report = {cat: CategoryMetrics.aggregate(group, ks=ks) for cat, group in buckets.items()}
     report["overall"] = CategoryMetrics.aggregate(outcomes, ks=ks)
     return report
+
+
+class PairedComparison(BaseModel):
+    """Paired differences (variant - base) over one group of queries."""
+
+    n: int
+    hit_rate: PairedDiff
+    mrr: PairedDiff
+    ndcg: PairedDiff
+
+
+def compare_by_category(
+    base: Sequence[QueryOutcome],
+    variant: Sequence[QueryOutcome],
+    *,
+    k: int,
+) -> dict[str, PairedComparison]:
+    """Pair two runs query by query and bootstrap each difference.
+
+    Both runs must score the same questions in the same order, which
+    ``run_eval`` guarantees for one golden set. ``hit_rate`` is at ``k``.
+    """
+    if [o.question for o in base] != [o.question for o in variant]:
+        raise ValueError("runs scored different questions; a paired comparison needs the same set")
+    buckets: dict[str, list[int]] = {}
+    for i, o in enumerate(base):
+        buckets.setdefault(o.category, []).append(i)
+    buckets["overall"] = list(range(len(base)))
+
+    out: dict[str, PairedComparison] = {}
+    for cat, ix in buckets.items():
+        a = [base[i] for i in ix]
+        b = [variant[i] for i in ix]
+        clusters = [o.cluster for o in a]
+        out[cat] = PairedComparison(
+            n=len(ix),
+            hit_rate=paired_diff(
+                [o.hit_at_ks.get(k, 0.0) for o in a],
+                [o.hit_at_ks.get(k, 0.0) for o in b],
+                clusters,
+            ),
+            mrr=paired_diff(
+                [o.reciprocal_rank for o in a], [o.reciprocal_rank for o in b], clusters
+            ),
+            ndcg=paired_diff([o.ndcg for o in a], [o.ndcg for o in b], clusters),
+        )
+    return out
