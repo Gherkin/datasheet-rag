@@ -35,11 +35,13 @@ from datasheet_rag.store.metadata import (
     set_metadata,
 )
 from datasheet_rag.store.schema import (
+    FtsOutOfSyncError,
     FtsStatus,
     connect,
     fts_status,
     init_schema,
     rebuild_fts,
+    require_fts_in_sync,
     stored_embedding_dim,
 )
 from datasheet_rag.store.search import (
@@ -89,10 +91,12 @@ __all__ = [
     "get_metadata",
     "hash_token",
     "hybrid_search",
+    "FtsOutOfSyncError",
     "FtsStatus",
     "fts_status",
     "init_schema",
     "rebuild_fts",
+    "require_fts_in_sync",
     "stored_embedding_dim",
     "InsertStats",
     "insert_chunk_graph",

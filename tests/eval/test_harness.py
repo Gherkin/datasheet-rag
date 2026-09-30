@@ -13,10 +13,11 @@ from pathlib import Path
 
 import pytest
 
+from datasheet_rag.backend.local import LocalBackend
 from datasheet_rag.eval.dataset import EvalSet, GoldenItem
 from datasheet_rag.eval.harness import RunConfig, run_eval
 from datasheet_rag.models.chunk import Chunk, ChunkLevel, ChunkMetadata, LayoutType
-from datasheet_rag.store.schema import connect
+from datasheet_rag.store.schema import FtsOutOfSyncError, connect
 from datasheet_rag.store.sqlite import insert_chunks
 
 EMBED_DIM = 8
@@ -167,6 +168,98 @@ def test_page_only_label_scores_loose_not_strict(conn) -> None:
 def test_vector_mode_requires_embedder(conn, eval_set) -> None:
     with pytest.raises(ValueError):
         run_eval(conn, eval_set, RunConfig(mode="vector", k=3))
+
+
+def test_keyword_ranks_the_live_search_pool() -> None:
+    """GH #90: the harness must rank what `search` ranks.
+
+    keyword_search fetches each term's matches with a limit that grows with
+    ``k``. Asked for k=5 it only ever sees 40 matches per term, so a best
+    match past them is lost; live search ranks a pool of SEARCH_POOL and
+    finds it. The best match is inserted last so it falls outside a small
+    fetch.
+    """
+    c = connect(":memory:", embedding_dim=EMBED_DIM)
+    specs = [
+        _chunk(
+            f"doc1:2:{i}",
+            f"vref note {i} " + "unrelated filler words about layout " * 8,
+            page=1,
+            pos=3,
+        )
+        for i in range(60)
+    ]
+    specs.append(_chunk("doc1:2:99", "vref vref vref", page=2, pos=4))
+    insert_chunks(c, [s[0] for s in specs], vectors={s[0].id: s[1] for s in specs})
+
+    es = EvalSet(
+        items=[
+            GoldenItem(
+                question="vref",
+                category="identifier",
+                doc_id="doc1",
+                gold_chunk_ids=["doc1:2:99"],
+                gold_pages=[2],
+            )
+        ]
+    )
+    report = run_eval(c, es, RunConfig(mode="keyword", k=5, ks=(1,)))
+    assert report.outcomes[0].first_relevant_rank == 1
+
+    live = LocalBackend(conn=c).search("vref", mode="keyword", k=5)
+    assert report.outcomes[0].retrieved_chunk_ids == [r.chunk_id for r in live]
+    c.close()
+
+
+def test_hybrid_matches_live_search(conn, eval_set) -> None:
+    report = run_eval(
+        conn, eval_set, RunConfig(mode="hybrid", k=3, ks=(1, 3)), embedder=_MockEmbedder()
+    )
+    live = LocalBackend(conn=conn, embedder=_MockEmbedder())
+    for item, outcome in zip(eval_set.items, report.outcomes):
+        expected = [r.chunk_id for r in live.search(item.question, mode="hybrid", k=3)]
+        assert outcome.retrieved_chunk_ids == expected
+
+
+def _desync_fts(c: sqlite3.Connection) -> None:
+    c.execute("INSERT INTO chunk_fts(chunk_fts) VALUES('delete-all')")
+    c.commit()
+
+
+@pytest.mark.parametrize("mode", ["hybrid", "keyword"])
+def test_refuses_a_store_with_a_broken_keyword_index(conn, eval_set, mode) -> None:
+    """GH #91: a dead index would score vector-only numbers as "hybrid"."""
+    _desync_fts(conn)
+    with pytest.raises(FtsOutOfSyncError, match="rag repair fts"):
+        run_eval(conn, eval_set, RunConfig(mode=mode, k=3), embedder=_MockEmbedder())
+
+
+def test_vector_mode_still_runs_on_a_broken_keyword_index(conn, eval_set) -> None:
+    _desync_fts(conn)
+    report = run_eval(conn, eval_set, RunConfig(mode="vector", k=3), embedder=_MockEmbedder())
+    assert report.by_category["overall"].n == 2
+
+
+def test_hybrid_differs_from_vector_when_keyword_has_the_hit(conn) -> None:
+    """The keyword half must move the ranking; if it stops, "hybrid" is a lie."""
+    # The mock embeds this question towards the SPI chunk; only BM25 knows the
+    # clock-stretching chunk has the exact terms.
+    es = EvalSet(
+        items=[
+            GoldenItem(
+                question="SCL register",
+                category="identifier",
+                doc_id="doc1",
+                gold_chunk_ids=["doc1:2:0"],
+                gold_pages=[5],
+            )
+        ]
+    )
+    hybrid = run_eval(conn, es, RunConfig(mode="hybrid", k=3, ks=(1,)), embedder=_MockEmbedder())
+    vector = run_eval(conn, es, RunConfig(mode="vector", k=3, ks=(1,)), embedder=_MockEmbedder())
+    keyword = run_eval(conn, es, RunConfig(mode="keyword", k=3, ks=(1,)))
+    assert keyword.outcomes[0].first_relevant_rank == 1
+    assert hybrid.outcomes[0].retrieved_chunk_ids != vector.outcomes[0].retrieved_chunk_ids
 
 
 def test_trace_file_written(conn, eval_set, tmp_path: Path) -> None:

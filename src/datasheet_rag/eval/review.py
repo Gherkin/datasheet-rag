@@ -28,6 +28,7 @@ from urllib.parse import parse_qs, urlparse
 
 from rich.console import Console
 
+from datasheet_rag.backend.base import SEARCH_POOL
 from datasheet_rag.eval.dataset import CATEGORIES, EvalSet, GoldenItem
 from datasheet_rag.eval.metrics import is_hit
 from datasheet_rag.models.chunk import Chunk
@@ -78,7 +79,8 @@ def retrieval_preview(
     """Top-k hybrid results for the item's question, flagged as hit/miss
     against the item's *current* gold labels."""
     query_vec = embedder.embed_one(item.question)
-    results = hybrid_search(conn, query_vec, item.question, k=k)
+    # Rank the live search pool and cut, so the preview matches `search` (GH #90).
+    results = hybrid_search(conn, query_vec, item.question, k=SEARCH_POOL)[:k]
     return [
         {
             "rank": i,
