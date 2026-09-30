@@ -27,6 +27,8 @@ if TYPE_CHECKING:
     from datasheet_rag.costs import CostEstimate
     from datasheet_rag.eval.ablation import IndexVariant
     from datasheet_rag.eval.harness import RunReport
+    from datasheet_rag.eval.metrics import PairedComparison
+    from datasheet_rag.eval.stats import Interval, PairedDiff
     from datasheet_rag.ingest_pipeline import ProgressEvent
     from datasheet_rag.models.chunk import Chunk
     from datasheet_rag.store.metadata import DocMetadata
@@ -3908,6 +3910,24 @@ def eval_group() -> None:
 _CAT_ORDER = ["identifier", "conceptual", "figure", "table_spec", "synthesis", "overall"]
 
 
+def _mean_cell(value: float, ci: Interval | None, fmt: str = ".2f") -> str:
+    """A mean over its 95% interval; a group of one need has none."""
+    # The space lets a narrow terminal wrap the interval instead of cutting it.
+    band = f"\\[{ci.lo:{fmt}}, {ci.hi:{fmt}}]" if ci is not None else "one need"
+    return f"{value:{fmt}}\n[dim]{band}[/]"
+
+
+def _diff_cell(d: PairedDiff, fmt: str = "+.2f") -> str:
+    """A paired difference, or 'n too small' when its interval spans zero."""
+    band = f"\\[{d.ci.lo:{fmt}}, {d.ci.hi:{fmt}}]" if d.ci is not None else "one need"
+    if d.verdict == "n too small":
+        return f"[yellow]n too small[/]\n[dim]{band}[/]"
+    if d.verdict == "no change":
+        return "[dim]no change[/]"
+    colour = "green" if d.verdict == "better" else "red"
+    return f"[{colour}]{d.diff:{fmt}}[/]\n[dim]{band}[/]"
+
+
 def _render_report_table(report: object) -> None:
     """Print one RunReport's per-category metrics."""
     from datasheet_rag.eval.harness import RunReport
@@ -3916,7 +3936,8 @@ def _render_report_table(report: object) -> None:
     hk = report.config.k
     table = Table(
         title=f"Retrieval eval · {report.config.describe()} "
-        f"(hit@k = strict lineage; pg@{hk} = loose page upper bound)"
+        f"(hit@k = strict lineage; pg@{hk} = loose page upper bound; "
+        f"dim = 95% bootstrap interval over needs)"
     )
     table.add_column("category", style="magenta")
     table.add_column("n", justify="right", style="dim")
@@ -3931,10 +3952,13 @@ def _render_report_table(report: object) -> None:
         if m is None or m.n == 0:
             continue
         row = [cat, str(m.n)]
-        row += [f"{m.hit_rate_at_k.get(k, 0.0):.2f}" for k in report.config.ks]
-        row += [f"{m.hit_rate_at_k_loose.get(hk, 0.0):.2f}"]
-        row += [f"{m.mrr:.3f}", f"{m.ndcg:.3f}"]
-        table.add_row(*row, end_section=(cat == "overall"))
+        row += [
+            _mean_cell(m.hit_rate_at_k.get(k, 0.0), m.hit_rate_at_k_ci.get(k))
+            for k in report.config.ks
+        ]
+        row += [_mean_cell(m.hit_rate_at_k_loose.get(hk, 0.0), m.hit_rate_at_k_loose_ci.get(hk))]
+        row += [_mean_cell(m.mrr, m.mrr_ci, ".3f"), _mean_cell(m.ndcg, m.ndcg_ci, ".3f")]
+        table.add_row(*row, end_section=True)
     console.print(table)
     if report.unresolved_gold:
         console.print(
@@ -3946,10 +3970,14 @@ def _render_report_table(report: object) -> None:
 
 
 def _render_matrix_table(reports: list[RunReport], headline_k: int) -> None:
-    """Print a comparison across configs: overall + per-category hit@k."""
+    """Print a comparison across configs: overall + per-category hit@k,
+    then each config's paired difference from the first (the baseline)."""
     from datasheet_rag.eval.dataset import CATEGORIES
 
-    table = Table(title=f"Ablation comparison · hit@{headline_k} by category")
+    table = Table(
+        title=f"Ablation comparison · hit@{headline_k} by category "
+        f"(dim = 95% bootstrap interval over needs)"
+    )
     table.add_column("config", style="yellow")
     table.add_column("overall", justify="right", style="cyan")
     table.add_column("MRR", justify="right", style="green")
@@ -3963,15 +3991,57 @@ def _render_matrix_table(reports: list[RunReport], headline_k: int) -> None:
             continue
         row = [
             rep.config.describe(),
-            f"{overall.hit_rate_at_k.get(headline_k, 0.0):.2f}",
-            f"{overall.mrr:.3f}",
-            f"{overall.ndcg:.3f}",
+            _mean_cell(
+                overall.hit_rate_at_k.get(headline_k, 0.0),
+                overall.hit_rate_at_k_ci.get(headline_k),
+            ),
+            _mean_cell(overall.mrr, overall.mrr_ci, ".3f"),
+            _mean_cell(overall.ndcg, overall.ndcg_ci, ".3f"),
         ]
         for cat in CATEGORIES:
             m = rep.by_category.get(cat)
-            row.append(f"{m.hit_rate_at_k.get(headline_k, 0.0):.2f}" if m else "—")
-        table.add_row(*row)
+            row.append(
+                _mean_cell(m.hit_rate_at_k.get(headline_k, 0.0), m.hit_rate_at_k_ci.get(headline_k))
+                if m
+                else "—"
+            )
+        table.add_row(*row, end_section=True)
     console.print(table)
+
+    if len(reports) < 2:
+        return
+    base = reports[0]
+    diffs = Table(
+        title=f"Paired difference from '{base.config.describe()}' "
+        f"(variant − baseline, same questions; 95% bootstrap interval over needs)"
+    )
+    diffs.add_column("config", style="yellow")
+    diffs.add_column(f"Δhit@{headline_k}", justify="right")
+    diffs.add_column("ΔMRR", justify="right")
+    diffs.add_column("ΔnDCG", justify="right")
+    for cat in CATEGORIES:
+        diffs.add_column(f"Δ{cat[:5]}", justify="right")
+    for rep, cmp in zip(reports[1:], _paired_vs_baseline(reports, headline_k)):
+        whole = cmp["overall"]
+        row = [
+            rep.config.describe(),
+            _diff_cell(whole.hit_rate),
+            _diff_cell(whole.mrr, "+.3f"),
+            _diff_cell(whole.ndcg, "+.3f"),
+        ]
+        row += [_diff_cell(cmp[cat].hit_rate) if cat in cmp else "—" for cat in CATEGORIES]
+        diffs.add_row(*row, end_section=True)
+    console.print(diffs)
+
+
+def _paired_vs_baseline(
+    reports: list[RunReport], headline_k: int
+) -> list[dict[str, PairedComparison]]:
+    """Each report after the first, paired against the first."""
+    from datasheet_rag.eval.metrics import compare_by_category
+
+    base = reports[0]
+    return [compare_by_category(base.outcomes, r.outcomes, k=headline_k) for r in reports[1:]]
 
 
 @eval_group.command("generate", short_help="Generate a golden set from the corpus.")
@@ -4221,7 +4291,7 @@ def eval_ablate(
         conn.close()
         _render_matrix_table(reports, headline_k=top_k)
         if json_out:
-            _dump_reports_json(reports, json_out)
+            _dump_reports_json(reports, json_out, top_k)
         return
 
     if index_ablation == "macro-summarizer":
@@ -4281,7 +4351,7 @@ def eval_ablate(
             f"{stats.total_latency_ms / 1000:.1f} s total)"
         )
         if json_out:
-            _dump_reports_json(reports, json_out)
+            _dump_reports_json(reports, json_out, top_k)
         return
 
     # Index ablation: baseline (current store) vs variant (re-embedded).
@@ -4311,15 +4381,28 @@ def eval_ablate(
     reports = [base_report, var_report]
     _render_matrix_table(reports, headline_k=top_k)
     if json_out:
-        _dump_reports_json(reports, json_out)
+        _dump_reports_json(reports, json_out, top_k)
 
 
-def _dump_reports_json(reports: list[RunReport], path: Path) -> None:
+def _dump_reports_json(reports: list[RunReport], path: Path, headline_k: int) -> None:
     import json as _json
 
+    paired = [
+        {"config": r.config.describe(), "by_category": {c: m.model_dump() for c, m in cmp.items()}}
+        for r, cmp in zip(reports[1:], _paired_vs_baseline(reports, headline_k))
+    ]
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        _json.dumps([r.model_dump() for r in reports], indent=2, default=str),
+        _json.dumps(
+            {
+                "reports": [r.model_dump() for r in reports],
+                "baseline": reports[0].config.describe() if reports else None,
+                "headline_k": headline_k,
+                "paired_vs_baseline": paired,
+            },
+            indent=2,
+            default=str,
+        ),
         encoding="utf-8",
     )
     console.print(f"[green]Reports JSON →[/] {path}")
