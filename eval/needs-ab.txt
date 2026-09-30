@@ -1,0 +1,51 @@
+# A/B subset of eval/needs-mined.jsonl for cheap `rag eval answer --need-list` runs.
+# Chosen at random, not by hand: from each (category, answerable) group of needs,
+# round(40%) (at least 1) sorted need ids drawn with random.Random(93).sample,
+# groups taken in sorted order. Use the full set to confirm a change.
+C1-pd70100-mps-current
+A2-exposed-pad-ground
+A2-per-pin-decoupling-10nf
+A2-reset-pin-circuit
+A2-unused-io-pins
+C1-poe-surge-coupling-unearthed
+C2-mp6004-flyback-layout-loops
+C2-mp6004-switching-frequency
+D1-feedforward-cap
+D2-tlv9004-capacitive-load
+D2-txu0202-power-down-behavior
+D2-usb-dp-dm-series-resistor
+B-hcwk88-withstand-leds
+B-lan8720a-bob-smith
+C1-an2157-rp-placement
+D2-dlm0ns-winding-pairing
+D2-df2s30fs-directionality
+A1-gmac-rmii-pin-mux
+C2-mp6004-pin-functions-flyback
+D1-pinout-sot23
+D2-mld-tf-pinout
+D2-tpusblc6-pinout
+D2-txu0202-pin-functions
+D1-inductor-selection
+D1-typical-app-components
+D2-tla2518-conversion-timing
+D2-tla2518-input-sampling-network
+A1-usbhs-vbus-input-impedance
+A1-gmac-rmii-ac-timing
+A1-tcc-channel-counts
+A1-usbhs-vbus-abs-max
+A1-usbhs-vbus-session-thresholds
+A1-usbrbias-resistor
+B-lan8720a-crystal-spec
+B-lan8720a-o12-led-drive
+C1-pd70100-rclass-values
+C1-pd70100-soft-start-inrush
+C1-slua736-table2-peak-current
+C2-mp6004-sw-abs-max
+C2-poe30p-50l-turns-ratio
+C2-rvt2a470-ripple-life
+D1-current-limit
+D1-output-divider-equation
+D1-power-good
+D2-esds304-an2157-params
+D2-tla2518-supply-current
+D2-tlv9004-psrr

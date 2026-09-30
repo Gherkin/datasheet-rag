@@ -408,3 +408,107 @@ def build_report(
 def _cost_diff(a: Sequence[AnswerRecord], b: Sequence[AnswerRecord]) -> float | None:
     ca, cb = _mean_cost(a), _mean_cost(b)
     return None if ca is None or cb is None else cb - ca
+
+
+# ---------------------------------------------------------------------------
+# A/B: one condition, two runs
+# ---------------------------------------------------------------------------
+
+
+class RunSide(BaseModel):
+    """One run of a condition, on the needs both runs graded."""
+
+    model: str
+    grounded: Rate
+    correct: Rate
+    mean_context_tokens: float
+    mean_cost_usd: float | None
+
+
+class Flip(BaseModel):
+    need_id: str
+    base_grounded: bool
+    variant_grounded: bool
+
+
+class RunComparison(BaseModel):
+    """``variant`` minus ``base`` for one condition, paired by need."""
+
+    condition: Condition
+    n: int
+    base: RunSide
+    variant: RunSide
+    grounded: PairedDiff
+    correct: PairedDiff
+    # Needs whose grounded outcome differs: where to look first.
+    flipped: list[Flip] = Field(default_factory=list)
+    # Graded in one run only, so left out of the pairing.
+    only_base: list[str] = Field(default_factory=list)
+    only_variant: list[str] = Field(default_factory=list)
+
+
+def _graded_by_need(
+    records: Sequence[AnswerRecord], condition: Condition
+) -> dict[str, AnswerRecord]:
+    """The latest graded record per need; one model only, or it is ambiguous."""
+    out: dict[str, AnswerRecord] = {}
+    for r in records:
+        if r.condition == condition and r.error is None and r.grade is not None and r.run:
+            out[r.need_id] = r
+    models = {r.model for r in out.values()}
+    if len(models) > 1:
+        raise ValueError(
+            f"condition {condition} was run with several models ({', '.join(sorted(models))}); "
+            "compare one model per file"
+        )
+    return out
+
+
+def compare_runs(
+    base: Sequence[AnswerRecord],
+    variant: Sequence[AnswerRecord],
+    condition: Condition = "C",
+) -> RunComparison:
+    """Pair two runs of one condition by need and bootstrap the differences.
+
+    The A/B test for a datasheet-rag change: C before and C after, on the
+    same questions. The two runs may use different models (that is how an
+    agent model is calibrated against another).
+    """
+    b, v = _graded_by_need(base, condition), _graded_by_need(variant, condition)
+    common = sorted(set(b) & set(v))
+    if not common:
+        raise ValueError(f"no need was graded under {condition} in both runs")
+    rb, rv = [b[i] for i in common], [v[i] for i in common]
+
+    def side(rs: list[AnswerRecord]) -> RunSide:
+        return RunSide(
+            model=rs[0].model,
+            grounded=_rate([float(r.grade.grounded) for r in rs if r.grade], common),
+            correct=_rate([float(r.grade.correct) for r in rs if r.grade], common),
+            mean_context_tokens=_mean(r.run.context_tokens for r in rs if r.run),
+            mean_cost_usd=_mean_cost(rs),
+        )
+
+    def diff(field: str) -> PairedDiff:
+        return paired_diff(
+            [float(getattr(r.grade, field)) for r in rb],
+            [float(getattr(r.grade, field)) for r in rv],
+            common,
+        )
+
+    return RunComparison(
+        condition=condition,
+        n=len(common),
+        base=side(rb),
+        variant=side(rv),
+        grounded=diff("grounded"),
+        correct=diff("correct"),
+        flipped=[
+            Flip(need_id=i, base_grounded=x.grade.grounded, variant_grounded=y.grade.grounded)
+            for i, x, y in zip(common, rb, rv)
+            if x.grade and y.grade and x.grade.grounded != y.grade.grounded
+        ],
+        only_base=sorted(set(b) - set(v)),
+        only_variant=sorted(set(v) - set(b)),
+    )

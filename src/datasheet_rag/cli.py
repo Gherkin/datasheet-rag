@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from datasheet_rag.chunking.layout_parser import DocumentOutline
     from datasheet_rag.costs import CostEstimate
     from datasheet_rag.eval.ablation import IndexVariant
-    from datasheet_rag.eval.answers import AnswerReport
+    from datasheet_rag.eval.answers import AnswerReport, RunComparison
     from datasheet_rag.eval.harness import RunReport
     from datasheet_rag.eval.metrics import PairedComparison
     from datasheet_rag.eval.stats import Interval, PairedDiff
@@ -4440,6 +4440,12 @@ _ANSWER_MODEL = "global.anthropic.claude-sonnet-4-6"
     help="Graded runs are appended here; a rerun resumes from it.",
 )
 @click.option("--need-id", "need_ids", multiple=True, help="Run only these needs. Repeatable.")
+@click.option(
+    "--need-list",
+    type=click.Path(exists=True, path_type=Path),
+    default=None,
+    help="Run only the needs listed in this file (one id per line), e.g. eval/needs-ab.txt.",
+)
 @click.option("--limit", default=None, type=int, help="Run only the first N needs.")
 @click.option("--workers", default=4, type=int, help="Agent runs in parallel.")
 @click.option(
@@ -4457,6 +4463,14 @@ _ANSWER_MODEL = "global.anthropic.claude-sonnet-4-6"
     help="Grade the answers saved in --out again (judge calls only, no agent runs), then report.",
 )
 @click.option(
+    "--compare",
+    "compare_path",
+    type=click.Path(exists=True, path_type=Path),
+    default=None,
+    help="A/B: pair the runs in this baseline file with --out, per condition (default C). "
+    "Runs nothing.",
+)
+@click.option(
     "--json-out",
     type=click.Path(path_type=Path),
     default=None,
@@ -4470,30 +4484,67 @@ def eval_answer(
     judge_model: str | None,
     out_path: Path,
     need_ids: tuple[str, ...],
+    need_list: Path | None,
     limit: int | None,
     workers: int,
     max_usd: float,
     report_only: bool,
     regrade: bool,
+    compare_path: Path | None,
     json_out: Path | None,
 ) -> None:
     """Ask each need's question under three conditions and grade the answers.
 
     The headline is the grounded answer rate: correct and citing a gold page.
     Runs call Bedrock (agent and judge); PDFs come from settings.pdf_dir.
+
+    A/B testing a datasheet-rag change needs only condition C: run it into a
+    new --out on the variant, then --compare the baseline file against it.
     """
     from datasheet_rag.eval.agent import Condition
     from datasheet_rag.eval.answers import build_report, load_records
-    from datasheet_rag.eval.dataset import load_needs
+    from datasheet_rag.eval.dataset import load_need_ids, load_needs
 
-    conds: list[Condition] = list(conditions or ("A", "B", "C"))  # type: ignore[arg-type]
     needs = load_needs(needs_path)
-    if need_ids:
-        needs = [n for n in needs if n.need_id in set(need_ids)]
+    wanted = set(need_ids)
+    if need_list is not None:
+        wanted |= set(load_need_ids(need_list))
+    if wanted:
+        unknown = wanted - {n.need_id for n in needs}
+        if unknown:
+            raise click.ClickException(f"unknown need id(s): {', '.join(sorted(unknown))}")
+        needs = [n for n in needs if n.need_id in wanted]
     if limit is not None:
         needs = needs[:limit]
     if not needs:
         raise click.ClickException("no needs selected")
+
+    if compare_path is not None:
+        if report_only or regrade:
+            raise click.UsageError("--compare runs nothing; drop --report-only / --regrade")
+        from datasheet_rag.eval.answers import compare_runs
+
+        ids = {n.need_id for n in needs}
+        base = [r for r in load_records(compare_path) if r.need_id in ids]
+        variant = [r for r in load_records(out_path) if r.need_id in ids]
+        results = []
+        for cond in conditions or ("C",):
+            try:
+                cmp = compare_runs(base, variant, cond)  # type: ignore[arg-type]
+            except ValueError as e:
+                raise click.ClickException(str(e)) from e
+            _render_run_comparison(cmp, compare_path, out_path)
+            results.append(cmp)
+        if json_out:
+            json_out.parent.mkdir(parents=True, exist_ok=True)
+            json_out.write_text(
+                "[" + ",".join(c.model_dump_json(indent=2) for c in results) + "]",
+                encoding="utf-8",
+            )
+            console.print(f"[green]Report JSON →[/] {json_out}")
+        return
+
+    conds: list[Condition] = list(conditions or ("A", "B", "C"))  # type: ignore[arg-type]
 
     if report_only and regrade:
         raise click.UsageError("--report-only and --regrade exclude each other")
@@ -4740,6 +4791,50 @@ def _render_answer_report(report: AnswerReport) -> None:
             f"Spent on these runs: [bold]${report.total_cost_usd:.2f}[/] at list price "
             "(agent + judge, failed runs included)."
         )
+
+
+def _render_run_comparison(cmp: RunComparison, base_path: Path, variant_path: Path) -> None:
+    from datasheet_rag.eval.agent import CONDITION_NAMES
+
+    table = Table(
+        title=f"A/B · condition {cmp.condition} ({CONDITION_NAMES[cmp.condition]}) · "
+        f"n = {cmp.n} needs (dim = 95% bootstrap interval over needs)"
+    )
+    table.add_column("run", style="yellow")
+    table.add_column("model", style="dim")
+    table.add_column("grounded", justify="right", style="cyan")
+    table.add_column("correct", justify="right", style="green")
+    table.add_column("context tok", justify="right")
+    table.add_column("$ / need", justify="right")
+    for label, path, s in (("base", base_path, cmp.base), ("variant", variant_path, cmp.variant)):
+        table.add_row(
+            f"{label}\n[dim]{path.name}[/]",
+            s.model,
+            _mean_cell(s.grounded.value, s.grounded.ci),
+            _mean_cell(s.correct.value, s.correct.ci),
+            f"{s.mean_context_tokens:,.0f}",
+            "—" if s.mean_cost_usd is None else f"{s.mean_cost_usd:.3f}",
+            end_section=True,
+        )
+    table.add_row(
+        "variant − base",
+        "",
+        _diff_cell(cmp.grounded),
+        _diff_cell(cmp.correct),
+        f"{cmp.variant.mean_context_tokens - cmp.base.mean_context_tokens:+,.0f}",
+        "—"
+        if cmp.base.mean_cost_usd is None or cmp.variant.mean_cost_usd is None
+        else f"{cmp.variant.mean_cost_usd - cmp.base.mean_cost_usd:+.3f}",
+    )
+    console.print(table)
+    if cmp.flipped:
+        console.print(f"{len(cmp.flipped)} need(s) changed grounded outcome:")
+        for f in cmp.flipped:
+            arrow = "[green]gained[/]" if f.variant_grounded else "[red]lost[/]"
+            console.print(f"  {arrow} {f.need_id}")
+    for label, ids in (("base", cmp.only_base), ("variant", cmp.only_variant)):
+        if ids:
+            console.print(f"[yellow]{len(ids)} need(s) graded only in {label}[/], left out.")
 
 
 @eval_group.command("review", short_help="Hand-review the golden set in a web app.")

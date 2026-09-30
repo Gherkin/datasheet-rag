@@ -112,6 +112,17 @@ def load_needs(path: Path | str) -> list[Need]:
     return needs
 
 
+def load_need_ids(path: Path | str) -> list[str]:
+    """Read a list of need ids, one per line; blank lines and ``#`` comments
+    are skipped."""
+    ids: list[str] = []
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        line = line.split("#", 1)[0].strip()
+        if line:
+            ids.append(line)
+    return ids
+
+
 class EvalSet(BaseModel):
     """An ordered collection of :class:`GoldenItem` with JSONL I/O."""
 

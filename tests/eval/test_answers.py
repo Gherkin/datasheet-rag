@@ -13,11 +13,12 @@ from datasheet_rag.eval.answers import (
     AnswerRecord,
     LockedEmbedder,
     build_report,
+    compare_runs,
     load_records,
     regrade_records,
     run_answers,
 )
-from datasheet_rag.eval.dataset import Need
+from datasheet_rag.eval.dataset import Need, load_need_ids
 
 DOC = "d44efe998b6632d4ed49236a1eed2792fc74fc047e2f3bec3fe09399b16f2d96"
 M = "global.anthropic.claude-sonnet-4-6"
@@ -220,6 +221,60 @@ def test_report_ignores_other_models(tmp_path: Path) -> None:
     rec = AnswerRecord(need_id="N0", category="table_spec", condition="A", model="other")
     report = build_report([rec], ["A"], M)
     assert report.conditions[0].n == 0
+
+
+class WorseC(FakeModel):
+    """Condition C now answers even-numbered questions wrong."""
+
+    def converse(self, **kw: Any) -> dict[str, Any]:
+        resp = super().converse(**kw)
+        q = kw["messages"][0]["content"][0]["text"]
+        if "CONDITION C" in kw["system"][0]["text"] and int(q.split()[-1]) % 2 == 0:
+            for b in resp["output"]["message"]["content"]:
+                b["toolUse"]["input"].update(answer="6 V", value=6.0)
+        return resp
+
+
+def test_compare_runs_pairs_two_runs_of_c(tmp_path: Path) -> None:
+    base, variant = tmp_path / "base.jsonl", tmp_path / "variant.jsonl"
+    _run(FakeModel(), base, _needs(20), conds=("C",))
+    _run(WorseC(), variant, _needs(19), conds=("C",))
+    cmp = compare_runs(load_records(base), load_records(variant), "C")
+    assert cmp.n == 19
+    assert cmp.base.grounded.value == 1.0
+    assert cmp.variant.grounded.value == pytest.approx(9 / 19)
+    assert cmp.grounded.verdict == "worse"
+    assert [f.need_id for f in cmp.flipped] == sorted(f"N{i}" for i in range(0, 19, 2))
+    assert all(f.base_grounded and not f.variant_grounded for f in cmp.flipped)
+    assert cmp.only_base == ["N19"] and cmp.only_variant == []
+
+
+def test_compare_runs_refuses_a_file_with_two_models(tmp_path: Path) -> None:
+    out = tmp_path / "answers.jsonl"
+    _run(FakeModel(), out, _needs(2), conds=("C",))
+    other = [r.model_copy(update={"model": "other"}) for r in load_records(out)]
+    with pytest.raises(ValueError, match="several models"):
+        compare_runs([*load_records(out), *other][:3], load_records(out), "C")
+
+
+def test_compare_runs_needs_overlap(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="no need was graded"):
+        compare_runs([], [], "C")
+
+
+def test_need_list_skips_comments_and_blanks(tmp_path: Path) -> None:
+    p = tmp_path / "ids.txt"
+    p.write_text("# header\nN1\n\n  N2  # why\n#N3\n", encoding="utf-8")
+    assert load_need_ids(p) == ["N1", "N2"]
+
+
+def test_committed_ab_subset_names_real_needs() -> None:
+    from datasheet_rag.eval.dataset import load_needs
+
+    ids = load_need_ids("eval/needs-ab.txt")
+    known = {n.need_id for n in load_needs("eval/needs-mined.jsonl")}
+    assert len(ids) == len(set(ids)) > 30
+    assert set(ids) <= known
 
 
 def test_locked_embedder_passes_calls_through() -> None:
