@@ -15,7 +15,6 @@ the parent or a neighbour.
 
 from __future__ import annotations
 
-import json
 import re
 import sqlite3
 import unicodedata
@@ -66,22 +65,23 @@ def resolve_gold_chunk_ids(conn: sqlite3.Connection, item: GoldenItem) -> list[s
     """
     if not item.evidence or item.doc_id is None:
         return []
-    # A figure chunk's text is often just "[Figure]"; what search sees is its
-    # caption and vision description, so those count as the chunk's content.
-    rows = conn.execute(
-        "SELECT id, level, page_numbers, text, figure_caption, figure_description "
-        "FROM chunks WHERE doc_id = ? ORDER BY rowid",
-        (item.doc_id,),
-    ).fetchall()
     gold: list[str] = []
     for ev in item.evidence:
         want = tokens(ev.quote)
         if not want:
             continue
-        for chunk_id, level, pages_json, text, caption, description in rows:
-            if level == ChunkLevel.MACRO.value or chunk_id in gold:
-                continue
-            if ev.page not in json.loads(pages_json or "[]"):
+        # Only the evidence page's chunks: a reference manual holds thousands.
+        # A figure chunk's text is often just "[Figure]"; what search sees is
+        # its caption and vision description, so those count as its content.
+        rows = conn.execute(
+            "SELECT id, text, figure_caption, figure_description FROM chunks "
+            "WHERE doc_id = ? AND level != ? "
+            "AND EXISTS (SELECT 1 FROM json_each(page_numbers) WHERE value = ?) "
+            "ORDER BY rowid",
+            (item.doc_id, ChunkLevel.MACRO.value, ev.page),
+        ).fetchall()
+        for chunk_id, text, caption, description in rows:
+            if chunk_id in gold:
                 continue
             have = tokens(" ".join(t for t in (text, caption, description) if t))
             if len(want & have) / len(want) >= COVERAGE:

@@ -4306,7 +4306,9 @@ def _dump_reports_json(reports: list[RunReport], path: Path) -> None:
     "--set",
     "set_path",
     type=click.Path(exists=True, path_type=Path),
-    default=Path("eval/golden-mined.jsonl"),
+    # Not golden-mined.jsonl: its gold comes from evidence quotes, which this
+    # app cannot edit, and Accept would relabel its items source="human".
+    default=Path("eval/golden-auto.jsonl"),
     help="Golden set JSONL to review.",
 )
 @click.option("--port", default=0, type=int, help="Port (0 = pick a free one).")
