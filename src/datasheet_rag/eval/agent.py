@@ -389,6 +389,7 @@ def run_agent(
     *,
     max_turns: int = MAX_TURNS,
     run: AgentRun | None = None,
+    temperature: float | None = None,
 ) -> AgentRun:
     """Let the agent work on ``question`` until it submits an answer.
 
@@ -396,8 +397,15 @@ def run_agent(
     submitting, it is asked once more with only ``submit_answer`` allowed.
     Progress accumulates on ``run`` when given, so a caller still holds the
     token counts of a run that raises partway.
+
+    ``temperature`` None leaves the model's default, as a real client does.
+    An A/B run sets 0: most run-to-run flips come from the agent sampling a
+    different path, and they drown small differences between two versions.
     """
     run = run if run is not None else AgentRun()
+    inference: Block = {"maxTokens": 8192}
+    if temperature is not None:
+        inference["temperature"] = temperature
     # The system prompt and the tool list are the same on every turn; cache
     # points after each let every turn after the first read them from cache.
     # A prompt below the model's minimum simply is not cached.
@@ -416,7 +424,7 @@ def run_agent(
                 system=system,
                 messages=_with_cache_point(messages),
                 toolConfig=tool_config,
-                inferenceConfig={"maxTokens": 8192},
+                inferenceConfig=inference,
             )
             run.turns += 1
             usage = resp.get("usage", {})
