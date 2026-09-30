@@ -172,13 +172,16 @@ def _has_token(token: str, text: str) -> bool:
 
 
 def _has_numbers(item: str, text: str) -> bool:
-    """``item`` is a number or ratio and ``text`` has one equal in value:
-    "8.70" for "8.7", "1 : 0.7" for "1:0.70". A longer number ("18.75") does
-    not match."""
+    """``item`` is a number or ratio and ``text`` has each of its numbers,
+    equal in value: "8.70" for "8.7". A longer number ("18.75") does not
+    match. A ratio's numbers may appear anywhere, and its 1 may be left out,
+    since a ratio has many notations ("1:0.28:0.70", "Ns/Np = 0.28"); the
+    judge reads every pass."""
     want = [float(x) for x in re.findall(_NUM, item)]
-    sep = r"\s*:\s*"
-    pattern = rf"(?<![\d.]){sep.join([f'({_NUM})'] * len(want))}(?![\d]|\.\d)"
-    return any([float(x) for x in m.groups()] == want for m in re.finditer(pattern, text))
+    if len(want) > 1:
+        want = [x for x in want if x != 1.0]
+    found = {float(x) for x in re.findall(rf"(?<![\d.]){_NUM}", text)}
+    return all(x in found for x in want)
 
 
 def grade_set(items: Sequence[str], answer: str) -> bool:

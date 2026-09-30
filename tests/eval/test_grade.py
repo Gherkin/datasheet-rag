@@ -152,8 +152,9 @@ def test_set_ratios_compare_by_value() -> None:
     items = ["1:0.28", "1:0.70"]
     assert grade_set(items, "pri:sec = 1 : 0.28, pri:bias = 1:0.7")
     assert not grade_set(items, "pri:sec = 1:0.28, pri:bias = 1:0.75")
-    # Both numbers, but not as one ratio.
-    assert not grade_set(["1:0.28"], "1 A at 0.28 V")
+    # Other notations pass to the judge.
+    assert grade_set(items, "pri:sec:bias = 1:0.28:0.70")
+    assert grade_set(items, "Ns/Np = 0.28 and Nbias/Np = 0.7")
 
 
 def test_set_pin_map_clause_may_hold_a_comma() -> None:
