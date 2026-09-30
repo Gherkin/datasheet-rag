@@ -7,9 +7,13 @@ questions ask for more than the one number ("what resistor, and between which
 pins?"), so the judge then reads the whole answer against the reference.
 Free-text keys go to the judge alone.
 
-A numeric answer the code cannot read (no value, or a unit it cannot
-convert) goes to the judge rather than scoring zero, so a formatting slip is
-not counted as a wrong fact. The record says which grader decided.
+The code check fails an answer only when it is sure, because its miss is
+final while its pass still goes to the judge. So a numeric answer the code
+cannot read (no value, or a unit it cannot convert) goes to the judge, and
+so does a wrong ``value`` when the answer text states the key value: a
+question may ask for several numbers, and the agent may put another one in
+``value``. Set items compare numbers by value ("8.70" is "8.7"). The record
+says which grader decided.
 
 Grounded means correct *and* citing a gold page of the key's document: the
 answer can be checked against its source. An unanswerable need has no page
@@ -29,7 +33,8 @@ from datasheet_rag.eval.dataset import Need
 from datasheet_rag.eval.gold import normalize
 
 #: "numeric" / "set": failed the code check, no judge call. "numeric+judge" /
-#: "set+judge": passed it, then judged. "numeric->judge": value unreadable.
+#: "set+judge": passed it, then judged. "numeric->judge": value unreadable,
+#: or wrong while the answer text states the key value.
 Grader = Literal["numeric", "set", "numeric+judge", "set+judge", "numeric->judge", "judge"]
 
 
@@ -133,11 +138,30 @@ def grade_numeric(grading: dict[str, Any], value: float | None, unit: str | None
     return abs(value * got[0] - target) <= tol + 1e-6 * abs(target)
 
 
+_NUM = r"\d+(?:\.\d+)?"
+# A number and the unit written after it: "93.6 V", "24.9kΩ", "0.18 V/µs".
+_QUANTITY = re.compile(rf"(?<![\d.])({_NUM})\s?([^\s\d,;:()\[\]|]+)")
+
+
+def states_value(grading: dict[str, Any], answer: str) -> bool:
+    """Whether the answer text states the key value in a compatible unit.
+
+    Reads the raw text, not :func:`normalize`, which lowercases and would
+    turn MΩ into mΩ.
+    """
+    return any(
+        grade_numeric(grading, float(m.group(1)), m.group(2).rstrip(".")) is True
+        for m in _QUANTITY.finditer(answer)
+    )
+
+
 # ---------------------------------------------------------------------------
 # Sets
 # ---------------------------------------------------------------------------
 
 _ALIASES = {"nc": ("nc", "no connect", "not connected", "no connection", "n/c")}
+# A number or a ratio of numbers ("8.7", "1:0.70"), compared by value.
+_NUMBERS = re.compile(rf"{_NUM}(?:\s*:\s*{_NUM})*")
 
 
 def _has_token(token: str, text: str) -> bool:
@@ -147,18 +171,33 @@ def _has_token(token: str, text: str) -> bool:
     )
 
 
+def _has_numbers(item: str, text: str) -> bool:
+    """``item`` is a number or ratio and ``text`` has one equal in value:
+    "8.70" for "8.7", "1 : 0.7" for "1:0.70". A longer number ("18.75") does
+    not match."""
+    want = [float(x) for x in re.findall(_NUM, item)]
+    sep = r"\s*:\s*"
+    pattern = rf"(?<![\d.]){sep.join([f'({_NUM})'] * len(want))}(?![\d]|\.\d)"
+    return any([float(x) for x in m.groups()] == want for m in re.finditer(pattern, text))
+
+
 def grade_set(items: Sequence[str], answer: str) -> bool:
     """Every item appears in the answer. A pin map item ``"a=b"`` passes when
     ``a`` and ``b`` appear in one clause ("pin 1: anode", "EN (pin 1)")."""
     text = normalize(answer)
     # Split before normalizing, which folds newlines into spaces. A table row
-    # is one line, so it stays one clause.
-    clauses = [normalize(c) for c in re.split(r"[;,\n]|\.\s", answer) if c.strip()]
+    # is one line, so it stays one clause. Commas do not split: "pin 1,
+    # anode" is one clause. A swap written as a comma list then passes here,
+    # and the judge, who runs on every pass, catches it.
+    clauses = [normalize(c) for c in re.split(r"[;\n]|\.\s", answer) if c.strip()]
     for item in items:
         norm = normalize(item)
         if "=" in norm:
             a, b = (s.strip() for s in norm.split("=", 1))
             if not any(_has_token(a, c) and _has_token(b, c) for c in clauses):
+                return False
+        elif _NUMBERS.fullmatch(norm):
+            if not _has_numbers(norm, text):
                 return False
         elif not _has_token(norm, text):
             return False
@@ -298,7 +337,7 @@ def grade(
     if kind == "numeric" and need.answerable:
         fact = f"{g['bound']} {g['value']} {g['unit']}"
         ok = grade_numeric(g, final.value, final.unit)
-        if ok is False:
+        if ok is False and not states_value(g, final.answer):
             grader = "numeric"
             v = Verdict(correct=False, reason=f"value {final.value} {final.unit} vs key {fact}")
         else:

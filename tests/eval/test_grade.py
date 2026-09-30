@@ -15,6 +15,7 @@ from datasheet_rag.eval.grade import (
     grade_numeric,
     grade_set,
     parse_unit,
+    states_value,
 )
 
 DOC = "d44efe998b6632d4ed49236a1eed2792fc74fc047e2f3bec3fe09399b16f2d96"
@@ -141,6 +142,25 @@ def test_set_pin_map_needs_both_sides_in_one_clause() -> None:
     assert not grade_set(items, "Pin 1: cathode; pin 2: NC; pin 3: anode.")
 
 
+def test_set_numbers_compare_by_value() -> None:
+    items = ["2.17", "8.7", "17.39"]
+    assert grade_set(items, "500 V -> 2.17 A, 2000 V -> 8.70 A, 4000 V -> 17.39 A")
+    assert not grade_set(items, "500 V -> 2.17 A, 2000 V -> 8.75 A, 4000 V -> 17.39 A")
+
+
+def test_set_ratios_compare_by_value() -> None:
+    items = ["1:0.28", "1:0.70"]
+    assert grade_set(items, "pri:sec = 1 : 0.28, pri:bias = 1:0.7")
+    assert not grade_set(items, "pri:sec = 1:0.28, pri:bias = 1:0.75")
+    # Both numbers, but not as one ratio.
+    assert not grade_set(["1:0.28"], "1 A at 0.28 V")
+
+
+def test_set_pin_map_clause_may_hold_a_comma() -> None:
+    items = ["1=anode", "2=NC", "3=cathode"]
+    assert grade_set(items, "Pin 1, anode; pin 2, not connected; pin 3, cathode.")
+
+
 def test_set_part_numbers() -> None:
     items = ["TPS62A01APDDCR", "TPS62A01ADRLR"]
     assert grade_set(items, "Use TPS62A01APDDCR (SOT-23) or TPS62A01ADRLR (SOT-563).")
@@ -181,6 +201,24 @@ def test_wrong_value_fails_in_code_without_the_judge() -> None:
     assert judge.prompts == []
 
 
+def test_wrong_value_goes_to_judge_when_the_text_states_the_key() -> None:
+    # "Standoff, breakdown and clamping voltages?": the key is one of several
+    # numbers asked for, and the agent put another one in `value`.
+    judge = FakeJudge(correct=True)
+    final = FinalAnswer(answer="Standoff 3.3 V, clamp 5250 mV max.", value=3.3, unit="V")
+    g = grade(_need(G), final, client=judge, judge_model="m")
+    assert g.correct and g.grader == "numeric->judge"
+    assert "max 5.25 V" in judge.prompts[0]
+
+
+def test_states_value_keeps_the_prefix_case() -> None:
+    g = {"type": "numeric", "value": 2, "unit": "MOhm", "bound": "typ", "tolerance": 0}
+    assert states_value(g, "R = 2 MΩ.")
+    assert states_value(g, "R = 2MΩ")
+    assert not states_value(g, "R = 2 mΩ")
+    assert not states_value(g, "R = 2 kΩ, 12 MΩ")
+
+
 def test_right_value_still_needs_the_rest_of_the_answer() -> None:
     # "What resistor, and between which pins?": the value alone is not enough.
     judge = FakeJudge(correct=False)
@@ -195,7 +233,7 @@ def test_set_miss_fails_in_code_and_hit_goes_to_judge() -> None:
     need = _need({"type": "set", "items": ["1=anode", "3=cathode"]})
     judge = FakeJudge(correct=True)
     miss = grade(
-        need, FinalAnswer(answer="pin 1 cathode, pin 3 anode"), client=judge, judge_model="m"
+        need, FinalAnswer(answer="pin 1 cathode; pin 3 anode"), client=judge, judge_model="m"
     )
     assert not miss.correct and miss.grader == "set" and judge.prompts == []
     hit = grade(
@@ -203,6 +241,14 @@ def test_set_miss_fails_in_code_and_hit_goes_to_judge() -> None:
     )
     assert hit.correct and hit.grader == "set+judge"
     assert "- 1=anode" in judge.prompts[0]
+    # A swap in a comma list is one clause to the code check: the judge decides.
+    rejected = grade(
+        need,
+        FinalAnswer(answer="pin 1 cathode, pin 3 anode"),
+        client=FakeJudge(correct=False),
+        judge_model="m",
+    )
+    assert not rejected.correct and rejected.grader == "set+judge"
 
 
 def test_grade_numeric_grounded() -> None:
