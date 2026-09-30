@@ -48,7 +48,8 @@ class FakeJudge:
                 "message": {
                     "content": [{"toolUse": {"input": {"correct": self.correct, "reason": "fake"}}}]
                 }
-            }
+            },
+            "usage": {"inputTokens": 50, "outputTokens": 7},
         }
 
 
@@ -168,8 +169,40 @@ def test_grade_numeric_correct_but_uncited_is_not_grounded() -> None:
         _need(G), FinalAnswer(answer="5.25 V", value=5.25, unit="V"), client=judge, judge_model="m"
     )
     assert g.correct and not g.grounded
-    assert g.grader == "numeric"
+    assert g.grader == "numeric+judge"
+
+
+def test_wrong_value_fails_in_code_without_the_judge() -> None:
+    judge = FakeJudge(correct=True)
+    g = grade(
+        _need(G), FinalAnswer(answer="6 V", value=6.0, unit="V"), client=judge, judge_model="m"
+    )
+    assert not g.correct and g.grader == "numeric"
     assert judge.prompts == []
+
+
+def test_right_value_still_needs_the_rest_of_the_answer() -> None:
+    # "What resistor, and between which pins?": the value alone is not enough.
+    judge = FakeJudge(correct=False)
+    g = grade(
+        _need(G), FinalAnswer(answer="5.25 V", value=5.25, unit="V"), client=judge, judge_model="m"
+    )
+    assert not g.correct and g.grader == "numeric+judge"
+    assert "max 5.25 V" in judge.prompts[0]
+
+
+def test_set_miss_fails_in_code_and_hit_goes_to_judge() -> None:
+    need = _need({"type": "set", "items": ["1=anode", "3=cathode"]})
+    judge = FakeJudge(correct=True)
+    miss = grade(
+        need, FinalAnswer(answer="pin 1 cathode, pin 3 anode"), client=judge, judge_model="m"
+    )
+    assert not miss.correct and miss.grader == "set" and judge.prompts == []
+    hit = grade(
+        need, FinalAnswer(answer="pin 1 anode, pin 3 cathode"), client=judge, judge_model="m"
+    )
+    assert hit.correct and hit.grader == "set+judge"
+    assert "- 1=anode" in judge.prompts[0]
 
 
 def test_grade_numeric_grounded() -> None:
@@ -196,6 +229,7 @@ def test_grade_text_sends_rubric_and_notes_to_judge() -> None:
     judge = FakeJudge(correct=False)
     g = grade(need, FinalAnswer(answer="pin 84"), client=judge, judge_model="m")
     assert g.grader == "judge" and not g.correct
+    assert (g.judge_input_tokens, g.judge_output_tokens) == (50, 7)
     prompt = judge.prompts[0]
     assert "- 81" in prompt and "- digital" in prompt and "Pin 84 is a different signal" in prompt
 

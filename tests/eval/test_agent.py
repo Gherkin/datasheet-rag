@@ -77,8 +77,48 @@ def test_tool_then_submit() -> None:
     assert result["toolUseId"] == "t1" and result["status"] == "success"
     # The condition's guidance and both tools reached the model.
     assert "Use echo." in client.requests[0]["system"][0]["text"]
-    names = [t["toolSpec"]["name"] for t in client.requests[0]["toolConfig"]["tools"]]
-    assert names == ["echo", "submit_answer"]
+    tools = client.requests[0]["toolConfig"]["tools"]
+    assert [t["toolSpec"]["name"] for t in tools[:-1]] == ["echo", "submit_answer"]
+    assert tools[-1] == {"cachePoint": {"type": "default"}}
+
+
+def test_cache_point_sits_on_the_last_message_only() -> None:
+    client = Script(
+        _msg(_use("echo", {}, "a")),
+        _msg(_use("echo", {}, "b")),
+        _msg(_use("submit_answer", SUBMIT, "c")),
+    )
+    run_agent(client, "m", "q?", EchoTools())
+    cache = {"cachePoint": {"type": "default"}}
+    for req in client.requests:
+        assert req["system"][-1] == cache
+        msgs = req["messages"]
+        assert msgs[-1]["content"][-1] == cache
+        # Earlier messages carry none, or they would pile up past the limit.
+        assert all(cache not in m["content"] for m in msgs[:-1])
+
+
+def test_cache_tokens_are_tallied() -> None:
+    reply = _msg(_use("submit_answer", SUBMIT))
+    reply["usage"].update({"cacheReadInputTokens": 700, "cacheWriteInputTokens": 300})
+    run = run_agent(Script(reply), "m", "q?", NoTools())
+    assert (run.input_tokens, run.cache_read_tokens, run.cache_write_tokens) == (10, 700, 300)
+    assert run.context_tokens == 1010
+
+
+def test_partial_run_keeps_its_tokens_when_the_api_fails() -> None:
+    from datasheet_rag.eval.agent import AgentRun
+
+    class FailSecond(Script):
+        def converse(self, **kw: Any) -> dict[str, Any]:
+            if self.requests:
+                raise RuntimeError("throttled")
+            return super().converse(**kw)
+
+    run = AgentRun()
+    with pytest.raises(RuntimeError):
+        run_agent(FailSecond(_msg(_use("echo", {}))), "m", "q?", EchoTools(), run=run)
+    assert run.turns == 1 and run.input_tokens == 10
 
 
 def test_end_turn_without_submit_is_forced() -> None:

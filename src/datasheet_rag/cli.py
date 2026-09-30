@@ -4409,8 +4409,9 @@ def _dump_reports_json(reports: list[RunReport], path: Path, headline_k: int) ->
     console.print(f"[green]Reports JSON →[/] {path}")
 
 
-#: Agent and judge model for the answer eval: a capable agent at moderate cost.
-_ANSWER_MODEL = "global.anthropic.claude-sonnet-5-5"
+#: Agent and judge model for the answer eval. The global profile bills about
+#: 10% below the eu. one for the same model (see costs.CLAUDE_TOKEN_PRICES).
+_ANSWER_MODEL = "global.anthropic.claude-sonnet-4-6"
 
 
 @eval_group.command("answer", short_help="Grounded answer rate: no tool vs raw PDF vs RAG.")
@@ -4441,7 +4442,20 @@ _ANSWER_MODEL = "global.anthropic.claude-sonnet-5-5"
 @click.option("--need-id", "need_ids", multiple=True, help="Run only these needs. Repeatable.")
 @click.option("--limit", default=None, type=int, help="Run only the first N needs.")
 @click.option("--workers", default=4, type=int, help="Agent runs in parallel.")
+@click.option(
+    "--max-usd",
+    default=5.0,
+    type=float,
+    show_default=True,
+    help="Stop starting new runs once this invocation has spent this much (list price). "
+    "Low by default so a full run is a deliberate choice.",
+)
 @click.option("--report-only", is_flag=True, help="Report on --out without running anything.")
+@click.option(
+    "--regrade",
+    is_flag=True,
+    help="Grade the answers saved in --out again (judge calls only, no agent runs), then report.",
+)
 @click.option(
     "--json-out",
     type=click.Path(path_type=Path),
@@ -4458,7 +4472,9 @@ def eval_answer(
     need_ids: tuple[str, ...],
     limit: int | None,
     workers: int,
+    max_usd: float,
     report_only: bool,
+    regrade: bool,
     json_out: Path | None,
 ) -> None:
     """Ask each need's question under three conditions and grade the answers.
@@ -4479,9 +4495,34 @@ def eval_answer(
     if not needs:
         raise click.ClickException("no needs selected")
 
-    if not report_only:
+    if report_only and regrade:
+        raise click.UsageError("--report-only and --regrade exclude each other")
+    if regrade:
+        from datasheet_rag.aws import bedrock_runtime_client
+        from datasheet_rag.eval.answers import regrade_records
+
+        judge = judge_model or model_id
+        n, failed = regrade_records(
+            out_path,
+            needs,
+            client=bedrock_runtime_client(read_timeout=300, max_attempts=10),
+            judge_model=judge,
+            workers=workers,
+        )
+        console.print(f"[cyan]Regraded[/] {n} answer(s) in {out_path} with {judge}.")
+        for f in failed:
+            console.print(f"  [red]judge failed, old grade kept[/] {f}")
+    elif not report_only:
+        from datasheet_rag.costs import CLAUDE_TOKEN_PRICES
+
+        unpriced = {model_id, judge_model or model_id} - set(CLAUDE_TOKEN_PRICES)
+        if unpriced:
+            raise click.ClickException(
+                f"no price for {', '.join(sorted(unpriced))}, so --max-usd cannot be "
+                "enforced; add it to costs.CLAUDE_TOKEN_PRICES"
+            )
         _run_answer_eval(
-            db_path, needs, conds, model_id, judge_model or model_id, out_path, workers
+            db_path, needs, conds, model_id, judge_model or model_id, out_path, workers, max_usd
         )
 
     wanted = {n.need_id for n in needs}
@@ -4502,6 +4543,7 @@ def _run_answer_eval(
     judge_model: str,
     out_path: Path,
     workers: int,
+    max_usd: float,
 ) -> None:
     import logging
 
@@ -4576,7 +4618,8 @@ def _run_answer_eval(
     names = ", ".join(f"{c} = {CONDITION_NAMES[c]}" for c in conds)
     console.print(
         f"[cyan]Answer eval[/]: {len(needs)} needs × {len(conds)} conditions ({names}), "
-        f"project {project}, model {model_id}, judge {judge_model} → {out_path}"
+        f"project {project}, model {model_id}, judge {judge_model}, "
+        f"cap ${max_usd:.2f} → {out_path}"
     )
 
     def progress(rec: AnswerRecord) -> None:
@@ -4593,7 +4636,8 @@ def _run_answer_eval(
         )
         console.print(
             f"  {rec.condition} {rec.need_id}: {mark} ({rec.grade.grader}, "
-            f"{len(rec.run.tool_calls)} calls, {rec.run.wall_s:.0f} s)"
+            f"{len(rec.run.tool_calls)} calls, {rec.run.wall_s:.0f} s, "
+            f"${rec.cost_usd() or 0.0:.3f})"
         )
 
     run_answers(
@@ -4606,6 +4650,7 @@ def _run_answer_eval(
         out_path=out_path,
         workers=workers,
         progress=progress,
+        max_usd=max_usd,
     )
     conn.close()
 
@@ -4624,20 +4669,22 @@ def _render_answer_report(report: AnswerReport) -> None:
     table.add_column("condition", style="yellow")
     table.add_column("grounded", justify="right", style="cyan")
     table.add_column("correct", justify="right", style="green")
-    table.add_column("tokens in", justify="right")
-    table.add_column("tokens out", justify="right")
+    table.add_column("context tok\n[dim]cached[/]", justify="right")
+    table.add_column("out tok", justify="right")
     table.add_column("tool calls", justify="right")
     table.add_column("wall s", justify="right")
+    table.add_column("$ / need", justify="right")
     table.add_column("graded by", style="dim")
     for s in report.conditions:
         table.add_row(
             f"{s.condition} · {CONDITION_NAMES[s.condition]}",
             _mean_cell(s.grounded.value, s.grounded.ci),
             _mean_cell(s.correct.value, s.correct.ci),
-            f"{s.mean_input_tokens:,.0f}",
+            f"{s.mean_context_tokens:,.0f}\n[dim]{s.cache_read_share:.0%}[/]",
             f"{s.mean_output_tokens:,.0f}",
             f"{s.mean_tool_calls:.1f}",
             f"{s.mean_wall_s:.0f}",
+            "—" if s.mean_cost_usd is None else f"{s.mean_cost_usd:.3f}",
             ", ".join(f"{k} {v}" for k, v in sorted(s.graders.items()))
             + (f"; {s.not_submitted} never submitted" if s.not_submitted else ""),
             end_section=True,
@@ -4649,15 +4696,17 @@ def _render_answer_report(report: AnswerReport) -> None:
         diffs.add_column("comparison", style="yellow")
         diffs.add_column("Δgrounded", justify="right")
         diffs.add_column("Δcorrect", justify="right")
-        diffs.add_column("Δtokens in", justify="right")
+        diffs.add_column("Δcontext tok", justify="right")
         diffs.add_column("Δwall s", justify="right")
+        diffs.add_column("Δ$ / need", justify="right")
         for cmp in report.comparisons:
             diffs.add_row(
                 f"{cmp.later} − {cmp.earlier}",
                 _diff_cell(cmp.grounded),
                 _diff_cell(cmp.correct),
-                f"{cmp.input_tokens:+,.0f}",
+                f"{cmp.context_tokens:+,.0f}",
                 f"{cmp.wall_s:+.0f}",
+                "—" if cmp.cost_usd is None else f"{cmp.cost_usd:+.3f}",
                 end_section=True,
             )
         console.print(diffs)
@@ -4686,6 +4735,11 @@ def _render_answer_report(report: AnswerReport) -> None:
         console.print(f"[red]{len(report.failed)} run(s) failed[/] (rerun retries them):")
         for f in report.failed:
             console.print(f"  - {f}")
+    if report.total_cost_usd is not None:
+        console.print(
+            f"Spent on these runs: [bold]${report.total_cost_usd:.2f}[/] at list price "
+            "(agent + judge, failed runs included)."
+        )
 
 
 @eval_group.command("review", short_help="Hand-review the golden set in a web app.")

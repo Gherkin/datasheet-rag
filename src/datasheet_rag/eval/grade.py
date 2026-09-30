@@ -1,13 +1,15 @@
 """Grade an agent's final answer against a need's answer key (GH #93).
 
-Numeric and set keys are graded in code: a value within tolerance of the key
-in a compatible unit, or every listed item present. Only free-text keys go
-to an LLM judge, which reads the reference answer, the facts it must state
-and the claims that make it wrong.
+Numeric and set keys are checked in code first: a value within tolerance of
+the key in a compatible unit, or every listed item present. A miss there is
+wrong, with no model call. A pass is necessary but not enough, because most
+questions ask for more than the one number ("what resistor, and between which
+pins?"), so the judge then reads the whole answer against the reference.
+Free-text keys go to the judge alone.
 
 A numeric answer the code cannot read (no value, or a unit it cannot
-convert) also goes to the judge rather than scoring zero, so a formatting
-slip is not counted as a wrong fact. The record says which grader decided.
+convert) goes to the judge rather than scoring zero, so a formatting slip is
+not counted as a wrong fact. The record says which grader decided.
 
 Grounded means correct *and* citing a gold page of the key's document: the
 answer can be checked against its source. An unanswerable need has no page
@@ -26,7 +28,9 @@ from pydantic import BaseModel, Field
 from datasheet_rag.eval.dataset import Need
 from datasheet_rag.eval.gold import normalize
 
-Grader = Literal["numeric", "set", "judge", "numeric->judge"]
+#: "numeric" / "set": failed the code check, no judge call. "numeric+judge" /
+#: "set+judge": passed it, then judged. "numeric->judge": value unreadable.
+Grader = Literal["numeric", "set", "numeric+judge", "set+judge", "numeric->judge", "judge"]
 
 
 class Citation(BaseModel):
@@ -49,6 +53,16 @@ class Grade(BaseModel):
     grounded: bool
     grader: Grader
     reason: str = ""
+    # What the judge call used; zero when the code graded it.
+    judge_input_tokens: int = 0
+    judge_output_tokens: int = 0
+
+
+class Verdict(BaseModel):
+    correct: bool
+    reason: str
+    input_tokens: int = 0
+    output_tokens: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -168,14 +182,27 @@ class Converse(Protocol):
 
 
 _JUDGE_SYSTEM = (
-    "You grade answers to questions about electronic parts against an answer "
-    "key written from the datasheet. Be strict about facts and lenient about "
-    "wording: equivalent units, phrasing and order are fine. An answer is "
-    "correct only when it states every key fact, makes none of the "
-    "disqualifying claims, and gives no value for the asked quantity that "
-    "conflicts with the key. Extra correct detail is fine. When the key says "
-    "the documents do not state the answer, the answer is correct only if it "
-    "says so instead of supplying a value. Call the verdict tool."
+    "You grade answers to questions about electronic parts. The reference "
+    "answer was written from the datasheet and checked against it; it is the "
+    "standard. Grade substance, not wording: equivalent units, phrasing and "
+    "order are fine.\n\n"
+    "The answer is correct only when all of these hold:\n"
+    "1. It states every key fact with the same meaning the reference answer "
+    "gives it. The key facts are a shorthand checklist, not the standard: a "
+    "number or word that appears inside a wrong claim (the right value on the "
+    "wrong pin, the right rail named as the wrong supply) does not count.\n"
+    "2. Nothing it says about what the question asks contradicts the "
+    "reference answer or the grader notes. The grader notes are binding: a "
+    "claim they call wrong makes the answer wrong.\n"
+    "3. It makes none of the disqualifying claims.\n"
+    "Extra detail beyond the question is ignored unless it contradicts the "
+    "reference.\n\n"
+    "When the reference says the documents do not state the answer, the "
+    "answer is correct if it clearly says the documents (or its sources) do "
+    "not give it. It may add values from general knowledge only if it labels "
+    "them as not from the documents; a value presented as documented is "
+    "wrong.\n\n"
+    "Call the verdict tool."
 )
 
 _VERDICT_TOOL = {
@@ -204,7 +231,7 @@ def judge(
     *,
     key_facts: Sequence[str],
     must_not: Sequence[str] = (),
-) -> tuple[bool, str]:
+) -> Verdict:
     """Ask the judge model whether ``answer`` matches the key."""
     prompt = "\n\n".join(
         [
@@ -221,12 +248,19 @@ def judge(
         system=[{"text": _JUDGE_SYSTEM}],
         messages=[{"role": "user", "content": [{"text": prompt}]}],
         toolConfig={"tools": [_VERDICT_TOOL], "toolChoice": {"tool": {"name": "verdict"}}},
-        inferenceConfig={"maxTokens": 1024},
+        # Temperature 0 so a regrade of the same answer gives the same verdict.
+        inferenceConfig={"maxTokens": 1024, "temperature": 0},
     )
+    usage = resp.get("usage", {})
     for block in resp["output"]["message"]["content"]:
         if "toolUse" in block:
             data = block["toolUse"]["input"]
-            return bool(data.get("correct")), str(data.get("reason", ""))
+            return Verdict(
+                correct=bool(data.get("correct")),
+                reason=str(data.get("reason", "")),
+                input_tokens=int(usage.get("inputTokens", 0)),
+                output_tokens=int(usage.get("outputTokens", 0)),
+            )
     raise RuntimeError(f"judge returned no verdict: {json.dumps(resp['output'])[:300]}")
 
 
@@ -259,30 +293,28 @@ def grade(
         return Grade(correct=False, grounded=False, grader="judge", reason="no answer submitted")
     g = need.grading
     kind = g.get("type")
+    grader: Grader
+    v: Verdict
     if kind == "numeric" and need.answerable:
-        verdict = grade_numeric(g, final.value, final.unit)
-        if verdict is not None:
-            grader: Grader = "numeric"
-            correct, reason = (
-                verdict,
-                f"value {final.value} {final.unit} vs key {g['value']} {g['unit']}",
-            )
+        fact = f"{g['bound']} {g['value']} {g['unit']}"
+        ok = grade_numeric(g, final.value, final.unit)
+        if ok is False:
+            grader = "numeric"
+            v = Verdict(correct=False, reason=f"value {final.value} {final.unit} vs key {fact}")
         else:
-            grader = "numeric->judge"
-            correct, reason = judge(
-                client,
-                judge_model,
-                need,
-                final.answer,
-                key_facts=[f"{g['bound']} {g['value']} {g['unit']}"],
-            )
+            grader = "numeric+judge" if ok else "numeric->judge"
+            v = judge(client, judge_model, need, final.answer, key_facts=[fact])
     elif kind == "set" and need.answerable:
-        grader = "set"
-        correct = grade_set([str(i) for i in g["items"]], final.answer)
-        reason = "all items present" if correct else f"missing some of {g['items']}"
+        items = [str(i) for i in g["items"]]
+        if not grade_set(items, final.answer):
+            grader = "set"
+            v = Verdict(correct=False, reason=f"missing some of {items}")
+        else:
+            grader = "set+judge"
+            v = judge(client, judge_model, need, final.answer, key_facts=items)
     else:
         grader = "judge"
-        correct, reason = judge(
+        v = judge(
             client,
             judge_model,
             need,
@@ -290,5 +322,12 @@ def grade(
             key_facts=[str(f) for f in g.get("must_mention", [])] or [need.answer],
             must_not=[str(m) for m in g.get("must_not", [])],
         )
-    grounded = correct and (not need.answerable or cites_gold(need, final.citations))
-    return Grade(correct=correct, grounded=grounded, grader=grader, reason=reason)
+    grounded = v.correct and (not need.answerable or cites_gold(need, final.citations))
+    return Grade(
+        correct=v.correct,
+        grounded=grounded,
+        grader=grader,
+        reason=v.reason,
+        judge_input_tokens=v.input_tokens,
+        judge_output_tokens=v.output_tokens,
+    )

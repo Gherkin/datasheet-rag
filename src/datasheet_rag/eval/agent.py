@@ -339,11 +339,36 @@ class AgentRun(BaseModel):
     final: FinalAnswer | None = None
     turns: int = 0
     tool_calls: list[ToolCall] = Field(default_factory=list)
+    # Input tokens are split as Bedrock bills them: uncached, read from the
+    # prompt cache, and written to it. Their sum is the context the model read.
     input_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
     output_tokens: int = 0
     wall_s: float = 0.0
     # Why the loop ended when it did not end on submit_answer.
     stop: str = "submitted"
+
+    @property
+    def context_tokens(self) -> int:
+        """Every input token the model read, cached or not."""
+        return self.input_tokens + self.cache_read_tokens + self.cache_write_tokens
+
+
+_CACHE_POINT: Block = {"cachePoint": {"type": "default"}}
+
+
+def _with_cache_point(messages: list[Block]) -> list[Block]:
+    """The conversation with a cache point after its last message.
+
+    Every turn resends the whole conversation. A cache point at its end lets
+    the next turn read all of it from the cache (a tenth of the input price)
+    and pay full price only for the new tool results. Only the request gets
+    the marker: kept in the history, the markers would pile up past the
+    four a request may carry.
+    """
+    *head, last = messages
+    return [*head, {**last, "content": [*last["content"], _CACHE_POINT]}]
 
 
 def _clip(blocks: list[Block]) -> list[Block]:
@@ -363,15 +388,21 @@ def run_agent(
     tools: ToolSet,
     *,
     max_turns: int = MAX_TURNS,
+    run: AgentRun | None = None,
 ) -> AgentRun:
     """Let the agent work on ``question`` until it submits an answer.
 
     After ``max_turns`` model turns, or when the agent stops without
     submitting, it is asked once more with only ``submit_answer`` allowed.
+    Progress accumulates on ``run`` when given, so a caller still holds the
+    token counts of a run that raises partway.
     """
-    run = AgentRun()
-    system = [{"text": _SYSTEM.format(guidance=tools.guidance())}]
-    specs = [*tools.specs(), _SUBMIT]
+    run = run if run is not None else AgentRun()
+    # The system prompt and the tool list are the same on every turn; cache
+    # points after each let every turn after the first read them from cache.
+    # A prompt below the model's minimum simply is not cached.
+    system = [{"text": _SYSTEM.format(guidance=tools.guidance())}, _CACHE_POINT]
+    specs = [*tools.specs(), _SUBMIT, _CACHE_POINT]
     messages: list[Block] = [{"role": "user", "content": [{"text": question}]}]
     t0 = time.perf_counter()
     forced = False
@@ -383,13 +414,15 @@ def run_agent(
             resp = client.converse(
                 modelId=model_id,
                 system=system,
-                messages=messages,
+                messages=_with_cache_point(messages),
                 toolConfig=tool_config,
                 inferenceConfig={"maxTokens": 8192},
             )
             run.turns += 1
             usage = resp.get("usage", {})
             run.input_tokens += int(usage.get("inputTokens", 0))
+            run.cache_read_tokens += int(usage.get("cacheReadInputTokens", 0))
+            run.cache_write_tokens += int(usage.get("cacheWriteInputTokens", 0))
             run.output_tokens += int(usage.get("outputTokens", 0))
             msg = resp["output"]["message"]
             messages.append(msg)
