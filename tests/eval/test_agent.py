@@ -60,6 +60,15 @@ class EchoTools:
 SUBMIT = {"answer": "5.25 V", "value": 5.25, "unit": "V", "citations": [{"doc_id": "d", "page": 3}]}
 
 
+def test_temperature_is_sent_only_when_set() -> None:
+    default = Script(_msg(_use("submit_answer", SUBMIT)))
+    run_agent(default, "m", "q?", NoTools())
+    assert "temperature" not in default.requests[0]["inferenceConfig"]
+    zero = Script(_msg(_use("submit_answer", SUBMIT)))
+    run_agent(zero, "m", "q?", NoTools(), temperature=0)
+    assert zero.requests[0]["inferenceConfig"]["temperature"] == 0
+
+
 def test_tool_then_submit() -> None:
     client = Script(
         _msg({"text": "looking"}, _use("echo", {"x": 1})),

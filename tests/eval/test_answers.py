@@ -99,7 +99,13 @@ class FakeModel:
         }
 
 
-def _run(model: FakeModel, out: Path, needs: list[Need], conds: tuple[str, ...] = ("A", "B", "C")):
+def _run(
+    model: FakeModel,
+    out: Path,
+    needs: list[Need],
+    conds: tuple[str, ...] = ("A", "B", "C"),
+    temperature: float | None = None,
+):
     return run_answers(
         needs,
         conds,  # type: ignore[arg-type]
@@ -109,6 +115,7 @@ def _run(model: FakeModel, out: Path, needs: list[Need], conds: tuple[str, ...] 
         toolset_for=Guided,
         out_path=out,
         workers=3,
+        temperature=temperature,
     )
 
 
@@ -291,6 +298,27 @@ def test_compare_runs_pairs_two_runs_of_c(tmp_path: Path) -> None:
     assert [f.need_id for f in cmp.flipped] == sorted(f"N{i}" for i in range(0, 19, 2))
     assert all(f.base_grounded and not f.variant_grounded for f in cmp.flipped)
     assert cmp.only_base == ["N19"] and cmp.only_variant == []
+
+
+def test_temperature_is_recorded_and_not_mixed_in_one_file(tmp_path: Path) -> None:
+    out = tmp_path / "answers.jsonl"
+    _run(FakeModel(), out, _needs(1), conds=("C",), temperature=0.0)
+    assert [r.temperature for r in load_records(out)] == [0.0]
+    # Resume at the same temperature is fine; the default would mix setups.
+    _run(FakeModel(), out, _needs(2), conds=("C",), temperature=0.0)
+    with pytest.raises(ValueError, match="at temperature 0.0; .* temperature default"):
+        _run(FakeModel(), out, _needs(2), conds=("C",))
+
+
+def test_compare_shows_each_sides_temperature(tmp_path: Path) -> None:
+    base, variant = tmp_path / "base.jsonl", tmp_path / "variant.jsonl"
+    _run(FakeModel(), base, _needs(3), conds=("C",))
+    _run(FakeModel(), variant, _needs(3), conds=("C",), temperature=0.0)
+    cmp = compare_runs(load_records(base), load_records(variant), "C")
+    assert (cmp.base.temperature, cmp.variant.temperature) == (None, 0.0)
+    mixed = [*load_records(base), *load_records(variant)[:1]]
+    with pytest.raises(ValueError, match=r"several temperatures \(0.0, default\)"):
+        compare_runs(mixed, load_records(variant), "C")
 
 
 def test_compare_runs_refuses_a_file_with_two_models(tmp_path: Path) -> None:

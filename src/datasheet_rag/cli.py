@@ -4456,6 +4456,13 @@ _ANSWER_MODEL = "global.anthropic.claude-sonnet-4-6"
     help="Stop starting new runs once this invocation has spent this much (list price). "
     "Low by default so a full run is a deliberate choice.",
 )
+@click.option(
+    "--agent-temperature",
+    type=click.FloatRange(0.0, 1.0),
+    default=None,
+    help="The agent's sampling temperature (default: the model's own, as a real client). "
+    "Use 0 for A/B runs, on both sides, to cut run-to-run noise.",
+)
 @click.option("--report-only", is_flag=True, help="Report on --out without running anything.")
 @click.option(
     "--regrade",
@@ -4488,6 +4495,7 @@ def eval_answer(
     limit: int | None,
     workers: int,
     max_usd: float,
+    agent_temperature: float | None,
     report_only: bool,
     regrade: bool,
     compare_path: Path | None,
@@ -4501,8 +4509,11 @@ def eval_answer(
     A/B testing a datasheet-rag change needs only condition C: run it into a
     new --out on the variant, then --compare the baseline file against it.
     Day to day, and sparingly: --condition C --need-list eval/needs-ab.txt
-    --model global.anthropic.claude-haiku-4-5-20251001-v1:0 (about $3.40).
-    For big changes, measure with the default Sonnet on all needs.
+    --model global.anthropic.claude-haiku-4-5-20251001-v1:0
+    --agent-temperature 0 (about $3 a side). A baseline serves later
+    variants while the model, store and code under test stay the same.
+    At the default temperature, two identical Haiku runs flipped 7 of 47
+    needs. For big changes, measure with the default Sonnet on all needs.
     """
     from datasheet_rag.eval.agent import Condition
     from datasheet_rag.eval.answers import build_report, load_records
@@ -4576,7 +4587,15 @@ def eval_answer(
                 "enforced; add it to costs.CLAUDE_TOKEN_PRICES"
             )
         _run_answer_eval(
-            db_path, needs, conds, model_id, judge_model or model_id, out_path, workers, max_usd
+            db_path,
+            needs,
+            conds,
+            model_id,
+            judge_model or model_id,
+            out_path,
+            workers,
+            max_usd,
+            agent_temperature,
         )
 
     wanted = {n.need_id for n in needs}
@@ -4598,6 +4617,7 @@ def _run_answer_eval(
     out_path: Path,
     workers: int,
     max_usd: float,
+    agent_temperature: float | None,
 ) -> None:
     import logging
 
@@ -4672,8 +4692,9 @@ def _run_answer_eval(
     names = ", ".join(f"{c} = {CONDITION_NAMES[c]}" for c in conds)
     console.print(
         f"[cyan]Answer eval[/]: {len(needs)} needs × {len(conds)} conditions ({names}), "
-        f"project {project}, model {model_id}, judge {judge_model}, "
-        f"cap ${max_usd:.2f} → {out_path}"
+        f"project {project}, model {model_id}"
+        + (f" at temperature {agent_temperature}" if agent_temperature is not None else "")
+        + f", judge {judge_model}, cap ${max_usd:.2f} → {out_path}"
     )
 
     def progress(rec: AnswerRecord) -> None:
@@ -4700,18 +4721,22 @@ def _run_answer_eval(
             f"${rec.cost_usd() or 0.0:.3f})"
         )
 
-    run_answers(
-        needs,
-        conds,
-        model_id=model_id,
-        judge_model=judge_model,
-        client=client,
-        toolset_for=toolset_for,
-        out_path=out_path,
-        workers=workers,
-        progress=progress,
-        max_usd=max_usd,
-    )
+    try:
+        run_answers(
+            needs,
+            conds,
+            model_id=model_id,
+            judge_model=judge_model,
+            client=client,
+            toolset_for=toolset_for,
+            out_path=out_path,
+            workers=workers,
+            progress=progress,
+            max_usd=max_usd,
+            temperature=agent_temperature,
+        )
+    except ValueError as e:
+        raise click.ClickException(str(e)) from e
     conn.close()
 
 
@@ -4825,7 +4850,7 @@ def _render_run_comparison(cmp: RunComparison, base_path: Path, variant_path: Pa
     for label, path, s in (("base", base_path, cmp.base), ("variant", variant_path, cmp.variant)):
         table.add_row(
             f"{label}\n[dim]{path.name}[/]",
-            s.model,
+            s.model + f"\ntemperature {'default' if s.temperature is None else s.temperature}",
             _mean_cell(s.grounded.value, s.grounded.ci),
             _mean_cell(s.correct.value, s.correct.ci),
             f"{s.mean_context_tokens:,.0f}",
@@ -4843,6 +4868,11 @@ def _render_run_comparison(cmp: RunComparison, base_path: Path, variant_path: Pa
         else f"{cmp.variant.mean_cost_usd - cmp.base.mean_cost_usd:+.3f}",
     )
     console.print(table)
+    if cmp.base.temperature != cmp.variant.temperature:
+        console.print(
+            "[yellow]The two runs used different agent temperatures[/]: the difference "
+            "mixes that with whatever else changed."
+        )
     if cmp.flipped:
         console.print(f"{len(cmp.flipped)} need(s) changed grounded outcome:")
         for f in cmp.flipped:

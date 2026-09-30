@@ -68,6 +68,8 @@ class AnswerRecord(BaseModel):
     condition: Condition
     model: str
     judge_model: str = ""
+    # The agent's sampling temperature; None is the model's default.
+    temperature: float | None = None
     # Kept on a failed run too: the turns before the failure were billed.
     run: AgentRun | None = None
     grade: Grade | None = None
@@ -115,6 +117,11 @@ def load_records(path: Path) -> list[AnswerRecord]:
         return [AnswerRecord.model_validate_json(line) for line in fh if line.strip()]
 
 
+def _temperatures(temps: Iterable[float | None]) -> str:
+    """``"0.0, default"``: None is the model's default temperature."""
+    return ", ".join(sorted("default" if t is None else str(t) for t in temps))
+
+
 def run_answers(
     needs: Sequence[Need],
     conditions: Sequence[Condition],
@@ -127,8 +134,13 @@ def run_answers(
     workers: int = 4,
     progress: Callable[[AnswerRecord], None] | None = None,
     max_usd: float | None = None,
+    temperature: float | None = None,
 ) -> list[AnswerRecord]:
     """Run and grade every (need, condition) not already in ``out_path``.
+
+    ``temperature`` is the agent's (None: the model default). One file holds
+    one temperature per model: resume and the report key on the model, so a
+    file with both would mix two setups. That is refused.
 
     ``toolset_for`` is called in the worker thread, so a tool set that holds
     a SQLite connection can be built per thread.
@@ -141,6 +153,13 @@ def run_answers(
     calls only, outside the cap: about a cent each). Their agent run is done
     and is not repeated.
     """
+    other = {r.temperature for r in load_records(out_path) if r.model == model_id} - {temperature}
+    if other:
+        raise ValueError(
+            f"{out_path} already holds {model_id} runs at temperature "
+            f"{_temperatures(other)}; use a new --out for temperature "
+            f"{_temperatures({temperature})}"
+        )
     grade_pending(
         out_path,
         needs,
@@ -175,11 +194,14 @@ def run_answers(
             condition=cond,
             model=model_id,
             judge_model=judge_model,
+            temperature=temperature,
             run=AgentRun(),
         )
         assert rec.run is not None
         try:
-            run_agent(client, model_id, need.question, tools(cond), run=rec.run)
+            run_agent(
+                client, model_id, need.question, tools(cond), run=rec.run, temperature=temperature
+            )
         except Exception as e:  # noqa: BLE001 - recorded and retried next run
             rec.error = f"{type(e).__name__}: {e}\n{traceback.format_exc(limit=3)}"
         else:
@@ -514,6 +536,7 @@ class RunSide(BaseModel):
     """One run of a condition, on the needs both runs graded."""
 
     model: str
+    temperature: float | None = None
     grounded: Rate
     correct: Rate
     mean_context_tokens: float
@@ -545,7 +568,8 @@ class RunComparison(BaseModel):
 def _graded_by_need(
     records: Sequence[AnswerRecord], condition: Condition
 ) -> dict[str, AnswerRecord]:
-    """The latest graded record per need; one model only, or it is ambiguous."""
+    """The latest graded record per need; one model and one temperature
+    only, or it is ambiguous."""
     out: dict[str, AnswerRecord] = {}
     for r in records:
         if r.condition == condition and r.error is None and r.grade is not None and r.run:
@@ -555,6 +579,12 @@ def _graded_by_need(
         raise ValueError(
             f"condition {condition} was run with several models ({', '.join(sorted(models))}); "
             "compare one model per file"
+        )
+    temps = {r.temperature for r in out.values()}
+    if len(temps) > 1:
+        raise ValueError(
+            f"condition {condition} was run at several temperatures "
+            f"({_temperatures(temps)}); compare one per file"
         )
     return out
 
@@ -579,6 +609,7 @@ def compare_runs(
     def side(rs: list[AnswerRecord]) -> RunSide:
         return RunSide(
             model=rs[0].model,
+            temperature=rs[0].temperature,
             grounded=_rate([float(r.grade.grounded) for r in rs if r.grade], common),
             correct=_rate([float(r.grade.correct) for r in rs if r.grade], common),
             mean_context_tokens=_mean(r.run.context_tokens for r in rs if r.run),
