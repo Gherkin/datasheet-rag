@@ -348,6 +348,13 @@ class AgentRun(BaseModel):
     wall_s: float = 0.0
     # Why the loop ended when it did not end on submit_answer.
     stop: str = "submitted"
+    # "converse" (this module's loop on Bedrock) or "claude-code" (a
+    # `claude -p` run, see datasheet_rag.eval.claude_code) and its version.
+    runner: str = "converse"
+    runner_version: str | None = None
+    # List-price cost as the runner reported it. Set for claude-code runs,
+    # whose subscription models are not in costs.CLAUDE_TOKEN_PRICES.
+    reported_cost_usd: float | None = None
 
     @property
     def context_tokens(self) -> int:

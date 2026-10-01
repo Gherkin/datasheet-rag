@@ -36,6 +36,9 @@ from datasheet_rag.eval.grade import Converse, Grade
 from datasheet_rag.eval.grade import grade as grade_answer
 from datasheet_rag.eval.stats import Interval, PairedDiff, bootstrap_ci, paired_diff
 
+#: Ends a grading failure whose judge call the gate did not start.
+GATE_STOPPED = "not started (gate)"
+
 
 class LockedEmbedder:
     """One embedding model shared by the worker threads, one call at a time.
@@ -85,9 +88,14 @@ class AnswerRecord(BaseModel):
         return (self.need_id, self.condition, self.model)
 
     def cost_usd(self) -> float | None:
-        """Agent plus judge spend at list price; None for an unpriced model."""
+        """Agent plus judge spend at list price; None for an unpriced model.
+
+        A cost the runner reported (claude-code) wins over the price table.
+        """
         agent = judge = 0.0
-        if self.run is not None:
+        if self.run is not None and self.run.reported_cost_usd is not None:
+            agent = self.run.reported_cost_usd
+        elif self.run is not None:
             a = token_cost_usd(
                 self.model,
                 input_tokens=self.run.input_tokens,
@@ -98,7 +106,9 @@ class AnswerRecord(BaseModel):
             if a is None:
                 return None
             agent = a
-        if self.grade is not None and self.grade.judge_input_tokens:
+        if self.grade is not None and self.grade.judge_cost_usd is not None:
+            judge = self.grade.judge_cost_usd
+        elif self.grade is not None and self.grade.judge_input_tokens:
             j = token_cost_usd(
                 self.judge_model,
                 input_tokens=self.grade.judge_input_tokens,
@@ -129,14 +139,21 @@ def run_answers(
     model_id: str,
     judge_model: str,
     client: Converse,
-    toolset_for: Callable[[Condition], ToolSet],
+    toolset_for: Callable[[Condition], ToolSet] | None = None,
     out_path: Path,
     workers: int = 4,
     progress: Callable[[AnswerRecord], None] | None = None,
     max_usd: float | None = None,
     temperature: float | None = None,
+    agent: Callable[[Need, Condition, AgentRun], None] | None = None,
+    gate: Callable[[], bool] | None = None,
 ) -> list[AnswerRecord]:
     """Run and grade every (need, condition) not already in ``out_path``.
+
+    The agent is this module's Converse loop over ``toolset_for``'s tools,
+    or ``agent`` when given (a claude-code run, which fills the AgentRun it
+    is handed). ``gate`` is asked before each new run; False stops starting
+    new ones, as ``max_usd`` does (claude-code pauses on the usage meter).
 
     ``temperature`` is the agent's (None: the model default). One file holds
     one temperature per model: resume and the report key on the model, so a
@@ -153,6 +170,8 @@ def run_answers(
     calls only, outside the cap: about a cent each). Their agent run is done
     and is not repeated.
     """
+    if (toolset_for is None) == (agent is None):
+        raise ValueError("pass exactly one of toolset_for and agent")
     other = {r.temperature for r in load_records(out_path) if r.model == model_id} - {temperature}
     if other:
         raise ValueError(
@@ -168,6 +187,7 @@ def run_answers(
         client=client,
         judge_model=judge_model,
         workers=workers,
+        gate=gate,
     )
     done = {r.key for r in load_records(out_path) if r.error is None}
     todo = [(n, c) for n in needs for c in conditions if (n.need_id, c, model_id) not in done]
@@ -177,6 +197,7 @@ def run_answers(
     spent = 0.0
 
     def tools(cond: Condition) -> ToolSet:
+        assert toolset_for is not None
         cache: dict[Condition, ToolSet] = getattr(local, "tools", None) or {}
         local.tools = cache
         if cond not in cache:
@@ -187,6 +208,8 @@ def run_answers(
         nonlocal spent
         with write_lock:
             if max_usd is not None and spent >= max_usd:
+                return None
+            if gate is not None and not gate():
                 return None
         rec = AnswerRecord(
             need_id=need.need_id,
@@ -199,9 +222,17 @@ def run_answers(
         )
         assert rec.run is not None
         try:
-            run_agent(
-                client, model_id, need.question, tools(cond), run=rec.run, temperature=temperature
-            )
+            if agent is not None:
+                agent(need, cond, rec.run)
+            else:
+                run_agent(
+                    client,
+                    model_id,
+                    need.question,
+                    tools(cond),
+                    run=rec.run,
+                    temperature=temperature,
+                )
         except Exception as e:  # noqa: BLE001 - recorded and retried next run
             rec.error = f"{type(e).__name__}: {e}\n{traceback.format_exc(limit=3)}"
         else:
@@ -245,6 +276,8 @@ def regrade_records(
     client: Converse,
     judge_model: str,
     workers: int = 4,
+    gate: Callable[[], bool] | None = None,
+    skip_same_judge: bool = False,
 ) -> tuple[int, list[str]]:
     """Grade the saved answers in ``path`` again with the current grader.
 
@@ -252,17 +285,27 @@ def regrade_records(
     full run. Only records of ``needs`` that finished are touched; the file
     is rewritten in place (through a temporary file, so a crash leaves the
     old one). Returns how many were regraded and the keys whose judge call
-    failed, which keep their old grade. A record's cost then counts the new
-    judge call, not the one it replaced.
+    failed or was not started (``gate`` said stop), which keep their old
+    grade. A record's cost then counts the new judge call, not the one it
+    replaced.
+
+    ``skip_same_judge`` leaves out records ``judge_model`` already graded,
+    so a regrade the gate stopped resumes where it left off.
     """
     by_id = {n.need_id: n for n in needs}
     return _grade_records(
         path,
         by_id,
-        lambda r: r.need_id in by_id and r.error is None and r.run is not None,
+        lambda r: (
+            r.need_id in by_id
+            and r.error is None
+            and r.run is not None
+            and not (skip_same_judge and r.grade is not None and r.judge_model == judge_model)
+        ),
         client=client,
         judge_model=judge_model,
         workers=workers,
+        gate=gate,
     )
 
 
@@ -275,6 +318,7 @@ def grade_pending(
     client: Converse,
     judge_model: str,
     workers: int = 4,
+    gate: Callable[[], bool] | None = None,
 ) -> tuple[int, list[str]]:
     """Grade the answers in ``path`` whose judge call failed earlier.
 
@@ -295,6 +339,7 @@ def grade_pending(
         client=client,
         judge_model=judge_model,
         workers=workers,
+        gate=gate,
     )
 
 
@@ -306,6 +351,7 @@ def _grade_records(
     client: Converse,
     judge_model: str,
     workers: int,
+    gate: Callable[[], bool] | None = None,
 ) -> tuple[int, list[str]]:
     records = load_records(path)
     targets = [r for r in records if select(r)]
@@ -316,6 +362,10 @@ def _grade_records(
 
     def one(rec: AnswerRecord) -> None:
         assert rec.run is not None
+        if gate is not None and not gate():
+            with lock:
+                failed.append(f"{rec.need_id}/{rec.condition}: {GATE_STOPPED}")
+            return
         try:
             new = grade_answer(
                 by_id[rec.need_id], rec.run.final, client=client, judge_model=judge_model
