@@ -4862,6 +4862,7 @@ def eval_claude_code(
     """
     from datasheet_rag.eval.agent import CONDITION_NAMES, Condition
     from datasheet_rag.eval.answers import (
+        GATE_STOPPED,
         build_report,
         load_records,
         regrade_records,
@@ -4937,8 +4938,15 @@ def eval_claude_code(
             out_path, needs, client=judge, judge_model=judge_id, workers=workers, gate=meter.allows
         )
         console.print(f"[cyan]Regraded[/] {n} answer(s) with {judge_id}.")
+        stopped = [f for f in failed if f.endswith(GATE_STOPPED)]
         for f in failed:
-            console.print(f"  [red]judge failed, old grade (if any) kept[/] {f}")
+            if f not in stopped:
+                console.print(f"  [red]judge failed, old grade (if any) kept[/] {f}")
+        if stopped:
+            console.print(
+                f"[yellow]Stopped[/]: {meter.stop_reason()}; "
+                f"{len(stopped)} answer(s) keep their old grade."
+            )
         report(model_id)
         return
 

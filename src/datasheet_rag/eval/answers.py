@@ -36,6 +36,9 @@ from datasheet_rag.eval.grade import Converse, Grade
 from datasheet_rag.eval.grade import grade as grade_answer
 from datasheet_rag.eval.stats import Interval, PairedDiff, bootstrap_ci, paired_diff
 
+#: Ends a grading failure whose judge call the gate did not start.
+GATE_STOPPED = "not started (gate)"
+
 
 class LockedEmbedder:
     """One embedding model shared by the worker threads, one call at a time.
@@ -352,7 +355,7 @@ def _grade_records(
         assert rec.run is not None
         if gate is not None and not gate():
             with lock:
-                failed.append(f"{rec.need_id}/{rec.condition}: not started (gate)")
+                failed.append(f"{rec.need_id}/{rec.condition}: {GATE_STOPPED}")
             return
         try:
             new = grade_answer(
