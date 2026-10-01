@@ -184,6 +184,7 @@ def run_answers(
         client=client,
         judge_model=judge_model,
         workers=workers,
+        gate=gate,
     )
     done = {r.key for r in load_records(out_path) if r.error is None}
     todo = [(n, c) for n in needs for c in conditions if (n.need_id, c, model_id) not in done]
@@ -272,6 +273,7 @@ def regrade_records(
     client: Converse,
     judge_model: str,
     workers: int = 4,
+    gate: Callable[[], bool] | None = None,
 ) -> tuple[int, list[str]]:
     """Grade the saved answers in ``path`` again with the current grader.
 
@@ -279,8 +281,9 @@ def regrade_records(
     full run. Only records of ``needs`` that finished are touched; the file
     is rewritten in place (through a temporary file, so a crash leaves the
     old one). Returns how many were regraded and the keys whose judge call
-    failed, which keep their old grade. A record's cost then counts the new
-    judge call, not the one it replaced.
+    failed or was not started (``gate`` said stop), which keep their old
+    grade. A record's cost then counts the new judge call, not the one it
+    replaced.
     """
     by_id = {n.need_id: n for n in needs}
     return _grade_records(
@@ -290,6 +293,7 @@ def regrade_records(
         client=client,
         judge_model=judge_model,
         workers=workers,
+        gate=gate,
     )
 
 
@@ -302,6 +306,7 @@ def grade_pending(
     client: Converse,
     judge_model: str,
     workers: int = 4,
+    gate: Callable[[], bool] | None = None,
 ) -> tuple[int, list[str]]:
     """Grade the answers in ``path`` whose judge call failed earlier.
 
@@ -322,6 +327,7 @@ def grade_pending(
         client=client,
         judge_model=judge_model,
         workers=workers,
+        gate=gate,
     )
 
 
@@ -333,6 +339,7 @@ def _grade_records(
     client: Converse,
     judge_model: str,
     workers: int,
+    gate: Callable[[], bool] | None = None,
 ) -> tuple[int, list[str]]:
     records = load_records(path)
     targets = [r for r in records if select(r)]
@@ -343,6 +350,10 @@ def _grade_records(
 
     def one(rec: AnswerRecord) -> None:
         assert rec.run is not None
+        if gate is not None and not gate():
+            with lock:
+                failed.append(f"{rec.need_id}/{rec.condition}: not started (gate)")
+            return
         try:
             new = grade_answer(
                 by_id[rec.need_id], rec.run.final, client=client, judge_model=judge_model

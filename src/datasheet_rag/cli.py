@@ -4933,7 +4933,9 @@ def eval_claude_code(
     judge = ClaudeJudge(judge_model, workdir=ws.root, meter=meter)
 
     if regrade:
-        n, failed = regrade_records(out_path, needs, client=judge, judge_model=judge_id)
+        n, failed = regrade_records(
+            out_path, needs, client=judge, judge_model=judge_id, workers=workers, gate=meter.allows
+        )
         console.print(f"[cyan]Regraded[/] {n} answer(s) with {judge_id}.")
         for f in failed:
             console.print(f"  [red]judge failed, old grade (if any) kept[/] {f}")
@@ -4942,7 +4944,8 @@ def eval_claude_code(
 
     if not meter.allows():
         console.print(f"[yellow]Not starting[/]: {meter.stop_reason()}.")
-        report(model_id if any(r.model == model_id for r in load_records(out_path)) else None)
+        if any(r.model == model_id for r in load_records(out_path)):
+            report(model_id)
         return
 
     if any(c in conds for c in ("B", "C")):

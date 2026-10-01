@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 
 from datasheet_rag.eval.agent import AgentRun
-from datasheet_rag.eval.answers import AnswerRecord, load_records, run_answers
+from datasheet_rag.eval.answers import AnswerRecord, load_records, regrade_records, run_answers
 from datasheet_rag.eval.claude_code import (
     ClaudeJudge,
     Meter,
@@ -137,6 +137,8 @@ def test_each_condition_gets_only_its_tools(tmp_path: Path) -> None:
             assert tools == "" and "--mcp-config" not in argv
         elif cond == "B":
             assert tools == "Read,Grep,Glob" and "--mcp-config" not in argv
+            # The file tools stay inside the workspace, away from answer keys.
+            assert "--restricted" in argv
         else:
             assert tools == "" and argv[argv.index("--mcp-config") + 1] == str(ws.mcp_config)
             assert argv[argv.index("--allowedTools") + 1] == "mcp__datasheet-rag"
@@ -318,3 +320,20 @@ def test_gate_stops_new_runs_and_reported_costs_are_used(tmp_path: Path) -> None
     [rec] = load_records(out)
     assert isinstance(rec, AnswerRecord) and rec.grade is not None and rec.grade.grounded
     assert rec.cost_usd() == pytest.approx(0.096 * 2)
+
+
+def test_regrade_stops_at_the_gate(tmp_path: Path) -> None:
+    out = tmp_path / "answers.jsonl"
+    rec = AnswerRecord(
+        need_id="N1", category="conceptual", condition="C", model="claude-code:m",
+        run=AgentRun(final=to_final(ANSWER)),
+    )  # fmt: skip
+    out.write_text(rec.model_dump_json() + "\n", encoding="utf-8")
+    judge_runs = FakeRunner(_stream(structured={"correct": True, "reason": "ok"}, tools=()))
+    n, failed = regrade_records(
+        out, [NEED], client=ClaudeJudge("j", workdir=tmp_path, runner=judge_runs),
+        judge_model="claude-code:j", gate=lambda: False,
+    )  # fmt: skip
+    assert n == 0 and failed == ["N1/C: not started (gate)"]
+    assert judge_runs.calls == []
+    assert load_records(out)[0].grade is None

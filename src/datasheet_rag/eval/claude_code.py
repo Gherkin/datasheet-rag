@@ -294,7 +294,9 @@ def agent_command(
     if condition == "A":
         argv += ["--tools", ""]
     elif condition == "B":
-        argv += ["--tools", "Read,Grep,Glob", "--allowedTools", "Read Grep Glob"]
+        # --restricted keeps the file tools inside the workspace; without it
+        # the agent could read the eval's answer keys elsewhere on disk.
+        argv += ["--restricted", "--tools", "Read,Grep,Glob", "--allowedTools", "Read Grep Glob"]
     else:
         argv += [
             "--tools",
