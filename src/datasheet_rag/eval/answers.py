@@ -121,10 +121,45 @@ class AnswerRecord(BaseModel):
 
 
 def load_records(path: Path) -> list[AnswerRecord]:
+    """The records in ``path``. A broken *last* line is skipped: a process
+    killed while appending leaves half a line, and the runs before it are
+    still good. A broken line anywhere else is real damage and raises."""
     if not path.is_file():
         return []
-    with path.open(encoding="utf-8") as fh:
-        return [AnswerRecord.model_validate_json(line) for line in fh if line.strip()]
+    lines = [ln for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    records: list[AnswerRecord] = []
+    for i, line in enumerate(lines):
+        try:
+            records.append(AnswerRecord.model_validate_json(line))
+        except ValueError as e:
+            if i == len(lines) - 1:
+                break
+            raise ValueError(f"{path}:{i + 1}: broken record: {e}") from e
+    return records
+
+
+def _drop_torn_tail(path: Path) -> bool:
+    """Remove a half-written last line, so the next append starts on a line
+    of its own instead of gluing onto it. Returns whether one was removed."""
+    if not path.is_file():
+        return False
+    text = path.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    while lines and not lines[-1].strip():
+        lines.pop()
+    if not lines:
+        return False
+    try:
+        AnswerRecord.model_validate_json(lines[-1])
+    except ValueError:
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text("".join(ln + "\n" for ln in lines[:-1]), encoding="utf-8")
+        tmp.replace(path)
+        return True
+    if not text.endswith("\n"):
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write("\n")
+    return False
 
 
 def _temperatures(temps: Iterable[float | None]) -> str:
@@ -192,6 +227,8 @@ def run_answers(
     done = {r.key for r in load_records(out_path) if r.error is None}
     todo = [(n, c) for n in needs for c in conditions if (n.need_id, c, model_id) not in done]
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    _drop_torn_tail(out_path)
+    stopping = threading.Event()
     write_lock = threading.Lock()
     local = threading.local()
     spent = 0.0
@@ -207,6 +244,8 @@ def run_answers(
     def one(need: Need, cond: Condition) -> AnswerRecord | None:
         nonlocal spent
         with write_lock:
+            if stopping.is_set():
+                return None
             if max_usd is not None and spent >= max_usd:
                 return None
             if gate is not None and not gate():
@@ -254,13 +293,23 @@ def run_answers(
     new: list[AnswerRecord] = []
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = [pool.submit(one, n, c) for n, c in todo]
-        for f in as_completed(futures):
-            rec = f.result()
-            if rec is None:
-                continue
-            new.append(rec)
-            if progress is not None:
-                progress(rec)
+        try:
+            for f in as_completed(futures):
+                rec = f.result()
+                if rec is None:
+                    continue
+                new.append(rec)
+                if progress is not None:
+                    progress(rec)
+        except KeyboardInterrupt:
+            # Leaving the `with` waits for every queued job, not only the
+            # running ones, so Ctrl-C alone would keep the run going. Cancel
+            # the queue and let the running ones finish (each saves its
+            # record), then pass the interrupt on.
+            stopping.set()
+            for f in futures:
+                f.cancel()
+            raise
     return new
 
 

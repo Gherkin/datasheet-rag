@@ -5012,6 +5012,14 @@ def eval_claude_code(
         )
     except ValueError as e:
         raise click.ClickException(str(e)) from e
+    except KeyboardInterrupt:
+        done = sum(1 for r in load_records(out_path) if r.model == model_id and r.grade)
+        console.print(
+            f"\n[yellow]Interrupted.[/] {done} graded runs are saved in {out_path} and will not "
+            "run again. Runs that were in progress were stopped with you and run again next "
+            f"time. Usage now: {meter.describe()}"
+        )
+        raise SystemExit(130) from None
     reason = meter.stop_reason()
     console.print(
         f"[cyan]Usage now[/]: {meter.describe()}"
