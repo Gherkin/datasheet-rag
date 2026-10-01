@@ -4827,7 +4827,10 @@ def _run_answer_eval(
 @click.option(
     "--regrade",
     is_flag=True,
-    help="Grade the saved answers again with --judge-model (no agent runs), then report.",
+    help=(
+        "Grade the saved answers again with --judge-model (no agent runs), then report. "
+        "Answers that judge already graded are skipped, so a stopped regrade resumes."
+    ),
 )
 @click.option("--json-out", type=click.Path(path_type=Path), default=None, help="Report JSON.")
 def eval_claude_code(
@@ -4934,8 +4937,16 @@ def eval_claude_code(
     judge = ClaudeJudge(judge_model, workdir=ws.root, meter=meter)
 
     if regrade:
+        # Skip what this judge already graded, so a regrade the meter stopped
+        # resumes in the next window instead of starting over.
         n, failed = regrade_records(
-            out_path, needs, client=judge, judge_model=judge_id, workers=workers, gate=meter.allows
+            out_path,
+            needs,
+            client=judge,
+            judge_model=judge_id,
+            workers=workers,
+            gate=meter.allows,
+            skip_same_judge=True,
         )
         console.print(f"[cyan]Regraded[/] {n} answer(s) with {judge_id}.")
         stopped = [f for f in failed if f.endswith(GATE_STOPPED)]

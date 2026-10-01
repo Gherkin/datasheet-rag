@@ -337,3 +337,35 @@ def test_regrade_stops_at_the_gate(tmp_path: Path) -> None:
     assert n == 0 and failed == ["N1/C: not started (gate)"]
     assert judge_runs.calls == []
     assert load_records(out)[0].grade is None
+
+
+def test_regrade_stopped_by_the_gate_resumes(tmp_path: Path) -> None:
+    out = tmp_path / "answers.jsonl"
+    recs = [
+        AnswerRecord(
+            need_id="N1",
+            category="conceptual",
+            condition=c,
+            model="claude-code:m",
+            judge_model="claude-code:old",
+            run=AgentRun(final=to_final(ANSWER)),
+        )  # fmt: skip
+        for c in ("B", "C")
+    ]
+    out.write_text("".join(r.model_dump_json() + "\n" for r in recs), encoding="utf-8")
+    verdict = _stream(structured={"correct": True, "reason": "ok"}, tools=())
+    judge_runs = FakeRunner(verdict, verdict)
+    judge = ClaudeJudge("j", workdir=tmp_path, runner=judge_runs)
+    opens = iter([True, False])
+    n, failed = regrade_records(
+        out, [NEED], client=judge, judge_model="claude-code:j", workers=1,
+        gate=lambda: next(opens), skip_same_judge=True,
+    )  # fmt: skip
+    assert n == 1 and failed == ["N1/C: not started (gate)"]
+    # The next window grades only what the first one left.
+    n, failed = regrade_records(
+        out, [NEED], client=judge, judge_model="claude-code:j", workers=1,
+        gate=lambda: True, skip_same_judge=True,
+    )  # fmt: skip
+    assert n == 1 and failed == [] and len(judge_runs.calls) == 2
+    assert {r.judge_model for r in load_records(out)} == {"claude-code:j"}

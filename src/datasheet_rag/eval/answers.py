@@ -277,6 +277,7 @@ def regrade_records(
     judge_model: str,
     workers: int = 4,
     gate: Callable[[], bool] | None = None,
+    skip_same_judge: bool = False,
 ) -> tuple[int, list[str]]:
     """Grade the saved answers in ``path`` again with the current grader.
 
@@ -287,12 +288,20 @@ def regrade_records(
     failed or was not started (``gate`` said stop), which keep their old
     grade. A record's cost then counts the new judge call, not the one it
     replaced.
+
+    ``skip_same_judge`` leaves out records ``judge_model`` already graded,
+    so a regrade the gate stopped resumes where it left off.
     """
     by_id = {n.need_id: n for n in needs}
     return _grade_records(
         path,
         by_id,
-        lambda r: r.need_id in by_id and r.error is None and r.run is not None,
+        lambda r: (
+            r.need_id in by_id
+            and r.error is None
+            and r.run is not None
+            and not (skip_same_judge and r.grade is not None and r.judge_model == judge_model)
+        ),
         client=client,
         judge_model=judge_model,
         workers=workers,
