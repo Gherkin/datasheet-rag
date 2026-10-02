@@ -349,6 +349,93 @@ def test_committed_ab_subset_names_real_needs() -> None:
     assert set(ids) <= known
 
 
+def _slow_agent(started: list[str]) -> Any:
+    """An agent that answers right after a short pause, logging each start."""
+    import time
+
+    from datasheet_rag.eval.grade import Citation, FinalAnswer
+
+    def agent(need: Need, cond: Any, run: Any) -> None:
+        started.append(need.need_id)
+        time.sleep(0.05)
+        run.final = FinalAnswer(
+            answer="5.25 V", value=5.25, unit="V", citations=[Citation(doc_id=DOC, page=7)]
+        )
+
+    return agent
+
+
+def test_ctrl_c_stops_queued_runs_and_keeps_finished_ones(tmp_path: Path) -> None:
+    out = tmp_path / "answers.jsonl"
+    started: list[str] = []
+
+    def interrupt(rec: AnswerRecord) -> None:
+        raise KeyboardInterrupt  # what Ctrl-C raises in the main thread
+
+    with pytest.raises(KeyboardInterrupt):
+        run_answers(
+            _needs(20), ("C",), model_id=M, judge_model=M, client=FakeModel(),
+            agent=_slow_agent(started), out_path=out, workers=2, progress=interrupt,
+        )  # fmt: skip
+    # Only the runs already in progress finished; the queue was dropped.
+    assert len(started) <= 4
+    saved = {r.need_id for r in load_records(out) if r.grade}
+    assert saved and saved <= set(started)
+
+    # The next invocation runs only what is missing.
+    again: list[str] = []
+    run_answers(
+        _needs(20), ("C",), model_id=M, judge_model=M, client=FakeModel(),
+        agent=_slow_agent(again), out_path=out, workers=2,
+    )  # fmt: skip
+    assert not set(again) & saved
+    assert len({r.need_id for r in load_records(out) if r.grade}) == 20
+
+
+def test_a_half_written_last_line_is_dropped_not_fatal(tmp_path: Path) -> None:
+    out = tmp_path / "answers.jsonl"
+    _run(FakeModel(), out, _needs(2), conds=("C",))
+    good = out.read_text(encoding="utf-8")
+    out.write_text(good + '{"need_id": "N9", "categ', encoding="utf-8")  # killed mid-write
+    assert len(load_records(out)) == 2
+    # The next run removes the torn line and appends on a fresh line.
+    _run(FakeModel(), out, _needs(3), conds=("C",))
+    assert [r.need_id for r in load_records(out)] == ["N0", "N1", "N2"]
+    assert all(line.startswith("{") for line in out.read_text(encoding="utf-8").splitlines())
+
+
+def test_damage_before_the_last_line_still_raises(tmp_path: Path) -> None:
+    out = tmp_path / "answers.jsonl"
+    _run(FakeModel(), out, _needs(2), conds=("C",))
+    first, second = out.read_text(encoding="utf-8").splitlines()
+    out.write_text(first[:20] + "\n" + second + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="broken record"):
+        load_records(out)
+
+
+def test_a_last_line_cut_inside_a_utf8_character_is_dropped(tmp_path: Path) -> None:
+    out = tmp_path / "answers.jsonl"
+    _run(FakeModel(), out, _needs(2), conds=("C",))
+    good = out.read_bytes()
+    torn = '{"need_id": "N9", "error": "10 Ω'.encode()
+    out.write_bytes(good + torn[:-1])  # killed between the two bytes of Ω
+    assert len(load_records(out)) == 2
+    _run(FakeModel(), out, _needs(3), conds=("C",))
+    assert [r.need_id for r in load_records(out)] == ["N0", "N1", "N2"]
+
+
+def test_line_separators_inside_a_record_do_not_split_it(tmp_path: Path) -> None:
+    out = tmp_path / "answers.jsonl"
+    _run(FakeModel(), out, _needs(2), conds=("C",))
+    recs = load_records(out)
+    recs[-1].category = "a b\x85c"  # JSON writes both raw
+    out.write_text("".join(r.model_dump_json() + "\n" for r in recs), encoding="utf-8")
+    assert [r.category for r in load_records(out)][-1] == "a b\x85c"
+    # Nor is such a last record taken for a torn one.
+    _run(FakeModel(), out, _needs(3), conds=("C",))
+    assert [r.need_id for r in load_records(out)] == ["N0", "N1", "N2"]
+
+
 def test_locked_embedder_passes_calls_through() -> None:
     class Inner:
         dim = 8
