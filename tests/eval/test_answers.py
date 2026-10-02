@@ -413,6 +413,29 @@ def test_damage_before_the_last_line_still_raises(tmp_path: Path) -> None:
         load_records(out)
 
 
+def test_a_last_line_cut_inside_a_utf8_character_is_dropped(tmp_path: Path) -> None:
+    out = tmp_path / "answers.jsonl"
+    _run(FakeModel(), out, _needs(2), conds=("C",))
+    good = out.read_bytes()
+    torn = '{"need_id": "N9", "error": "10 Ω'.encode()
+    out.write_bytes(good + torn[:-1])  # killed between the two bytes of Ω
+    assert len(load_records(out)) == 2
+    _run(FakeModel(), out, _needs(3), conds=("C",))
+    assert [r.need_id for r in load_records(out)] == ["N0", "N1", "N2"]
+
+
+def test_line_separators_inside_a_record_do_not_split_it(tmp_path: Path) -> None:
+    out = tmp_path / "answers.jsonl"
+    _run(FakeModel(), out, _needs(2), conds=("C",))
+    recs = load_records(out)
+    recs[-1].category = "a b\x85c"  # JSON writes both raw
+    out.write_text("".join(r.model_dump_json() + "\n" for r in recs), encoding="utf-8")
+    assert [r.category for r in load_records(out)][-1] == "a b\x85c"
+    # Nor is such a last record taken for a torn one.
+    _run(FakeModel(), out, _needs(3), conds=("C",))
+    assert [r.need_id for r in load_records(out)] == ["N0", "N1", "N2"]
+
+
 def test_locked_embedder_passes_calls_through() -> None:
     class Inner:
         dim = 8

@@ -126,15 +126,19 @@ def load_records(path: Path) -> list[AnswerRecord]:
     still good. A broken line anywhere else is real damage and raises."""
     if not path.is_file():
         return []
-    lines = [ln for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    # Bytes, split on "\n" only: JSON leaves U+2028 and U+0085 raw, which
+    # str.splitlines would split on, and a torn last line can end inside a
+    # UTF-8 character, which would fail to decode the whole file.
+    raw = path.read_bytes().split(b"\n")
+    lines = [(n, ln) for n, ln in enumerate(raw, 1) if ln.strip()]
     records: list[AnswerRecord] = []
-    for i, line in enumerate(lines):
+    for i, (n, line) in enumerate(lines):
         try:
             records.append(AnswerRecord.model_validate_json(line))
         except ValueError as e:
             if i == len(lines) - 1:
                 break
-            raise ValueError(f"{path}:{i + 1}: broken record: {e}") from e
+            raise ValueError(f"{path}:{n}: broken record: {e}") from e
     return records
 
 
@@ -143,8 +147,8 @@ def _drop_torn_tail(path: Path) -> bool:
     of its own instead of gluing onto it. Returns whether one was removed."""
     if not path.is_file():
         return False
-    text = path.read_text(encoding="utf-8")
-    lines = text.splitlines()
+    data = path.read_bytes()
+    lines = data.split(b"\n")  # as load_records splits
     while lines and not lines[-1].strip():
         lines.pop()
     if not lines:
@@ -153,12 +157,12 @@ def _drop_torn_tail(path: Path) -> bool:
         AnswerRecord.model_validate_json(lines[-1])
     except ValueError:
         tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text("".join(ln + "\n" for ln in lines[:-1]), encoding="utf-8")
+        tmp.write_bytes(b"".join(ln + b"\n" for ln in lines[:-1]))
         tmp.replace(path)
         return True
-    if not text.endswith("\n"):
-        with path.open("a", encoding="utf-8") as fh:
-            fh.write("\n")
+    if not data.endswith(b"\n"):
+        with path.open("ab") as fh:
+            fh.write(b"\n")
     return False
 
 
