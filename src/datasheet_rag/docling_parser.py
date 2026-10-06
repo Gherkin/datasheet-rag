@@ -33,6 +33,10 @@ _TOC_TITLES = frozenset({"table of contents", "contents", "index", "toc"})
 _CONTINUED_RE = re.compile(r"\s*\(continued\)\s*$", re.IGNORECASE)
 # "Section heading ........ 12" or "Section heading        12"
 _TOC_ENTRY_RE = re.compile(r"^.+[.\s]{2,}\d+\s*$")
+# A DOCUMENT_INDEX row that ends in a bare page number: "Intro ..... 12" / "Intro 12"
+_PAGE_REF_TAIL_RE = re.compile(r"(?:\.{2,}|\s)\s*\d+\s*$")
+# Leader dots joining a label to its value: "VIN ........ -0.3 V to +100 V"
+_LEADER_DOTS_RE = re.compile(r"\s*\.{4,}\s*")
 
 # Dotted numeric heading prefixes, e.g. "2." / "2.10." / "2.10.1.2." — used to
 # recover chapter structure when Docling emits no TITLE items and flattens
@@ -745,7 +749,15 @@ def _build_outline(
         current_section = _ensure_section(page_no, current_section, section_stack)
         element: ContentElement | None = None
 
-        if label == DocItemLabel.TABLE:
+        # DOCUMENT_INDEX is Docling's table-of-contents class, but its layout
+        # model also gives it to dotted-leader spec lists such as an Absolute
+        # Maximum Ratings block (GH #98). Keep it as a table unless the rows
+        # read as page references.
+        if label == DocItemLabel.DOCUMENT_INDEX and _index_is_toc(_table_to_cells(item)):
+            pending_caption_element = None
+            console.print(f"[yellow]ToC filter:[/] dropped document index on page {page_no}")
+
+        elif label in (DocItemLabel.TABLE, DocItemLabel.DOCUMENT_INDEX):
             pending_caption_element = None
             cells = _table_to_cells(item)
             caption = _clean_text(getattr(item, "text", "") or "")
@@ -791,6 +803,8 @@ def _build_outline(
                     table_text = item.export_to_markdown(doc=doc)
                 except Exception:
                     table_text = "\n".join(c["text"] for c in cells if c["text"])
+            if label == DocItemLabel.DOCUMENT_INDEX:
+                table_text = _LEADER_DOTS_RE.sub(" ", table_text)
 
             text = (caption + "\n" + table_text).strip() if caption else table_text.strip()
             element = ContentElement(
@@ -1278,6 +1292,19 @@ def _is_toc_section(section: DocumentSection) -> bool:
         return False
     matches = sum(1 for e in text_els if _TOC_ENTRY_RE.match(e.text))
     return matches / len(text_els) >= 0.60
+
+
+def _index_is_toc(cells: list[dict[str, Any]]) -> bool:
+    """True when most rows of a DOCUMENT_INDEX item end in a page number."""
+    rows: dict[int, str] = {}
+    for cell in sorted(cells, key=lambda c: (c["row"], c["col"])):
+        text = cell["text"].strip()
+        if cell.get("is_origin", True) and text:
+            rows[cell["row"]] = f"{rows.get(cell['row'], '')} {text}"
+    if not rows:
+        return False
+    matches = sum(1 for row in rows.values() if _PAGE_REF_TAIL_RE.search(row))
+    return matches / len(rows) >= 0.60
 
 
 def _filter_toc_sections(sections: list[DocumentSection]) -> list[DocumentSection]:
