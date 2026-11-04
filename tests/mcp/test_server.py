@@ -453,6 +453,11 @@ def test_list_documents_generic_key_filter(conn: Any) -> None:
     assert [d["doc_id"] for d in out] == ["docB"]
 
 
+def test_list_documents_rejects_shortcut_that_conflicts_with_keys(conn: Any) -> None:
+    with pytest.raises(ValueError, match="mpn given both"):
+        _list_documents_impl(mpn="INA226", keys={"mpn": "INA219"}, conn=conn)
+
+
 def test_list_metadata_keys_lists_builtins_and_user_keys(conn: Any) -> None:
     register_key(conn, "acme-pn", shape="list", roles=["part"], description="ACME part no.")
     keys = {k["name"]: k for k in _list_metadata_keys_impl(conn=conn)["keys"]}

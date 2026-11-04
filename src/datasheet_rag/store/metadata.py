@@ -361,7 +361,8 @@ def list_docs(
         f"SELECT * FROM doc_metadata{where} ORDER BY doc_id",
         params,
     ).fetchall()
-    values = get_values_for_docs(conn, [r["doc_id"] for r in rows])
+    # Unfiltered: read every value rather than binding one parameter per row.
+    values = get_values_for_docs(conn, [r["doc_id"] for r in rows] if clauses else None)
     return [_row_to_metadata(r, values.get(r["doc_id"])) for r in rows]
 
 

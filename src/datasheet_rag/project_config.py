@@ -181,7 +181,12 @@ def _load_config(candidate: Path) -> ProjectConfig:
             raise ProjectConfigError(
                 f"{candidate}: {shortcut!r} is set both at the top level and under [keys]"
             )
-        keys[shortcut] = _check_key_value(candidate, shortcut, data[shortcut])
+        value = _check_key_value(candidate, shortcut, data[shortcut])
+        if shortcut == "mpn" and isinstance(value, str) and "," in value:
+            # Same rule as `--mpn A,B`: a comma string is how a config listed
+            # several part numbers before mpn was a list.
+            value = [v.strip() for v in value.split(",") if v.strip()]
+        keys[shortcut] = value
     attrs = _check_attributes(candidate, attributes) if attributes is not None else None
     clash = sorted(set(attrs or {}) & set(keys))
     if clash:

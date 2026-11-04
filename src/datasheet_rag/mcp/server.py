@@ -608,10 +608,12 @@ def _list_documents_impl(
     _check_page_args(limit, offset)
     be = _backend(backend, conn)
     key_filter = dict(keys or {})
-    if mpn is not None:
-        key_filter["mpn"] = mpn
-    if manufacturer is not None:
-        key_filter["manufacturer"] = manufacturer
+    for name, value in (("mpn", mpn), ("manufacturer", manufacturer)):
+        if value is None:
+            continue
+        if name in key_filter:
+            raise ValueError(f"{name} given both as {name}= and in keys; use one")
+        key_filter[name] = value
     page = be.list_documents(
         project_id=_resolve_project(project_id),
         group_name=group,

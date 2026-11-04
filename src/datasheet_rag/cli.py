@@ -884,7 +884,9 @@ def list_docs(
 
     filtering = bool(group_name or key_filters or tags or attr_filters)
     be = _backend_for(db_path)
-    registered = be.list_keys()
+    # The default view shows no key or attribute columns, so it needs no
+    # registry read (one fewer round trip in remote mode).
+    registered = be.list_keys() if (key_filters or filtering or wide or chosen) else []
     unknown = sorted(set(key_filters) - {k.name for k in registered})
     if unknown:
         raise click.BadParameter(

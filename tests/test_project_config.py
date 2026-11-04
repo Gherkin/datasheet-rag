@@ -119,6 +119,14 @@ def test_loads_keys_table_and_list_mpn(tmp_path: Path) -> None:
     }
 
 
+def test_comma_mpn_string_is_split_like_the_cli_option(tmp_path: Path) -> None:
+    (tmp_path / ".rag.toml").write_text('mpn = "STM32H743VIT6, STM32H743ZIT6"\n')
+
+    (cfg,) = find_project_configs(tmp_path)
+
+    assert cfg.keys == {"mpn": ["STM32H743VIT6", "STM32H743ZIT6"]}
+
+
 @pytest.mark.parametrize(
     ("body", "message"),
     [

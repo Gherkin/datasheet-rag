@@ -50,11 +50,16 @@ KeyValue = str | list[str]
 #: in a query string without quoting.
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
-#: Names a key may not take: the fixed ``doc_metadata`` fields and the fields
-#: planned to become fixed (``version``, GH #124). A key with one of these
+#: Names a key may not take: the fixed ``doc_metadata`` fields, the fields
+#: planned to become fixed (``version``, GH #124), and the built-in column
+#: names of ``rag list``, which would shadow the key. A key with one of these
 #: names would be ambiguous in every listing and filter.
 FIXED_FIELDS = frozenset(
-    {"doc_id", "title", "project_id", "group_name", "subsystem", "tags", "attributes", "version"}
+    {
+        *("doc_id", "title", "project_id", "group_name", "subsystem", "tags", "attributes"),
+        *("keys", "version"),
+        *("project", "group", "updated", "stale", "chunks", "pages", "ingested"),
+    }
 )
 
 
@@ -135,7 +140,12 @@ def ensure_key_tables(conn: sqlite3.Connection) -> None:
         """
     )
     conn.execute("CREATE INDEX IF NOT EXISTS ix_doc_key_values_kv ON doc_key_values(key, value)")
+    # Insert only the missing seeds: even an INSERT OR IGNORE that inserts
+    # nothing takes the write lock, and this runs on every open.
+    present = {r[0] for r in conn.execute("SELECT name FROM metadata_keys")}
     for spec in BUILTIN_KEYS:
+        if spec.name in present:
+            continue
         conn.execute(
             "INSERT OR IGNORE INTO metadata_keys(name, description, shape, roles, builtin) "
             "VALUES (?, ?, ?, ?, 1)",
@@ -211,33 +221,35 @@ def register_key(
     bad_roles = [r for r in role_list if r not in KEY_ROLES]
     if bad_roles:
         raise MetadataKeyError(f"unknown role(s) {bad_roles} (expected some of {KEY_ROLES})")
-    if get_key(conn, name) is not None:
-        raise MetadataKeyError(f"key {name!r} is already registered")
-
-    # Find attribute values to promote before writing anything.
-    promote: list[tuple[str, dict[str, Any], list[str]]] = []
-    bad_docs: list[str] = []
-    rows = conn.execute(
-        "SELECT doc_id, attributes FROM doc_metadata WHERE attributes IS NOT NULL"
-    ).fetchall()
-    for row in rows:
-        attrs = json.loads(row["attributes"] or "{}")
-        if name not in attrs:
-            continue
-        try:
-            values = _coerce(attrs[name], shape)
-        except MetadataKeyError:
-            bad_docs.append(row["doc_id"])
-            continue
-        promote.append((row["doc_id"], attrs, values))
-    if bad_docs:
-        raise MetadataKeyError(
-            f"cannot register {name!r} as a {shape} key: attribute {name!r} on "
-            f"{len(bad_docs)} document(s) is not a {_shape_noun(shape)}: {', '.join(bad_docs)}"
-        )
-
+    # Read and write under one write lock, so a concurrent write to a
+    # document's attributes cannot land between the read and the write-back.
     _begin(conn)
     try:
+        if get_key(conn, name) is not None:
+            raise MetadataKeyError(f"key {name!r} is already registered")
+
+        # Find attribute values to promote before writing anything.
+        promote: list[tuple[str, dict[str, Any], list[str]]] = []
+        bad_docs: list[str] = []
+        rows = conn.execute(
+            "SELECT doc_id, attributes FROM doc_metadata WHERE attributes IS NOT NULL"
+        ).fetchall()
+        for row in rows:
+            attrs = json.loads(row["attributes"] or "{}")
+            if name not in attrs:
+                continue
+            try:
+                values = _coerce(attrs[name], shape)
+            except MetadataKeyError:
+                bad_docs.append(row["doc_id"])
+                continue
+            promote.append((row["doc_id"], attrs, values))
+        if bad_docs:
+            raise MetadataKeyError(
+                f"cannot register {name!r} as a {shape} key: attribute {name!r} on "
+                f"{len(bad_docs)} document(s) is not a {_shape_noun(shape)}: {', '.join(bad_docs)}"
+            )
+
         conn.execute(
             "INSERT INTO metadata_keys(name, description, shape, roles, builtin) "
             "VALUES (?, ?, ?, ?, 0)",
@@ -268,21 +280,21 @@ def remove_key(conn: sqlite3.Connection, name: str, *, demote: bool = False) -> 
     list key's values as a JSON list), so unregistering loses nothing.
     Built-in keys cannot be removed.
     """
-    spec = get_key(conn, name)
-    if spec is None:
-        raise MetadataKeyError(f"key {name!r} is not registered")
-    if spec.builtin:
-        raise MetadataKeyError(f"key {name!r} is built in and cannot be removed")
-
-    held = get_values_for_docs(conn, None, keys=[name])
-    if held and not demote:
-        raise MetadataKeyError(
-            f"key {name!r} has values on {len(held)} document(s); pass demote to "
-            "move them back into attributes, or clear them first"
-        )
-
     _begin(conn)
     try:
+        spec = get_key(conn, name)
+        if spec is None:
+            raise MetadataKeyError(f"key {name!r} is not registered")
+        if spec.builtin:
+            raise MetadataKeyError(f"key {name!r} is built in and cannot be removed")
+
+        held = get_values_for_docs(conn, None, keys=[name])
+        if held and not demote:
+            raise MetadataKeyError(
+                f"key {name!r} has values on {len(held)} document(s); pass demote to "
+                "move them back into attributes, or clear them first"
+            )
+
         for doc_id, values in held.items():
             row = conn.execute(
                 "SELECT attributes FROM doc_metadata WHERE doc_id = ?", (doc_id,)
@@ -465,4 +477,6 @@ def _begin(conn: sqlite3.Connection) -> None:
     """
     if conn.in_transaction:
         conn.commit()
-    conn.execute("BEGIN")
+    # IMMEDIATE takes the write lock now, so the reads that follow see the
+    # rows the writes are based on.
+    conn.execute("BEGIN IMMEDIATE")

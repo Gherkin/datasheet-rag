@@ -46,6 +46,8 @@ def test_builtin_keys_ship_registered(conn: sqlite3.Connection) -> None:
         ("acme:id", "invalid key name"),
         ("tags", "fixed metadata field"),
         ("version", "fixed metadata field"),
+        ("project", "fixed metadata field"),
+        ("keys", "fixed metadata field"),
         ("title_source", "reserved"),
         ("mpn", "already registered"),
     ],
@@ -53,6 +55,19 @@ def test_builtin_keys_ship_registered(conn: sqlite3.Connection) -> None:
 def test_register_rejects_bad_names(conn: sqlite3.Connection, name: str, message: str) -> None:
     with pytest.raises(MetadataKeyError, match=message):
         register_key(conn, name)
+
+
+def test_reopen_of_current_store_takes_no_write_lock(tmp_path: Path) -> None:
+    db = tmp_path / "rag.sqlite"
+    connect(db, embedding_dim=EMBED_DIM).close()
+    writer = sqlite3.connect(db, isolation_level=None)
+    writer.execute("BEGIN IMMEDIATE")
+    try:
+        # Would raise "database is locked" if the open tried to write.
+        connect(db, embedding_dim=EMBED_DIM).close()
+    finally:
+        writer.rollback()
+        writer.close()
 
 
 def test_register_rejects_unknown_shape_and_role(conn: sqlite3.Connection) -> None:
