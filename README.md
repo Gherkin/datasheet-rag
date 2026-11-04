@@ -391,6 +391,8 @@ Set the values with `rag metadata <doc> --key acme-id=D-0172`. Repeat `--key` fo
 
 `rag keys add` moves any existing free-form attribute with the same name into the key. `rag keys remove <name> --demote` moves the values back into attributes. Built-in keys cannot be removed.
 
+A `.rag.toml` `[attributes]` entry whose name is now a registered key is applied as that key, and `rag ingest`/`rag metadata` print a warning to move it under `[keys]`.
+
 ## Usage
 
 ### Ingestation

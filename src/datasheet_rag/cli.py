@@ -7,7 +7,7 @@ import os
 import random
 import re
 import socket
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar
 
@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from datasheet_rag.eval.stats import Interval, PairedDiff
     from datasheet_rag.ingest_pipeline import ProgressEvent
     from datasheet_rag.models.chunk import Chunk
+    from datasheet_rag.store.keys import KeySpec
     from datasheet_rag.store.metadata import DocMetadata
 
 console = Console()
@@ -407,6 +408,41 @@ def _shortcut_keys(
     if doc_type is not None:
         out["doc_type"] = doc_type
     return out
+
+
+def _config_attrs_as_keys(
+    cfg_attrs: dict[str, str] | None, registered: Iterable[str]
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Split ``.rag.toml`` attributes into (attributes, keys).
+
+    An attribute whose name has since been registered as a key (``rag keys
+    add``) is applied as that key, with a warning to move it under ``[keys]``.
+    Without this, one stale ``.rag.toml`` entry would make every write under
+    it fail on the attribute/key clash.
+    """
+    names = set(registered)
+    attrs: dict[str, str] = {}
+    keys: dict[str, str] = {}
+    for name, value in (cfg_attrs or {}).items():
+        (keys if name in names else attrs)[name] = value
+    if keys:
+        console.print(
+            f"[yellow]Warning:[/] .rag.toml \\[attributes] {', '.join(sorted(keys))}: "
+            "registered key(s) now, applied as keys. Move them under \\[keys]."
+        )
+    return attrs, keys
+
+
+def _check_key_patch(
+    registered: Iterable[KeySpec], keys: dict[str, Any], attributes: dict[str, Any]
+) -> None:
+    """Reject a bad key patch before any slow work (parsing a PDF)."""
+    from datasheet_rag.store.metadata import check_patch_for
+
+    try:
+        check_patch_for({k.name: k.shape for k in registered}, keys=keys, attributes=attributes)
+    except ValueError as e:
+        raise click.ClickException(str(e)) from e
 
 
 def _merge_shortcuts(keys: dict[str, Any], shortcuts: dict[str, Any]) -> dict[str, Any]:
@@ -2920,14 +2956,35 @@ def _ingest_one(
         subsystem = subsystem or proj_cfg.subsystem
         if not tags and proj_cfg.tags:
             tags = tuple(proj_cfg.tags)
-        keys = {**(proj_cfg.keys or {}), **keys}
-        attributes = {**(proj_cfg.attributes or {}), **attributes}
 
     if show_cost:
         dry_run = True
         console.print(
             "[yellow]--show-cost: estimating AWS spend, skipping priced Bedrock/Textract calls.[/]"
         )
+
+    # Unless this is a dry run, a store write follows: read the key registry
+    # now, so a bad key fails before the PDF is parsed, not after.
+    backend_obj: RagBackend | None = None
+    registered: list[KeySpec] = []
+    if not dry_run:
+        from datasheet_rag.backend import LocalBackend, RagServerError, get_backend
+
+        # `rag ingest --db` targets a specific local file; honor it by
+        # building a LocalBackend on that path rather than the configured one.
+        backend_obj = LocalBackend(db_path) if db_path is not None else get_backend()
+        try:
+            registered = backend_obj.list_keys()
+        except RagServerError as e:
+            raise _friendly_server_error(e) from e
+    if proj_cfg is not None:
+        cfg_attrs, cfg_attr_keys = _config_attrs_as_keys(
+            proj_cfg.attributes, (k.name for k in registered)
+        )
+        keys = {**cfg_attr_keys, **(proj_cfg.keys or {}), **keys}
+        attributes = {**cfg_attrs, **attributes}
+    if backend_obj is not None:
+        _check_key_patch(registered, keys, attributes)
 
     settings = get_settings()
     if accurate_tables is None:
@@ -2971,8 +3028,9 @@ def _ingest_one(
         and not dry_run
         and not show_cost
     ):
-        from datasheet_rag.backend import MetadataPatch, RagServerError, get_backend
+        from datasheet_rag.backend import MetadataPatch, RagServerError
 
+        assert backend_obj is not None  # built above for every non-dry run
         meta_patch = MetadataPatch(
             subsystem=subsystem or None,
             tags=list(tags) if tags else None,
@@ -2980,7 +3038,7 @@ def _ingest_one(
             attributes=attributes or None,
         )
         try:
-            result = get_backend().ingest_pdf(
+            result = backend_obj.ingest_pdf(
                 pdf_path,
                 doc_id=doc_id,
                 project_id=project_id,
@@ -3078,16 +3136,9 @@ def _ingest_one(
     step_state["n"] += 1
     where = "here" if backend_mode() == "local" or compute_mode() == "client" else "on the server"
     console.rule(f"[bold cyan]Step {step_state['n']} — Embed & store ({where})[/]")
-    from datasheet_rag.backend import MetadataPatch, get_backend
+    from datasheet_rag.backend import MetadataPatch
 
-    # `rag ingest --db` targets a specific local file; honor it by building a
-    # LocalBackend on that path rather than the configured backend.
-    if db_path is not None:
-        from datasheet_rag.backend import LocalBackend
-
-        backend_obj: RagBackend = LocalBackend(db_path)
-    else:
-        backend_obj = get_backend()
+    assert backend_obj is not None  # built above for every non-dry run
 
     # In remote mode the cropped figure images live only on this client —
     # ship their bytes so the server stores them and rewrites the host-local
@@ -3876,14 +3927,24 @@ def metadata_cmd(
     for name in unset_keys:
         keys[name] = None
 
+    be = _backend_for(db_path)
+
     # Config attributes fill the keys the user did not name; --attr and
-    # --unset-attr both win for the keys they touch.
-    attributes: dict[str, Any] = dict(proj_cfg.attributes or {}) if proj_cfg is not None else {}
+    # --unset-attr both win for the keys they touch. A config attribute that
+    # is a registered key now is applied as that key.
+    attributes: dict[str, Any] = {}
+    if proj_cfg is not None and proj_cfg.attributes:
+        cfg_attrs, cfg_attr_keys = _config_attrs_as_keys(
+            proj_cfg.attributes, (k.name for k in be.list_keys())
+        )
+        attributes.update(cfg_attrs)
+        for name, value in cfg_attr_keys.items():
+            if name not in keys:
+                keys[name] = value
     attributes.update(_parse_attr_items(attrs))
     for key in unset_attrs:
         attributes[key] = None
 
-    be = _backend_for(db_path)
     doc_id = _backend_resolve(be, doc_id)
 
     # --mpn-alias appends to the mpn list: the one --mpn (or .rag.toml) just

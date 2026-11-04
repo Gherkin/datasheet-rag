@@ -14,11 +14,16 @@ from click.testing import CliRunner
 
 from datasheet_rag.backend.models import IngestResult
 from datasheet_rag.cli import cli
+from datasheet_rag.store.keys import BUILTIN_KEYS, KeySpec
 
 
 class _FakeBackend:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
+        self.keys: list[KeySpec] = list(BUILTIN_KEYS)
+
+    def list_keys(self) -> list[KeySpec]:
+        return self.keys
 
     def ingest_pdf(self, pdf_path: Path, **kwargs: Any) -> IngestResult:
         self.calls.append({"pdf_path": pdf_path, **kwargs})
@@ -100,6 +105,30 @@ def test_bulk_ingest_skips_only_the_directory_with_a_bad_config(
     assert result.exit_code == 0, result.output
     assert [c["pdf_path"] for c in fake_backend.calls] == [good]
     assert "1 failed" in result.output
+
+
+def test_unregistered_key_fails_before_the_pdf_is_sent(
+    tmp_path: Path, fake_backend: _FakeBackend
+) -> None:
+    result = _ingest(str(_pdf(tmp_path)), "--key", "acme-idd=D-1")
+
+    assert result.exit_code == 1
+    assert "unregistered key(s) acme-idd" in result.output
+    assert fake_backend.calls == []
+
+
+def test_config_attribute_that_is_now_a_key_is_sent_as_the_key(
+    tmp_path: Path, fake_backend: _FakeBackend
+) -> None:
+    fake_backend.keys.append(KeySpec(name="revision"))
+    (tmp_path / ".rag.toml").write_text('[attributes]\nrevision = "B"\nowner = "hw"\n')
+
+    result = _ingest(str(_pdf(tmp_path)))
+
+    assert result.exit_code == 0, result.output
+    patch = fake_backend.calls[0]["metadata"]
+    assert patch.keys == {"revision": "B"}
+    assert patch.attributes == {"owner": "hw"}
 
 
 def test_ingest_attr_bad_format_rejected(tmp_path: Path, fake_backend: _FakeBackend) -> None:

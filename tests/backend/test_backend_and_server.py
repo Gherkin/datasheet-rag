@@ -422,6 +422,22 @@ def test_server_ingest_pdf_rejects_textract_without_bucket(client, monkeypatch, 
     assert "RAG_S3_BUCKET" in r.json()["detail"]
 
 
+def test_server_ingest_pdf_rejects_unregistered_key_before_parsing(client, monkeypatch) -> None:
+    import datasheet_rag.ingest_pipeline as ip
+
+    monkeypatch.setattr(
+        ip, "parse_pdf_to_graph", lambda *a, **kw: pytest.fail("pipeline should not run")
+    )
+
+    r = client.post(
+        "/ingest-pdf",
+        files={"payload": ("x.pdf", b"%PDF-1.4 fake", "application/pdf")},
+        data={"options": json.dumps({"metadata": {"keys": {"acme-idd": "D-1"}}})},
+    )
+    assert r.status_code == 400
+    assert "unregistered key(s) acme-idd" in r.json()["detail"]
+
+
 def test_check_backend_prerequisites_allows_cached_textract_blocks(monkeypatch, tmp_path) -> None:
     # Cached OCR blocks mean the Textract branch never touches S3 — unless
     # --force throws the cache away.

@@ -368,7 +368,14 @@ def normalize_key_patch(conn: sqlite3.Connection, keys: Mapping[str, Any]) -> di
     :class:`MetadataKeyError` naming every unregistered key, or the first value whose
     type does not fit its key's shape.
     """
-    shapes = key_shapes(conn)
+    return normalize_key_patch_for(key_shapes(conn), keys)
+
+
+def normalize_key_patch_for(
+    shapes: Mapping[str, KeyShape], keys: Mapping[str, Any]
+) -> dict[str, list[str]]:
+    """:func:`normalize_key_patch` against a registry already read (``{name: shape}``),
+    so a client can check a patch without a store connection."""
     unknown = sorted(k for k in keys if k not in shapes)
     if unknown:
         raise MetadataKeyError(

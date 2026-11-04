@@ -55,6 +55,7 @@ from datasheet_rag.store import (
     stored_embedding_dim,
 )
 from datasheet_rag.store.keys import KeyShape
+from datasheet_rag.store.metadata import check_patch_for
 
 if TYPE_CHECKING:
     # Runtime import stays inside the ingest endpoint: pulling the pipeline in
@@ -700,9 +701,17 @@ def build_app() -> FastAPI:
 
         # Before the stream opens, so an unsatisfiable request is a plain 4xx
         # naming the setting rather than an opaque failure a few steps in.
+        # A bad key in the metadata patch fails here too, not after the parse.
         try:
             check_backend_prerequisites(tmp_path, backend=backend, doc_id=doc_id, force=force)
-        except BackendUnavailableError as exc:
+            if opts.get("metadata"):
+                patch = MetadataPatch.model_validate(opts["metadata"])
+                check_patch_for(
+                    {k.name: k.shape for k in be.list_keys()},
+                    keys=patch.keys,
+                    attributes=patch.attributes,
+                )
+        except (BackendUnavailableError, ValueError) as exc:
             tmp_path.unlink(missing_ok=True)
             audit(
                 request,

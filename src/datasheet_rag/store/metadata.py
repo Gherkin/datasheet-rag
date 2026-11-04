@@ -18,17 +18,19 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Mapping
 from typing import Any, Literal, get_args
 
 from pydantic import BaseModel, Field
 
 from datasheet_rag.store.keys import (
+    KeyShape,
     MetadataKeyError,
     delete_doc_values,
     get_values_for_docs,
     key_filter_sql,
     key_shapes,
-    normalize_key_patch,
+    normalize_key_patch_for,
     write_key_values,
 )
 
@@ -193,10 +195,20 @@ def check_patch(
     key's name. Writes nothing, so a caller can check a patch before work it
     would be a waste to throw away (ingest does).
     """
-    key_patch = normalize_key_patch(conn, keys or {})
+    return check_patch_for(key_shapes(conn), keys=keys, attributes=attributes)
+
+
+def check_patch_for(
+    shapes: Mapping[str, KeyShape],
+    *,
+    keys: Mapping[str, Any] | None = None,
+    attributes: Mapping[str, Any] | None = None,
+) -> dict[str, list[str]]:
+    """:func:`check_patch` against a registry already read (``{name: shape}``),
+    so a client can reject a bad patch before parsing a PDF."""
+    key_patch = normalize_key_patch_for(shapes, keys or {})
     if attributes:
-        registered = key_shapes(conn)
-        clash = sorted(k for k, v in attributes.items() if k in registered and v is not None)
+        clash = sorted(k for k, v in attributes.items() if k in shapes and v is not None)
         if clash:
             noun = "is a registered key" if len(clash) == 1 else "are registered keys"
             raise MetadataKeyError(
