@@ -9,9 +9,12 @@ Tables created by :func:`init_schema`:
                        over ``context_text`` and ``text``. Content-linked
                        to ``chunks`` via triggers.
 * ``doc_metadata``   – sidecar table for document-level metadata
-                       (project, mpn, manufacturer, …). Independent of
-                       ``chunks`` so metadata can be registered before
-                       ingestion completes.
+                       (project, group, subsystem, tags, attributes).
+                       Independent of ``chunks`` so metadata can be
+                       registered before ingestion completes.
+* ``metadata_keys``  – registry of typed, filterable keys (GH #120),
+  ``doc_key_values``   and their per-document values — see
+                       :mod:`datasheet_rag.store.keys`.
 * ``schema_version`` – single-row table recording the schema version and
                        the embedding dimension the DB was created with.
 """
@@ -29,7 +32,7 @@ from datasheet_rag.config import get_settings
 
 console = Console()
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Columns added in each schema version, used for in-place migration of
 # databases created at an older version. Each entry is (column_name, DDL
@@ -40,6 +43,53 @@ _CHUNKS_COLUMNS_BY_VERSION: dict[int, list[tuple[str, str]]] = {
         ("figure_description", "figure_description TEXT"),
     ],
 }
+
+#: ``doc_metadata`` columns that v3 moved onto registered keys (GH #120).
+_V3_MOVED_COLUMNS = ("mpn", "manufacturer", "doc_type")
+
+
+def _migrate_to_v3(conn: sqlite3.Connection) -> None:
+    """Move ``doc_metadata.mpn``/``manufacturer``/``doc_type`` onto keys.
+
+    ``mpn`` held a comma-separated alias list (matched with ``LIKE``); it is
+    split into a real list here — stripped, empties dropped, order kept.
+    Then the old index and columns are dropped. One transaction: a failure
+    leaves the v2 store as it was.
+    """
+    from datasheet_rag.store.keys import _coerce, ensure_key_tables, write_key_values
+
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(doc_metadata)")}
+    if conn.in_transaction:
+        conn.commit()
+    conn.execute("BEGIN")
+    try:
+        ensure_key_tables(conn)
+        present = [c for c in _V3_MOVED_COLUMNS if c in cols]
+        if present:
+            rows = conn.execute(f"SELECT doc_id, {', '.join(present)} FROM doc_metadata").fetchall()
+            for row in rows:
+                patch: dict[str, list[str]] = {}
+                for col in present:
+                    raw = row[col]
+                    if not raw:
+                        continue
+                    if col == "mpn":
+                        patch[col] = _coerce(raw.split(","), "list")
+                    else:
+                        patch[col] = _coerce(raw, "single")
+                write_key_values(conn, row["doc_id"], patch)
+            conn.execute("DROP INDEX IF EXISTS ix_doc_metadata_mpn")
+            for col in present:
+                conn.execute(f"ALTER TABLE doc_metadata DROP COLUMN {col}")
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+
+
+#: Data migrations run when an older store is opened, keyed by the version
+#: they bring it to. Run after that version's chunk columns are added.
+_MIGRATIONS_BY_VERSION = {3: _migrate_to_v3}
 
 
 def connect(
@@ -100,6 +150,12 @@ def connect(
     # chunk schema version and embedding dim, so ensure them on every open
     # — IF NOT EXISTS makes this idempotent and brings older DBs forward.
     _ensure_control_tables(conn)
+    # Re-seed the built-in keys on every open too, so a key added to
+    # BUILTIN_KEYS in a later release reaches stores created before it.
+    from datasheet_rag.store.keys import ensure_key_tables
+
+    ensure_key_tables(conn)
+    conn.commit()
     # Same reasoning: the FTS index is ensured on every open, not only on a
     # fresh DB, so a store that predates it gets one instead of an error.
     _ensure_fts(conn)
@@ -137,6 +193,9 @@ def _migrate_if_needed(conn: sqlite3.Connection) -> None:
             if col_name not in existing_cols:
                 cur.execute(f"ALTER TABLE chunks ADD COLUMN {ddl_frag}")
                 existing_cols.add(col_name)
+        migration = _MIGRATIONS_BY_VERSION.get(target_version)
+        if migration is not None:
+            migration(conn)
         console.print(f"[yellow]Migrated chunks store {current} → {target_version}[/]")
 
     cur.execute(
@@ -487,10 +546,7 @@ def init_schema(conn: sqlite3.Connection, *, embedding_dim: int) -> None:
             doc_id       TEXT PRIMARY KEY,
             project_id   TEXT,
             group_name   TEXT,
-            mpn          TEXT,
-            manufacturer TEXT,
             subsystem    TEXT,
-            doc_type     TEXT,
             tags         TEXT,             -- JSON array of strings
             attributes   TEXT,             -- JSON object (free-form)
             updated_at   TEXT DEFAULT CURRENT_TIMESTAMP
@@ -499,7 +555,13 @@ def init_schema(conn: sqlite3.Connection, *, embedding_dim: int) -> None:
     )
     cur.execute("CREATE INDEX IF NOT EXISTS ix_doc_metadata_project ON doc_metadata(project_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS ix_doc_metadata_group ON doc_metadata(group_name)")
-    cur.execute("CREATE INDEX IF NOT EXISTS ix_doc_metadata_mpn ON doc_metadata(mpn)")
+
+    # ---- metadata_keys / doc_key_values ----------------------------------
+    # Registered keys and their per-document values (GH #120). mpn,
+    # manufacturer and doc_type live here as pre-registered keys.
+    from datasheet_rag.store.keys import ensure_key_tables
+
+    ensure_key_tables(conn)
 
     # ---- schema_version --------------------------------------------------
     cur.execute(

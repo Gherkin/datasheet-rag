@@ -99,8 +99,24 @@ def test_loads_doc_type_and_attributes(tmp_path: Path) -> None:
 
     (cfg,) = find_project_configs(tmp_path)
 
-    assert cfg.doc_type == "technical-manual"
+    # The top-level shortcut folds into keys.
+    assert cfg.keys == {"doc_type": "technical-manual"}
     assert cfg.attributes == {"revision": "B"}
+
+
+def test_loads_keys_table_and_list_mpn(tmp_path: Path) -> None:
+    (tmp_path / ".rag.toml").write_text(
+        'mpn = ["STM32H743VIT6", "STM32H743ZIT6"]\n'
+        '[keys]\nacme-id = "D-0172"\nacme-pn = ["P1", "P2"]\n'
+    )
+
+    (cfg,) = find_project_configs(tmp_path)
+
+    assert cfg.keys == {
+        "mpn": ["STM32H743VIT6", "STM32H743ZIT6"],
+        "acme-id": "D-0172",
+        "acme-pn": ["P1", "P2"],
+    }
 
 
 @pytest.mark.parametrize(
@@ -109,6 +125,14 @@ def test_loads_doc_type_and_attributes(tmp_path: Path) -> None:
         ('colour = "red"\n', "unknown key"),
         ("mpn = 226\n", "'mpn' must be a string"),
         ('doc_type = ["a"]\n', "'doc_type' must be a string"),
+        ('[keys]\nmanufacturer = ["a"]\n', "'manufacturer' must be a string"),
+        ("[keys]\nacme-id = 3\n", "'acme-id' must be a string or a list of strings"),
+        ('keys = "x"\n', "'keys' must be a table"),
+        ('mpn = "A"\n[keys]\nmpn = "B"\n', "both at the top level and under \\[keys\\]"),
+        (
+            '[keys]\nrev = "A"\n[attributes]\nrev = "B"\n',
+            "both under \\[keys\\] and \\[attributes\\]",
+        ),
         ('tags = "mcu"\n', "'tags' must be a list of strings"),
         ("tags = [1, 2]\n", "'tags' must be a list of strings"),
         ('attributes = "x"\n', "must be a table"),
@@ -154,13 +178,16 @@ def test_merge_project_configs_returns_none_for_empty_chain() -> None:
 
 def test_merge_project_configs_nearest_scalar_wins(tmp_path: Path) -> None:
     nearest = ProjectConfig(
-        path=tmp_path / "mpn" / ".rag.toml", mpn="STM32H743VIT6", subsystem="mcu"
+        path=tmp_path / "mpn" / ".rag.toml", keys={"mpn": "STM32H743VIT6"}, subsystem="mcu"
     )
     middle = ProjectConfig(
         path=tmp_path / "subsystem" / ".rag.toml", subsystem="power", group="psu"
     )
     root = ProjectConfig(
-        path=tmp_path / ".rag.toml", project_id="proj-a", manufacturer="STMicro", subsystem="root"
+        path=tmp_path / ".rag.toml",
+        project_id="proj-a",
+        keys={"manufacturer": "STMicro"},
+        subsystem="root",
     )
 
     merged = merge_project_configs([nearest, middle, root])
@@ -168,9 +195,8 @@ def test_merge_project_configs_nearest_scalar_wins(tmp_path: Path) -> None:
     assert merged is not None
     assert merged.path == nearest.path
     assert merged.project_id == "proj-a"
-    assert merged.manufacturer == "STMicro"
+    assert merged.keys == {"mpn": "STM32H743VIT6", "manufacturer": "STMicro"}
     assert merged.group == "psu"
-    assert merged.mpn == "STM32H743VIT6"
     # nearest sets subsystem explicitly, so it wins over middle/root
     assert merged.subsystem == "mcu"
 
@@ -187,10 +213,10 @@ def test_merge_project_configs_unions_tags_nearest_first_deduped(tmp_path: Path)
 
 def test_merge_project_configs_merges_attributes_key_by_key_nearest_wins(tmp_path: Path) -> None:
     nearest = ProjectConfig(path=tmp_path / "mpn" / ".rag.toml", attributes={"revision": "B"})
-    middle = ProjectConfig(path=tmp_path / "sub" / ".rag.toml", doc_type="errata")
+    middle = ProjectConfig(path=tmp_path / "sub" / ".rag.toml", keys={"doc_type": "errata"})
     root = ProjectConfig(
         path=tmp_path / ".rag.toml",
-        doc_type="datasheet",
+        keys={"doc_type": "datasheet", "mpn": ["A", "B"]},
         attributes={"revision": "A", "owner": "hw"},
     )
 
@@ -198,7 +224,8 @@ def test_merge_project_configs_merges_attributes_key_by_key_nearest_wins(tmp_pat
 
     assert merged is not None
     assert merged.attributes == {"revision": "B", "owner": "hw"}
-    assert merged.doc_type == "errata"
+    # Keys merge the same way: per key, nearest wins, a list is not unioned.
+    assert merged.keys == {"doc_type": "errata", "mpn": ["A", "B"]}
 
 
 def test_merge_project_configs_single_config_passthrough(tmp_path: Path) -> None:
@@ -235,8 +262,7 @@ def test_get_project_config_for_merges_chain_from_given_directory(
     assert cfg.project_id == "netdaq"
     assert cfg.subsystem == "eth_phy"
     assert cfg.group == "ethernet"
-    assert cfg.mpn == "LAN8720A"
-    assert cfg.manufacturer == "Microchip"
+    assert cfg.keys == {"mpn": "LAN8720A", "manufacturer": "Microchip"}
     assert cfg.tags == ["netdaq"]
 
 

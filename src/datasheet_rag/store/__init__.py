@@ -7,6 +7,7 @@ This package owns the local persistence layer:
 * `sqlite`   – CRUD helpers for chunks and vectors.
 * `search`   – vector / keyword / hybrid retrieval.
 * `metadata` – document-level metadata sidecar (independent of chunks).
+* `keys`     – registry of typed, filterable metadata keys and their values.
 
 The store is intentionally small: module-level functions rather than
 classes, mirroring the style of `datasheet_rag.storage` and `datasheet_rag.aws`.
@@ -24,6 +25,13 @@ from datasheet_rag.store.control import (
     lookup_api_key,
     record_audit,
     revoke_api_key,
+)
+from datasheet_rag.store.keys import (
+    KeySpec,
+    MetadataKeyError,
+    list_keys,
+    register_key,
+    remove_key,
 )
 from datasheet_rag.store.metadata import (
     DocMetadata,
@@ -74,6 +82,11 @@ from datasheet_rag.store.sqlite import (
 __all__ = [
     "ApiKeyRecord",
     "DocMetadata",
+    "KeySpec",
+    "MetadataKeyError",
+    "list_keys",
+    "register_key",
+    "remove_key",
     "SearchFilters",
     "SearchResult",
     "TitleSource",

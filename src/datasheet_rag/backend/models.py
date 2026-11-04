@@ -24,11 +24,10 @@ class DocSummary(BaseModel):
     doc_id: str
     project_id: str | None = None
     group_name: str | None = None
-    mpn: str | None = None
-    manufacturer: str | None = None
     subsystem: str | None = None
-    doc_type: str | None = None
     tags: list[str] = Field(default_factory=list)
+    #: Registered-key values, e.g. ``{"mpn": ["INA226"], "acme-id": "D-17"}``.
+    keys: dict[str, str | list[str]] = Field(default_factory=dict)
     doc_title: str | None = None
     page_count: int | None = None
 
@@ -142,15 +141,14 @@ class MetadataPatch(BaseModel):
 
     ``None`` means "leave the existing value alone" (matching the store's
     merge semantics). Pass an empty string / ``[]`` to clear a field.
+    In ``keys`` each named key is replaced; a ``None`` value removes it.
     """
 
     project_id: str | None = None
     group_name: str | None = None
-    mpn: str | None = None
-    manufacturer: str | None = None
     subsystem: str | None = None
-    doc_type: str | None = None
     tags: list[str] | None = None
+    keys: dict[str, str | list[str] | None] | None = None
     attributes: dict[str, Any] | None = None
 
     def kwargs(self) -> dict[str, Any]:

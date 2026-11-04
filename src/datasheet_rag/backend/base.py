@@ -33,7 +33,8 @@ from datasheet_rag.backend.models import (
 )
 from datasheet_rag.ingest_pipeline import ProgressCallback
 from datasheet_rag.models.chunk import Chunk, ChunkGraph
-from datasheet_rag.store import DocMetadata, SearchFilters, SearchResult, TitleSource
+from datasheet_rag.store import DocMetadata, KeySpec, SearchFilters, SearchResult, TitleSource
+from datasheet_rag.store.keys import KeyShape
 
 SearchMode = Literal["hybrid", "vector", "keyword"]
 
@@ -99,14 +100,15 @@ class RagBackend(ABC):
         *,
         project_id: str | None = None,
         group_name: str | None = None,
-        mpn: str | None = None,
-        manufacturer: str | None = None,
+        keys: dict[str, str] | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> DocPage:
         """One page of the matching documents, in ``doc_id`` order.
 
-        ``limit=None`` returns every match from ``offset`` on.
+        ``keys`` filters on registered keys (AND-ed; a list key matches if any
+        value is equal, case-insensitive). ``limit=None`` returns every match
+        from ``offset`` on.
         """
 
     @abstractmethod
@@ -151,11 +153,31 @@ class RagBackend(ABC):
         *,
         project_id: str | None = None,
         group_name: str | None = None,
-        mpn: str | None = None,
+        keys: dict[str, str] | None = None,
     ) -> list[DocMetadata]: ...
 
     @abstractmethod
     def apply_metadata_to_chunks(self, doc_id: str) -> int: ...
+
+    # ---- metadata keys (GH #120) ----
+    @abstractmethod
+    def list_keys(self) -> list[KeySpec]:
+        """Every registered metadata key, built-ins first."""
+
+    @abstractmethod
+    def register_key(
+        self,
+        name: str,
+        *,
+        shape: KeyShape = "single",
+        description: str = "",
+        roles: Sequence[str] = (),
+    ) -> tuple[KeySpec, int]:
+        """Register a key; returns it and how many documents' attributes it promoted."""
+
+    @abstractmethod
+    def remove_key(self, name: str, *, demote: bool = False) -> int:
+        """Unregister a key; returns how many documents held a value."""
 
     # ---- stats ----
     @abstractmethod

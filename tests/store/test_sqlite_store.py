@@ -27,6 +27,7 @@ from datasheet_rag.models.chunk import (
     ChunkMetadata,
     LayoutType,
 )
+from datasheet_rag.store.keys import MetadataKeyError
 from datasheet_rag.store.metadata import (
     apply_metadata_to_chunks,
     delete_metadata,
@@ -324,12 +325,14 @@ def test_delete_doc_cascades(conn: sqlite3.Connection) -> None:
 def test_delete_metadata(conn: sqlite3.Connection) -> None:
     # doc_metadata is a sidecar (not FK'd to chunks), so it needs its own
     # delete — this covers the gap `delete_doc`'s cascade doesn't reach.
-    set_metadata(conn, "doc1", mpn="M1", manufacturer="Acme")
+    set_metadata(conn, "doc1", keys={"mpn": ["M1"], "manufacturer": "Acme"})
     assert get_metadata(conn, "doc1") is not None
 
     deleted = delete_metadata(conn, "doc1")
     assert deleted == 1
     assert get_metadata(conn, "doc1") is None
+    # Key values go with the row, or a re-created row would inherit them.
+    assert conn.execute("SELECT COUNT(*) FROM doc_key_values").fetchone()[0] == 0
 
     # No-op (returns 0) when there's no sidecar row for that doc_id.
     assert delete_metadata(conn, "doc1") == 0
@@ -605,8 +608,7 @@ def test_metadata_set_get_update_and_apply(conn: sqlite3.Connection) -> None:
         "doc1",
         project_id="proj-1",
         group_name="grp-1",
-        mpn="MPN-123",
-        manufacturer="Acme",
+        keys={"mpn": "MPN-123", "manufacturer": "Acme"},
         tags=["analog", "ldo"],
         attributes={"revision": "B", "notes": "draft"},
     )
@@ -615,28 +617,31 @@ def test_metadata_set_get_update_and_apply(conn: sqlite3.Connection) -> None:
     assert md.attributes == {"revision": "B", "notes": "draft"}
     assert md.updated_at is not None
 
-    # get_metadata round-trips.
+    # get_metadata round-trips; a lone string for a list key becomes a list.
     fetched = get_metadata(conn, "doc1")
     assert fetched is not None
-    assert fetched.mpn == "MPN-123"
-    assert fetched.manufacturer == "Acme"
+    assert fetched.keys == {"mpn": ["MPN-123"], "manufacturer": "Acme"}
 
     # Partial update — only mpn changes, attributes deep-merge,
     # `notes` is removed via None sentinel.
     updated = set_metadata(
         conn,
         "doc1",
-        mpn="MPN-456",
+        keys={"mpn": ["MPN-456"]},
         attributes={"revision": "C", "notes": None, "extra": "yes"},
     )
-    assert updated.mpn == "MPN-456"
+    assert updated.keys["mpn"] == ["MPN-456"]
     # Manufacturer was not passed -> preserved.
-    assert updated.manufacturer == "Acme"
+    assert updated.keys["manufacturer"] == "Acme"
     # Project / group preserved.
     assert updated.project_id == "proj-1"
     # Attributes merged: revision overwritten, notes dropped, extra added.
     assert updated.attributes == {"revision": "C", "extra": "yes"}
     assert updated.tags == ["analog", "ldo"]
+
+    # A None key value removes the key.
+    cleared = set_metadata(conn, "doc1", keys={"manufacturer": None})
+    assert "manufacturer" not in cleared.keys
 
     # list_docs by project includes doc1.
     listed = list_docs(conn, project_id="proj-1")
@@ -661,67 +666,44 @@ def test_metadata_set_get_update_and_apply(conn: sqlite3.Connection) -> None:
     assert all(r.chunk.doc_id == "doc1" for r in hits)
 
 
-def _append_mpn_aliases(conn: sqlite3.Connection, doc_id: str, *aliases: str) -> str:
-    """Replicate the CLI --mpn-alias merge logic in isolation."""
-    existing = get_metadata(conn, doc_id)
-    base = existing.mpn if existing else None
-    all_mpns: list[str] = [t.strip() for t in base.split(",") if t.strip()] if base else []
-    for alias in aliases:
-        if alias not in all_mpns:
-            all_mpns.append(alias)
-    merged = ",".join(all_mpns)
-    set_metadata(conn, doc_id, mpn=merged)
-    return merged
+def test_mpn_list_keeps_order_and_drops_duplicates(conn: sqlite3.Connection) -> None:
+    md = set_metadata(conn, "doc-x", keys={"mpn": [" INA226", "INA226A", "", "ina226", "INA226B"]})
+    # Stripped, empties dropped, a case-insensitive duplicate dropped, order kept.
+    assert md.keys["mpn"] == ["INA226", "INA226A", "INA226B"]
 
 
-def test_mpn_alias_append_and_dedup(conn: sqlite3.Connection) -> None:
-    set_metadata(conn, "doc-x", mpn="INA226")
+def test_list_docs_key_filter_matches_any_list_entry(conn: sqlite3.Connection) -> None:
+    set_metadata(conn, "doc-a", keys={"mpn": ["INA226"]})
+    set_metadata(conn, "doc-b", keys={"mpn": ["INA226", "INA226A"]})
+    set_metadata(conn, "doc-c", keys={"mpn": ["INA226A", "INA226B"]})
+    set_metadata(conn, "doc-d", keys={"mpn": ["INA226B"], "manufacturer": "TI"})
+    set_metadata(conn, "doc-e", keys={"mpn": ["OTHER"], "manufacturer": "TI"})
 
-    # Append two aliases
-    _append_mpn_aliases(conn, "doc-x", "INA226A", "INA226B")
-    md = get_metadata(conn, "doc-x")
-    assert md is not None
-    assert md.mpn == "INA226,INA226A,INA226B"
+    def ids(**keys: str) -> list[str]:
+        return [m.doc_id for m in list_docs(conn, keys=keys)]
 
-    # Appending a duplicate is a no-op
-    _append_mpn_aliases(conn, "doc-x", "INA226A")
-    md = get_metadata(conn, "doc-x")
-    assert md is not None
-    assert md.mpn == "INA226,INA226A,INA226B"
-
-    # All three aliases are now findable via list_docs
-    for token in ("INA226", "INA226A", "INA226B"):
-        matches = list_docs(conn, mpn=token)
-        assert any(m.doc_id == "doc-x" for m in matches), f"token {token!r} not found"
+    assert ids(mpn="INA226") == ["doc-a", "doc-b"]
+    assert ids(mpn="INA226A") == ["doc-b", "doc-c"]
+    assert ids(mpn="INA226B") == ["doc-c", "doc-d"]
+    assert ids(mpn="NOTHERE") == []
+    # Whole values only: INA226 does not match INA226A.
+    assert "doc-c" not in ids(mpn="INA226")
+    # Case-insensitive.
+    assert ids(mpn="ina226b") == ["doc-c", "doc-d"]
+    # Several keys AND together.
+    assert ids(mpn="INA226B", manufacturer="ti") == ["doc-d"]
 
 
-def test_list_docs_mpn_filter_comma_separated(conn: sqlite3.Connection) -> None:
-    set_metadata(conn, "doc-a", mpn="INA226")
-    set_metadata(conn, "doc-b", mpn="INA226,INA226A")
-    set_metadata(conn, "doc-c", mpn="INA226A,INA226B")
-    set_metadata(conn, "doc-d", mpn="INA226B")
-    set_metadata(conn, "doc-e", mpn="OTHER")
-
-    def ids(mpn: str) -> list[str]:
-        return [m.doc_id for m in list_docs(conn, mpn=mpn)]
-
-    # exact single match
-    assert ids("INA226") == ["doc-a", "doc-b"]
-    # alias in the middle / at the end
-    assert ids("INA226A") == ["doc-b", "doc-c"]
-    # alias only at start of multi-value
-    assert ids("INA226B") == ["doc-c", "doc-d"]
-    # unrelated MPN returns nothing
-    assert ids("NOTHERE") == []
-    # token that is a prefix of another MPN must NOT match (INA226 ≠ INA226A)
-    assert "doc-c" not in ids("INA226")
+def test_list_docs_rejects_unregistered_key(conn: sqlite3.Connection) -> None:
+    with pytest.raises(MetadataKeyError, match="unregistered key"):
+        list_docs(conn, keys={"nope": "x"})
 
 
 def test_apply_metadata_noops_when_missing(conn: sqlite3.Connection) -> None:
     # No sidecar row at all.
     assert apply_metadata_to_chunks(conn, "doc-unknown") == 0
     # Sidecar exists but no project / group set.
-    set_metadata(conn, "doc-bare", mpn="X")
+    set_metadata(conn, "doc-bare", keys={"mpn": "X"})
     assert apply_metadata_to_chunks(conn, "doc-bare") == 0
 
 

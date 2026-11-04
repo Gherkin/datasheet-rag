@@ -20,20 +20,26 @@ Running ``rag ingest`` from inside ``STM32H743VIT6/`` merges all three files:
 the mpn-level config wins for fields it sets (``mpn``), the subsystem-level
 config fills in ``subsystem``/``group``, and the project-level config supplies
 the rest (``project_id``, ``manufacturer``). ``tags`` are unioned across every
-level instead of overridden, and ``attributes`` are merged key by key.
+level instead of overridden, and ``keys``/``attributes`` are merged key by key.
 
 Example ``.rag.toml``::
 
     project_id = "stm32-h7-devboard"
     group = "power-subsystem"
-    mpn = "STM32H743VIT6"
+    mpn = ["STM32H743VIT6", "STM32H743ZIT6"]
     manufacturer = "STMicroelectronics"
     subsystem = "mcu"
     doc_type = "reference-manual"
     tags = ["reference-manual"]
 
+    [keys]
+    acme-id = "D-0172"           # a key registered with `rag keys add`
+
     [attributes]
     revision = "B"
+
+``mpn``, ``manufacturer`` and ``doc_type`` are shortcuts for the built-in
+keys of the same name; ``[keys]`` sets any registered key (GH #120).
 
 The schema is closed: an unknown key, a value of the wrong type, a reserved
 attribute key or a file that is not valid TOML raises ``ProjectConfigError``
@@ -50,12 +56,19 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from datasheet_rag.store.keys import BUILTIN_KEYS
 from datasheet_rag.store.metadata import RESERVED_ATTRIBUTES
 
 CONFIG_FILENAME = ".rag.toml"
 
-_SCALAR_KEYS = ("project_id", "group", "mpn", "manufacturer", "subsystem", "doc_type")
-_KNOWN_KEYS = frozenset({*_SCALAR_KEYS, "tags", "attributes"})
+_SCALAR_KEYS = ("project_id", "group", "subsystem")
+#: Top-level shortcuts for built-in metadata keys: ``mpn = "X"`` means the
+#: same as ``[keys] mpn = "X"``. ``mpn`` may be a string or a list.
+_KEY_SHORTCUTS = ("mpn", "manufacturer", "doc_type")
+_KNOWN_KEYS = frozenset({*_SCALAR_KEYS, *_KEY_SHORTCUTS, "tags", "keys", "attributes"})
+
+#: A ``[keys]`` value: a string, or a list of strings for a list-valued key.
+KeyValue = str | list[str]
 
 
 class ProjectConfigError(ValueError):
@@ -69,12 +82,46 @@ class ProjectConfig:
     path: Path
     project_id: str | None = None
     group: str | None = None
-    mpn: str | None = None
-    manufacturer: str | None = None
     subsystem: str | None = None
-    doc_type: str | None = None
     tags: list[str] | None = None
+    #: Registered-key values, shortcuts (``mpn``, …) folded in. Whether each
+    #: key is registered is checked when the values are written, not here:
+    #: loading a config must not need the store.
+    keys: dict[str, KeyValue] | None = None
     attributes: dict[str, str] | None = None
+
+    def key(self, name: str) -> KeyValue | None:
+        return (self.keys or {}).get(name)
+
+
+#: Shapes of the built-in keys, known without a store. A user key's shape is
+#: only known to the store, so its value is checked when it is written.
+_BUILTIN_SHAPES = {k.name: k.shape for k in BUILTIN_KEYS}
+
+
+def _check_key_value(candidate: Path, key: str, value: Any) -> KeyValue:
+    if isinstance(value, str):
+        return value
+    if _BUILTIN_SHAPES.get(key) == "single":
+        raise ProjectConfigError(
+            f"{candidate}: {key!r} must be a string, got {type(value).__name__}"
+        )
+    if isinstance(value, list) and all(isinstance(v, str) for v in value):
+        return list(value)
+    raise ProjectConfigError(
+        f"{candidate}: {key!r} must be a string or a list of strings, got {type(value).__name__}"
+    )
+
+
+def _check_keys(candidate: Path, raw: Any) -> dict[str, KeyValue]:
+    if not isinstance(raw, dict):
+        raise ProjectConfigError(f"{candidate}: 'keys' must be a table, e.g. [keys]")
+    out: dict[str, KeyValue] = {}
+    for key, value in raw.items():
+        if not key:
+            raise ProjectConfigError(f"{candidate}: [keys] has an empty key")
+        out[key] = _check_key_value(candidate, key, value)
+    return out
 
 
 def _check_attributes(candidate: Path, raw: Any) -> dict[str, str]:
@@ -126,16 +173,30 @@ def _load_config(candidate: Path) -> ProjectConfig:
         raise ProjectConfigError(f"{candidate}: 'tags' must be a list of strings")
     attributes = data.get("attributes")
 
+    keys = _check_keys(candidate, data["keys"]) if "keys" in data else {}
+    for shortcut in _KEY_SHORTCUTS:
+        if shortcut not in data:
+            continue
+        if shortcut in keys:
+            raise ProjectConfigError(
+                f"{candidate}: {shortcut!r} is set both at the top level and under [keys]"
+            )
+        keys[shortcut] = _check_key_value(candidate, shortcut, data[shortcut])
+    attrs = _check_attributes(candidate, attributes) if attributes is not None else None
+    clash = sorted(set(attrs or {}) & set(keys))
+    if clash:
+        raise ProjectConfigError(
+            f"{candidate}: {', '.join(clash)} set both under [keys] and [attributes]"
+        )
+
     return ProjectConfig(
         path=candidate,
         project_id=data.get("project_id"),
         group=data.get("group"),
-        mpn=data.get("mpn"),
-        manufacturer=data.get("manufacturer"),
         subsystem=data.get("subsystem"),
-        doc_type=data.get("doc_type"),
         tags=tags,
-        attributes=_check_attributes(candidate, attributes) if attributes is not None else None,
+        keys=keys or None,
+        attributes=attrs,
     )
 
 
@@ -164,7 +225,8 @@ def merge_project_configs(configs: Sequence[ProjectConfig]) -> ProjectConfig | N
     same way directory-local config overrides project-wide config elsewhere.
     ``tags`` are unioned across every level instead, since tags are additive
     labels rather than a single value to override (de-duplicated, nearest first).
-    ``attributes`` merge key by key, the nearest file winning per key.
+    ``keys`` and ``attributes`` merge key by key, the nearest file winning
+    per key (a list value is replaced, not unioned).
     The merged ``path`` is the nearest file's, since that's the config a user
     editing files in this directory would reach for first.
     """
@@ -185,18 +247,18 @@ def merge_project_configs(configs: Sequence[ProjectConfig]) -> ProjectConfig | N
                 tags.append(tag)
 
     attributes: dict[str, str] = {}
+    keys: dict[str, KeyValue] = {}
     for cfg in reversed(configs):
         attributes.update(cfg.attributes or {})
+        keys.update(cfg.keys or {})
 
     return ProjectConfig(
         path=configs[0].path,
         project_id=_first("project_id"),
         group=_first("group"),
-        mpn=_first("mpn"),
-        manufacturer=_first("manufacturer"),
         subsystem=_first("subsystem"),
-        doc_type=_first("doc_type"),
         tags=tags or None,
+        keys=keys or None,
         attributes=attributes or None,
     )
 

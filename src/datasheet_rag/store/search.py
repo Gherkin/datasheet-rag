@@ -21,6 +21,7 @@ import numpy as np
 from pydantic import BaseModel
 
 from datasheet_rag.models.chunk import Chunk, ChunkLevel, LayoutType
+from datasheet_rag.store.keys import key_filter_sql
 from datasheet_rag.store.sqlite import get_chunk
 
 
@@ -30,6 +31,10 @@ class SearchFilters(BaseModel):
     doc_ids: list[str] | None = None
     project_id: str | None = None
     group_name: str | None = None
+    #: Registered-key filters, AND-ed: ``{"mpn": "INA226"}`` keeps chunks of
+    #: documents whose mpn list holds INA226 (case-insensitive). See
+    #: ``store.keys``.
+    keys: dict[str, str] | None = None
     level: ChunkLevel | list[ChunkLevel] | None = None
     layout_types: list[LayoutType] | None = None
     min_page: int | None = None
@@ -60,6 +65,11 @@ class SearchFilters(BaseModel):
         if self.group_name is not None:
             clauses.append("c.group_name = ?")
             params.append(self.group_name)
+
+        if self.keys:
+            key_clauses, key_params = key_filter_sql(self.keys, doc_id_column="c.doc_id")
+            clauses.extend(key_clauses)
+            params.extend(key_params)
 
         if self.level is not None:
             if isinstance(self.level, list):

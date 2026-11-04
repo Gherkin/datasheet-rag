@@ -91,6 +91,18 @@ def _get_json(db_path: Path, doc_id: str) -> dict:
     return json.loads(result.output)
 
 
+_KEY_FIELDS = ("mpn", "manufacturer", "doc_type")
+
+
+def _field(meta: dict, field: str) -> str:
+    """A metadata field as text; a built-in key reads from ``keys``, a list
+    joined, and an absent key reads as "" — that is what clearing it leaves."""
+    if field not in _KEY_FIELDS:
+        return meta[field]
+    value = meta["keys"].get(field, "")
+    return ", ".join(value) if isinstance(value, list) else value
+
+
 def test_tag_sets_full_list(db_path: Path) -> None:
     result = _meta(db_path, DOC_A, "--tag", "mcu", "--tag", "reviewed")
     assert result.exit_code == 0, result.output
@@ -111,7 +123,7 @@ def test_tag_omitted_leaves_existing_tags_untouched(db_path: Path) -> None:
     assert result.exit_code == 0, result.output
     meta = _get_json(db_path, DOC_A)
     assert meta["tags"] == ["mcu"]
-    assert meta["mpn"] == "STM32H743VIT6"
+    assert meta["keys"]["mpn"] == ["STM32H743VIT6"]
 
 
 def test_clear_tags_wipes_list(db_path: Path) -> None:
@@ -239,11 +251,11 @@ def test_blank_scalar_clears_field(
     db_path: Path, flag: str, field: str, extra: tuple[str, ...]
 ) -> None:
     _meta(db_path, DOC_A, flag, "seeded")
-    assert _get_json(db_path, DOC_A)[field] == "seeded"
+    assert _field(_get_json(db_path, DOC_A), field) == "seeded"
     result = _meta(db_path, DOC_A, flag, "", *extra)
     assert result.exit_code == 0, result.output
     assert "Saved metadata" in result.output
-    assert _get_json(db_path, DOC_A)[field] == ""
+    assert _field(_get_json(db_path, DOC_A), field) == ""
 
 
 @pytest.mark.parametrize(("flag", "field"), _SCALAR_FIELDS)
@@ -256,7 +268,7 @@ def test_blank_scalar_beats_project_config_default(
     # Alongside another flag, so this reaches the merge whatever the gate does.
     result = _meta(db_path, DOC_A, flag, "", *_OTHER_FLAG)
     assert result.exit_code == 0, result.output
-    assert _get_json(db_path, DOC_A)[field] == ""
+    assert _field(_get_json(db_path, DOC_A), field) == ""
 
 
 # --- .rag.toml doc_type and [attributes] (GH #26) ----------------------------
@@ -272,7 +284,7 @@ def test_project_config_supplies_doc_type_and_attributes(
     result = _meta(db_path, DOC_A, "--mpn", "V700")
     assert result.exit_code == 0, result.output
     meta = _get_json(db_path, DOC_A)
-    assert meta["doc_type"] == "technical-manual"
+    assert meta["keys"]["doc_type"] == "technical-manual"
     assert meta["attributes"] == {"revision": "A", "owner": "hw"}
 
 
@@ -313,7 +325,98 @@ def test_no_flags_is_still_a_read(db_path: Path) -> None:
     result = _meta(db_path, DOC_A)
     assert result.exit_code == 0, result.output
     assert "Saved metadata" not in result.output
-    assert json.loads(result.output)["mpn"] == "INA226"
+    assert json.loads(result.output)["keys"]["mpn"] == ["INA226"]
+
+
+# --- registered keys (GH #120) ----------------------------------------------
+
+
+def _keys(*args: str):
+    return CliRunner().invoke(cli, ["keys", *args], env={"COLUMNS": "200"})
+
+
+def test_mpn_comma_list_and_alias_append(db_path: Path) -> None:
+    _meta(db_path, DOC_A, "--mpn", "INA226, INA226A")
+    result = _meta(db_path, DOC_A, "--mpn-alias", "INA226B", "--mpn-alias", "INA226A")
+    assert result.exit_code == 0, result.output
+    assert _get_json(db_path, DOC_A)["keys"]["mpn"] == ["INA226", "INA226A", "INA226B"]
+
+
+def test_key_needs_registration_then_sets_and_unsets(db_path: Path) -> None:
+    result = _meta(db_path, DOC_A, "--key", "acme-id=D-1")
+    assert result.exit_code == 1
+    assert "unregistered key" in result.output and "rag keys add" in result.output
+    assert "Traceback" not in result.output
+
+    assert _keys("add", "acme-id", "--db", str(db_path)).exit_code == 0
+    assert _meta(db_path, DOC_A, "--key", "acme-id=D-1").exit_code == 0
+    assert _get_json(db_path, DOC_A)["keys"]["acme-id"] == "D-1"
+
+    assert _meta(db_path, DOC_A, "--unset-key", "acme-id").exit_code == 0
+    assert "acme-id" not in _get_json(db_path, DOC_A)["keys"]
+
+
+def test_repeated_key_builds_a_list_and_single_key_rejects_it(db_path: Path) -> None:
+    _keys("add", "acme-pn", "--shape", "list", "--role", "part", "--db", str(db_path))
+    _keys("add", "acme-id", "--db", str(db_path))
+    result = _meta(db_path, DOC_A, "--key", "acme-pn=P1", "--key", "acme-pn=P2")
+    assert result.exit_code == 0, result.output
+    assert _get_json(db_path, DOC_A)["keys"]["acme-pn"] == ["P1", "P2"]
+
+    result = _meta(db_path, DOC_A, "--key", "acme-id=A", "--key", "acme-id=B")
+    assert result.exit_code == 1
+    assert "expected a string" in result.output
+
+
+def test_keys_add_promotes_attribute_and_remove_demotes_it(db_path: Path) -> None:
+    _meta(db_path, DOC_A, "--attr", "intel-id=123456")
+    result = _keys("add", "intel-id", "--db", str(db_path))
+    assert result.exit_code == 0, result.output
+    assert "1 document" in result.output
+    meta = _get_json(db_path, DOC_A)
+    assert meta["keys"]["intel-id"] == "123456"
+    assert "intel-id" not in meta["attributes"]
+
+    refused = _keys("remove", "intel-id", "--db", str(db_path))
+    assert refused.exit_code == 1 and "demote" in refused.output
+
+    assert _keys("remove", "intel-id", "--demote", "--db", str(db_path)).exit_code == 0
+    meta = _get_json(db_path, DOC_A)
+    assert meta["attributes"]["intel-id"] == "123456"
+    assert "intel-id" not in meta["keys"]
+
+
+def test_keys_list_and_builtin_cannot_be_removed(db_path: Path) -> None:
+    listed = _keys("list", "--db", str(db_path))
+    assert listed.exit_code == 0, listed.output
+    for name in ("mpn", "manufacturer", "doc_type"):
+        assert name in listed.output
+    result = _keys("remove", "mpn", "--db", str(db_path))
+    assert result.exit_code == 1 and "built in" in result.output
+
+
+def test_keys_add_rejects_fixed_field_name(db_path: Path) -> None:
+    result = _keys("add", "project_id", "--db", str(db_path))
+    assert result.exit_code == 1 and "fixed metadata field" in result.output
+
+
+def test_list_filters_by_key_and_shows_user_keys_in_wide_view(db_path: Path) -> None:
+    _keys("add", "acme-id", "--db", str(db_path))
+    _meta(db_path, DOC_A, "--key", "acme-id=D-1")
+    _meta(db_path, DOC_B, "--key", "acme-id=D-2")
+    result = _list(db_path, "--global", "--key", "acme-id=d-1")
+    assert result.exit_code == 0, result.output
+    # The wide view (implied by the filter) has a column per user key; the
+    # extra column squeezes doc_id, so check the key values instead.
+    assert "acme-id" in result.output
+    assert "D-1" in result.output
+    assert "D-2" not in result.output
+
+
+def test_list_rejects_unregistered_key_filter(db_path: Path) -> None:
+    result = _list(db_path, "--global", "--key", "nope=x")
+    assert result.exit_code != 0
+    assert "unregistered key" in result.output
 
 
 def test_ingest_tag_help_mentions_replace_semantics() -> None:

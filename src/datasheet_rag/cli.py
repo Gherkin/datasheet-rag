@@ -361,12 +361,71 @@ def _parse_attr_items(items: tuple[str, ...]) -> dict[str, str]:
     return parsed
 
 
+def _parse_key_items(items: tuple[str, ...], *, option: str = "--key") -> dict[str, Any]:
+    """Parse repeated ``--key NAME=VALUE`` options into a key patch.
+
+    A name given once maps to its string; a name given more than once maps
+    to the list of its values, in order — which is how a list key such as
+    ``mpn`` gets several values. The store coerces a lone string to a
+    one-entry list for a list key, and rejects a list for a single key.
+    """
+    parsed: dict[str, Any] = {}
+    for item in items:
+        name, sep, value = item.partition("=")
+        if not sep or not name:
+            raise click.BadParameter(
+                f"{option} expects NAME=VALUE, got {item!r}", param_hint=option
+            )
+        if name not in parsed:
+            parsed[name] = value
+        elif isinstance(parsed[name], list):
+            parsed[name].append(value)
+        else:
+            parsed[name] = [parsed[name], value]
+    return parsed
+
+
+def _split_mpns(value: str) -> list[str]:
+    """``--mpn A,B`` → ``["A", "B"]``. Part numbers never contain commas, and
+    a comma list is how ``--mpn`` took several values before mpn was a list."""
+    return [v.strip() for v in value.split(",") if v.strip()]
+
+
+def _shortcut_keys(
+    *, mpn: str | None, manufacturer: str | None, doc_type: str | None
+) -> dict[str, Any]:
+    """The built-in-key shortcut options as a key patch (unset ones omitted).
+
+    An empty string is kept: it means "clear this key", the same as for any
+    other metadata option.
+    """
+    out: dict[str, Any] = {}
+    if mpn is not None:
+        out["mpn"] = _split_mpns(mpn)
+    if manufacturer is not None:
+        out["manufacturer"] = manufacturer
+    if doc_type is not None:
+        out["doc_type"] = doc_type
+    return out
+
+
+def _merge_shortcuts(keys: dict[str, Any], shortcuts: dict[str, Any]) -> dict[str, Any]:
+    """Fold shortcut options into ``--key`` items; naming a key both ways is an error."""
+    both = sorted(set(keys) & set(shortcuts))
+    if both:
+        raise click.UsageError(
+            f"{', '.join(both)} given both as --{both[0].replace('_', '-')} and --key; use one"
+        )
+    return {**keys, **shortcuts}
+
+
 @click.group(
     cls=OrderedGroup,
     context_settings={"show_default": True},
     order=[
         "ingest",
         "metadata",
+        "keys",
         "search",
         "list",
         "get",
@@ -594,9 +653,10 @@ def repair_group() -> None:
 
 # The column vocabulary `rag list --columns` understands. Split by where the
 # value lives: the store's own row (`IngestedDoc`) or the metadata sidecar
-# (`DocMetadata`). Anything *not* named here is looked up as a key in the
-# sidecar's free-form `attributes` dict — those keys are arbitrary by design,
-# so they can't be enumerated, and reaching them is the point of the flag.
+# (`DocMetadata`). Anything *not* named here is looked up first as a
+# registered key (mpn, manufacturer, doc_type and user keys — GH #120), then
+# in the sidecar's free-form `attributes` dict — those keys are arbitrary by
+# design, so they can't be enumerated, and reaching them is the point of the flag.
 _DOC_COLUMNS: dict[str, Callable[[IngestedDoc], Any]] = {
     "doc_id": lambda d: d.doc_id[:SHORT_DOC_ID_LEN],
     "title": lambda d: d.doc_title,
@@ -608,10 +668,7 @@ _DOC_COLUMNS: dict[str, Callable[[IngestedDoc], Any]] = {
 _META_COLUMNS: dict[str, Callable[[DocMetadata], Any]] = {
     "project": lambda m: m.project_id,
     "group": lambda m: m.group_name,
-    "mpn": lambda m: m.mpn,
-    "manufacturer": lambda m: m.manufacturer,
     "subsystem": lambda m: m.subsystem,
-    "doc_type": lambda m: m.doc_type,
     "tags": lambda m: m.tags,
     "updated": lambda m: m.updated_at,
     "stale": lambda m: "[yellow]re-embed[/]" if m.attributes.get(_STALE_ATTR) else "",
@@ -664,6 +721,8 @@ def _list_cell(name: str, doc: IngestedDoc, meta: DocMetadata | None) -> Any:
         return None
     if (meta_getter := _META_COLUMNS.get(name)) is not None:
         return meta_getter(meta)
+    if name in meta.keys:
+        return meta.keys[name]
     return meta.attributes.get(name)
 
 
@@ -697,6 +756,15 @@ def _fmt_list_cell(value: Any) -> str:
 @click.option("--group", "group_name", default=None, help="Only show documents in this group.")
 @click.option("--mpn", default=None, help="Only show documents with this part number.")
 @click.option(
+    "--key",
+    "key_items",
+    multiple=True,
+    metavar="NAME=VALUE",
+    help="Only show documents whose registered key NAME holds VALUE "
+    "(repeatable, all must match; a list key matches any entry; "
+    "case-insensitive). See `rag keys list`.",
+)
+@click.option(
     "--tag",
     "tags",
     multiple=True,
@@ -720,16 +788,17 @@ def _fmt_list_cell(value: Any) -> str:
     help="Choose the columns to show (comma-separated, repeatable). "
     "Built-ins: title, chunks, pages, ingested, project, group, mpn, "
     "manufacturer, subsystem, doc_type, tags, updated, stale. Any other "
-    "name is read as an attribute key set by `rag metadata --attr` "
-    "(prefix with `attr:` to force that reading). doc_id is always shown.",
+    "name is read as a registered key (`rag keys list`), else as an "
+    "attribute set by `rag metadata --attr` (prefix with `attr:` to force "
+    "the attribute reading). doc_id is always shown.",
 )
 @click.option(
     "--wide",
     "-w",
     is_flag=True,
     help="Show the sidecar columns (project, group, mpn, manufacturer, "
-    "subsystem, tags) in place of the chunk/page/ingest columns. "
-    "Implied whenever a filter is given.",
+    "subsystem, tags, then each user-registered key) in place of the "
+    "chunk/page/ingest columns. Implied whenever a filter is given.",
 )
 @click.option(
     "--s3",
@@ -743,6 +812,7 @@ def list_docs(
     is_global: bool,
     group_name: str | None,
     mpn: str | None,
+    key_items: tuple[str, ...],
     tags: tuple[str, ...],
     attrs: tuple[str, ...],
     columns: tuple[str, ...],
@@ -799,9 +869,28 @@ def list_docs(
         return
 
     attr_filters = _parse_attr_items(attrs)
+    key_filters: dict[str, str] = {}
+    for name, value in _parse_key_items(key_items).items():
+        if isinstance(value, list):
+            raise click.BadParameter(
+                f"--key {name} given more than once; a filter takes one value per key",
+                param_hint="--key",
+            )
+        key_filters[name] = value
+    if mpn is not None:
+        if "mpn" in key_filters:
+            raise click.UsageError("mpn given both as --mpn and --key; use one")
+        key_filters["mpn"] = mpn
 
-    filtering = bool(group_name or mpn or tags or attr_filters)
+    filtering = bool(group_name or key_filters or tags or attr_filters)
     be = _backend_for(db_path)
+    registered = be.list_keys()
+    unknown = sorted(set(key_filters) - {k.name for k in registered})
+    if unknown:
+        raise click.BadParameter(
+            f"unregistered key(s) {', '.join(unknown)} (see `rag keys list`)",
+            param_hint="--key",
+        )
     docs = be.get_ingested_docs(project_id=project_id)
 
     # The sidecar is a separate table from the chunk store, so join by doc_id
@@ -810,7 +899,10 @@ def list_docs(
     # sidecar and belongs in the default view.
     try:
         meta_by_id = {
-            m.doc_id: m for m in be.list_docs(project_id=project_id, group_name=group_name, mpn=mpn)
+            m.doc_id: m
+            for m in be.list_docs(
+                project_id=project_id, group_name=group_name, keys=key_filters or None
+            )
         }
     except Exception:
         meta_by_id = {}
@@ -845,6 +937,8 @@ def list_docs(
         shown = list(chosen)
     else:
         shown = list(_LIST_WIDE_COLUMNS if (wide or filtering) else _LIST_DEFAULT_COLUMNS)
+        if wide or filtering:
+            shown.extend(k.name for k in registered if not k.builtin)
     # doc_id is the handle every other `rag` command takes, so a listing
     # without it is a dead end; the stale marker is a health flag rather than
     # metadata, and is worth showing whatever view was asked for.
@@ -864,8 +958,12 @@ def list_docs(
 
     # An attribute column that is empty on every row is usually a typo or a
     # case mismatch, not a fleet of documents that all happen to lack it.
+    # A registered key's column can legitimately be empty, so it is exempt.
+    key_names = {k.name for k in registered}
     empty_attr_cols = {
-        name for name in shown if name not in _DOC_COLUMNS and name not in _META_COLUMNS
+        name
+        for name in shown
+        if name not in _DOC_COLUMNS and name not in _META_COLUMNS and name not in key_names
     }
     for doc in docs:
         meta = meta_by_id.get(doc.doc_id)
@@ -2493,7 +2591,11 @@ def _print_cost_table(cost: CostEstimate, heading: str = "Estimated AWS cost") -
 @click.option("--doc-id", default=None, help="Explicit document ID (default: content hash).")
 @click.option("--project-id", default=None, help="Project ID attached to all chunks.")
 @click.option("--group", "group_name", default=None, help="Group name attached to all chunks.")
-@click.option("--mpn", default=None, help="Manufacturer part number, e.g. STM32H743VIT6.")
+@click.option(
+    "--mpn",
+    default=None,
+    help="Manufacturer part number(s), e.g. STM32H743VIT6 or A,B for several.",
+)
 @click.option("--manufacturer", default=None, help="Manufacturer name, e.g. STMicroelectronics.")
 @click.option("--subsystem", default=None, help="e.g. power, rf, mcu.")
 @click.option(
@@ -2517,6 +2619,15 @@ def _print_cost_table(cost: CostEstimate, heading: str = "Estimated AWS cost") -
     help="Arbitrary key=value attribute, repeatable, e.g. --attr "
     "revision=B. Merged over any [attributes] from .rag.toml, key by "
     "key. Change it later via `rag metadata <doc-id> --attr ...`.",
+)
+@click.option(
+    "--key",
+    "key_items",
+    multiple=True,
+    metavar="NAME=VALUE",
+    help="Value of a registered key (see `rag keys list`), repeatable; "
+    "repeat a list key to give several values. Merged over any [keys] "
+    "from .rag.toml, key by key.",
 )
 @click.option(
     "--skip-figures",
@@ -2616,6 +2727,7 @@ def ingest(
     doc_type: str | None,
     tags: tuple[str, ...],
     attrs: tuple[str, ...],
+    key_items: tuple[str, ...],
     skip_figures: bool,
     upload_figures: bool,
     skip_describe: bool,
@@ -2649,11 +2761,16 @@ def ingest(
     common: dict[str, Any] = dict(
         project_id=project_id,
         group_name=group_name,
-        mpn=mpn,
-        manufacturer=manufacturer,
         subsystem=subsystem,
-        doc_type=doc_type,
         tags=tags,
+        keys=_merge_shortcuts(
+            _parse_key_items(key_items),
+            # Empty shortcut values were never a "clear" on ingest (there is
+            # nothing to clear yet), so drop them rather than send "".
+            _shortcut_keys(
+                mpn=mpn or None, manufacturer=manufacturer or None, doc_type=doc_type or None
+            ),
+        ),
         attributes=_parse_attr_items(attrs),
         skip_figures=skip_figures,
         upload_figures=upload_figures,
@@ -2758,11 +2875,9 @@ def _ingest_one(
     doc_id: str | None,
     project_id: str | None,
     group_name: str | None,
-    mpn: str | None,
-    manufacturer: str | None,
     subsystem: str | None,
-    doc_type: str | None,
     tags: tuple[str, ...],
+    keys: dict[str, Any],
     attributes: dict[str, str],
     skip_figures: bool,
     upload_figures: bool,
@@ -2800,12 +2915,10 @@ def _ingest_one(
     if proj_cfg is not None:
         project_id = project_id or proj_cfg.project_id
         group_name = group_name or proj_cfg.group
-        mpn = mpn or proj_cfg.mpn
-        manufacturer = manufacturer or proj_cfg.manufacturer
         subsystem = subsystem or proj_cfg.subsystem
-        doc_type = doc_type or proj_cfg.doc_type
         if not tags and proj_cfg.tags:
             tags = tuple(proj_cfg.tags)
+        keys = {**(proj_cfg.keys or {}), **keys}
         attributes = {**(proj_cfg.attributes or {}), **attributes}
 
     if show_cost:
@@ -2859,11 +2972,9 @@ def _ingest_one(
         from datasheet_rag.backend import MetadataPatch, RagServerError, get_backend
 
         meta_patch = MetadataPatch(
-            mpn=mpn or None,
-            manufacturer=manufacturer or None,
             subsystem=subsystem or None,
-            doc_type=doc_type or None,
             tags=list(tags) if tags else None,
+            keys=keys or None,
             attributes=attributes or None,
         )
         try:
@@ -2985,11 +3096,9 @@ def _ingest_one(
         _warn_missing_figure_crops(missing, len(figures_upload))
 
     meta_patch = MetadataPatch(
-        mpn=mpn or None,
-        manufacturer=manufacturer or None,
         subsystem=subsystem or None,
-        doc_type=doc_type or None,
         tags=list(tags) if tags else None,
+        keys=keys or None,
         attributes=attributes or None,
     )
     title_hints = dict(parsed.title_hints)
@@ -3616,13 +3725,14 @@ def repair_tables_cmd(
 @click.option(
     "--mpn",
     default=None,
-    help="Manufacturer part number, e.g. STM32H743VIT6. Replaces the current value.",
+    help="Manufacturer part number(s), e.g. STM32H743VIT6, or A,B for several. "
+    "Replaces the whole mpn list.",
 )
 @click.option(
     "--mpn-alias",
     "mpn_aliases",
     multiple=True,
-    help="Add an MPN alias without replacing existing ones (repeatable).",
+    help="Append an MPN to the list without replacing existing ones (repeatable).",
 )
 @click.option(
     "--manufacturer",
@@ -3661,6 +3771,22 @@ def repair_tables_cmd(
     metavar="KEY",
     help="Remove a single attribute key (repeatable).",
 )
+@click.option(
+    "--key",
+    "key_items",
+    multiple=True,
+    metavar="NAME=VALUE",
+    help="Set a registered key (see `rag keys list`), repeatable. Each key "
+    "named is replaced; repeat a list key to give several values, e.g. "
+    "--key acme-pn=P1 --key acme-pn=P2. Keys not named are left alone.",
+)
+@click.option(
+    "--unset-key",
+    "unset_keys",
+    multiple=True,
+    metavar="NAME",
+    help="Remove a key's value from the document (repeatable).",
+)
 @_db_option
 @click.option(
     "--apply-to-chunks/--no-apply-to-chunks",
@@ -3681,6 +3807,8 @@ def metadata_cmd(
     clear_tags: bool,
     attrs: tuple[str, ...],
     unset_attrs: tuple[str, ...],
+    key_items: tuple[str, ...],
+    unset_keys: tuple[str, ...],
     db_path: Path | None,
     apply_to_chunks: bool,
 ) -> None:
@@ -3693,13 +3821,14 @@ def metadata_cmd(
         rag metadata <doc_id>                 # show
         rag metadata <doc_id> --mpn INA226    # set
 
-    Multiple MPNs (variants/aliases) can be stored on the same document.
-    Use --mpn to set the primary MPN and --mpn-alias to append extras:
+    A document's mpn is a list (variants/aliases). --mpn replaces the list,
+    --mpn-alias appends to it:
 
         rag metadata <doc_id> --mpn INA226 --mpn-alias INA226A --mpn-alias INA226B
 
     Filtering with --mpn on `rag list` or via the MCP tools matches any
-    token in the comma-separated list.
+    entry in the list. --mpn, --manufacturer and --doc-type are shortcuts
+    for --key on the built-in keys; `rag keys list` shows every key.
     """
     from datasheet_rag.backend import MetadataPatch
     from datasheet_rag.project_config import get_project_config
@@ -3711,7 +3840,7 @@ def metadata_cmd(
     # explicit request to clear the field, not an absent option.
     scalars = (doc_title, project_id, group_name, mpn, manufacturer, subsystem, doc_type)
     is_read = all(v is None for v in scalars) and not any(
-        (mpn_aliases, tags, clear_tags, attrs, unset_attrs)
+        (mpn_aliases, tags, clear_tags, attrs, unset_attrs, key_items, unset_keys)
     )
     if is_read:
         be = _backend_for(db_path)
@@ -3722,18 +3851,28 @@ def metadata_cmd(
         console.print(existing.model_dump_json(indent=2, exclude_none=True))
         return
 
+    keys: dict[str, Any] = _merge_shortcuts(
+        _parse_key_items(key_items),
+        _shortcut_keys(mpn=mpn, manufacturer=manufacturer, doc_type=doc_type),
+    )
+    both = sorted(set(keys) & set(unset_keys))
+    if both:
+        raise click.UsageError(f"{', '.join(both)} given both to set and to --unset-key")
+
     # .rag.toml fills only the fields the user did not pass; an explicit blank
     # beats a config default.
     proj_cfg = get_project_config()
     if proj_cfg is not None:
         project_id = proj_cfg.project_id if project_id is None else project_id
         group_name = proj_cfg.group if group_name is None else group_name
-        mpn = proj_cfg.mpn if mpn is None else mpn
-        manufacturer = proj_cfg.manufacturer if manufacturer is None else manufacturer
         subsystem = proj_cfg.subsystem if subsystem is None else subsystem
-        doc_type = proj_cfg.doc_type if doc_type is None else doc_type
         if not tags and proj_cfg.tags:
             tags = tuple(proj_cfg.tags)
+        for name, value in (proj_cfg.keys or {}).items():
+            if name not in keys and name not in unset_keys:
+                keys[name] = value
+    for name in unset_keys:
+        keys[name] = None
 
     # Config attributes fill the keys the user did not name; --attr and
     # --unset-attr both win for the keys they touch.
@@ -3745,21 +3884,19 @@ def metadata_cmd(
     be = _backend_for(db_path)
     doc_id = _backend_resolve(be, doc_id)
 
-    # Merge --mpn-alias values into the mpn field as a comma-separated list.
+    # --mpn-alias appends to the mpn list: the one --mpn (or .rag.toml) just
+    # gave, else the one already stored.
     if mpn_aliases:
-        if mpn is None:
-            # No --mpn given; read existing to append aliases without clobbering
-            existing_meta = be.get_metadata(doc_id)
-            base = existing_meta.mpn if existing_meta else None
+        if "mpn" in keys and keys["mpn"] is not None:
+            base = keys["mpn"]
         else:
-            base = mpn
-        all_mpns: list[str] = []
-        if base:
-            all_mpns = [t.strip() for t in base.split(",") if t.strip()]
+            existing_meta = be.get_metadata(doc_id)
+            base = existing_meta.keys.get("mpn") if existing_meta else None
+        all_mpns: list[str] = [base] if isinstance(base, str) else list(base or [])
         for alias in mpn_aliases:
             if alias not in all_mpns:
                 all_mpns.append(alias)
-        mpn = ",".join(all_mpns)
+        keys["mpn"] = all_mpns
 
     if doc_title is not None:
         updated = be.set_doc_title(doc_id, doc_title)
@@ -3772,25 +3909,121 @@ def metadata_cmd(
     else:
         new_tags = None
 
-    meta = be.set_metadata(
-        doc_id,
-        MetadataPatch(
-            project_id=project_id,
-            group_name=group_name,
-            mpn=mpn,
-            manufacturer=manufacturer,
-            subsystem=subsystem,
-            doc_type=doc_type,
-            tags=new_tags,
-            attributes=attributes or None,
-        ),
-    )
+    try:
+        meta = be.set_metadata(
+            doc_id,
+            MetadataPatch(
+                project_id=project_id,
+                group_name=group_name,
+                subsystem=subsystem,
+                tags=new_tags,
+                keys=keys or None,
+                attributes=attributes or None,
+            ),
+        )
+    except ValueError as e:
+        raise click.ClickException(str(e)) from e
     console.print(f"[green]Saved metadata for[/] {doc_id}")
     console.print(meta.model_dump_json(indent=2, exclude_none=True))
 
     if apply_to_chunks:
         updated = be.apply_metadata_to_chunks(doc_id)
         console.print(f"  Propagated to {updated} chunk rows.")
+
+
+# ---------------------------------------------------------------------------
+# keys (registered metadata keys — GH #120)
+# ---------------------------------------------------------------------------
+
+
+@cli.group("keys", short_help="Register the metadata keys documents can carry.")
+def keys_group() -> None:
+    """Register, list and remove metadata keys.
+
+    A key is a named, typed, filterable piece of document metadata — e.g. an
+    internal document number, a vendor's document number, an internal part
+    number. Once registered, set it with `rag metadata <doc> --key NAME=VALUE`
+    or a `[keys]` table in .rag.toml, filter with `rag list --key`, and
+    agents can filter `search` on it. mpn, manufacturer and doc_type are
+    built in.
+    """
+
+
+@keys_group.command("list", short_help="Show every registered key.")
+@_db_option
+def keys_list_cmd(db_path: Path | None) -> None:
+    """Show every registered key: name, shape, roles, description."""
+    table = Table(title="Metadata keys")
+    for col in ("name", "shape", "roles", "built in", "description"):
+        table.add_column(col, style="cyan" if col == "name" else None)
+    for k in _backend_for(db_path).list_keys():
+        table.add_row(
+            k.name, k.shape, ", ".join(k.roles) or "—", "yes" if k.builtin else "", k.description
+        )
+    console.print(table)
+
+
+@keys_group.command("add", short_help="Register a new key.")
+@click.argument("name")
+@click.option(
+    "--shape",
+    type=click.Choice(["single", "list"]),
+    default="single",
+    help="single: one value per document. list: several, in order.",
+)
+@click.option("--description", default="", help="Shown to agents and in `rag keys list`.")
+@click.option(
+    "--role",
+    "roles",
+    multiple=True,
+    type=click.Choice(["part"]),
+    help="part: the values are part numbers (used to match a BOM).",
+)
+@_db_option
+def keys_add_cmd(
+    name: str, shape: str, description: str, roles: tuple[str, ...], db_path: Path | None
+) -> None:
+    """Register key NAME (lower case, digits, '-' and '_').
+
+    Documents that already carry NAME as a free-form attribute have that
+    value moved into the key.
+
+    \b
+        rag keys add acme-id --description "ACME document number"
+        rag keys add acme-pn --shape list --role part
+    """
+    try:
+        spec, promoted = _backend_for(db_path).register_key(
+            name,
+            shape=shape,  # type: ignore[arg-type]  # click.Choice guarantees the literal
+            description=description,
+            roles=roles,
+        )
+    except ValueError as e:
+        raise click.ClickException(str(e)) from e
+    console.print(f"[green]Registered[/] {spec.name} ({spec.shape})")
+    if promoted:
+        console.print(f"  Moved attribute {spec.name!r} into the key on {promoted} document(s).")
+
+
+@keys_group.command("remove", short_help="Unregister a key.")
+@click.argument("name")
+@click.option(
+    "--demote",
+    is_flag=True,
+    help="Move the key's values back into each document's attributes "
+    "instead of refusing while any document has one.",
+)
+@_db_option
+def keys_remove_cmd(name: str, demote: bool, db_path: Path | None) -> None:
+    """Unregister key NAME. Built-in keys cannot be removed."""
+    try:
+        held = _backend_for(db_path).remove_key(name, demote=demote)
+    except ValueError as e:
+        raise click.ClickException(str(e)) from e
+    console.print(f"[green]Removed[/] {name}")
+    if held:
+        console.print(f"  Moved its values into attributes on {held} document(s).")
 
 
 # ---------------------------------------------------------------------------
@@ -4688,13 +4921,15 @@ def _run_answer_eval(
             f"the needs' documents should sit in one project, found {projects or 'none'}"
         )
     project = projects[0]
+    from datasheet_rag.store.keys import display_value
+
     listing = LocalBackend(conn=conn).list_documents(project_id=project).documents
     docs = [
         {
             "doc_id": d.doc_id,
             "title": d.doc_title,
-            "mpn": d.mpn,
-            "manufacturer": d.manufacturer,
+            "mpn": display_value(d.keys.get("mpn")),
+            "manufacturer": display_value(d.keys.get("manufacturer")),
             "pages": d.page_count,
         }
         for d in listing
@@ -4981,8 +5216,13 @@ def eval_claude_code(
                 f"the needs' documents should sit in one project, found {projects or 'none'}"
             )
         project = str(projects.pop())
+        from datasheet_rag.store.keys import display_value
+
         listing = backend.list_documents(project_id=project).documents
-        docs = [{"doc_id": d.doc_id, "title": d.doc_title, "mpn": d.mpn} for d in listing]
+        docs = [
+            {"doc_id": d.doc_id, "title": d.doc_title, "mpn": display_value(d.keys.get("mpn"))}
+            for d in listing
+        ]
         copied = ws.prepare(docs, backend.get_pdf_bytes, project)
         console.print(
             f"[cyan]Workspace[/] {ws.root}: {len(docs)} PDFs of project {project}"

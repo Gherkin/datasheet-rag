@@ -54,6 +54,7 @@ from datasheet_rag.store import (
     revoke_api_key,
     stored_embedding_dim,
 )
+from datasheet_rag.store.keys import KeyShape
 
 if TYPE_CHECKING:
     # Runtime import stays inside the ingest endpoint: pulling the pipeline in
@@ -106,6 +107,26 @@ class TitleBody(BaseModel):
     title: str
     source: TitleSource = "manual"
     force: bool = False
+
+
+class RegisterKeyBody(BaseModel):
+    name: str
+    shape: KeyShape = "single"
+    description: str = ""
+    roles: list[str] = Field(default_factory=list)
+
+
+def _parse_key_params(raw: list[str] | None) -> dict[str, str] | None:
+    """Decode repeated ``key=name:value`` query params into a filter dict."""
+    if not raw:
+        return None
+    out: dict[str, str] = {}
+    for item in raw:
+        name, sep, value = item.partition(":")
+        if not sep or not name:
+            raise ValueError(f"key filter {item!r} must be name:value")
+        out[name] = value
+    return out
 
 
 class FigureDescriptionBody(BaseModel):
@@ -413,8 +434,7 @@ def build_app() -> FastAPI:
     def documents(
         project_id: str | None = None,
         group_name: str | None = None,
-        mpn: str | None = None,
-        manufacturer: str | None = None,
+        key: list[str] | None = Query(None),
         limit: int | None = Query(None, ge=1),
         offset: int = Query(0, ge=0),
         be: LocalBackend = Depends(get_backend),
@@ -422,8 +442,7 @@ def build_app() -> FastAPI:
         page = be.list_documents(
             project_id=project_id,
             group_name=group_name,
-            mpn=mpn,
-            manufacturer=manufacturer,
+            keys=_parse_key_params(key),
             limit=limit,
             offset=offset,
         )
@@ -437,11 +456,33 @@ def build_app() -> FastAPI:
     def metadata(
         project_id: str | None = None,
         group_name: str | None = None,
-        mpn: str | None = None,
+        key: list[str] | None = Query(None),
         be: LocalBackend = Depends(get_backend),
     ) -> dict[str, Any]:
-        docs = be.list_docs(project_id=project_id, group_name=group_name, mpn=mpn)
+        docs = be.list_docs(
+            project_id=project_id, group_name=group_name, keys=_parse_key_params(key)
+        )
         return {"documents": [d.model_dump(mode="json") for d in docs]}
+
+    # -- metadata keys (GH #120) ------------------------------------------
+    @app.get("/metadata/keys", dependencies=dep)
+    def metadata_keys(be: LocalBackend = Depends(get_backend)) -> dict[str, Any]:
+        return {"keys": [k.model_dump(mode="json") for k in be.list_keys()]}
+
+    @app.post("/metadata/keys", dependencies=ingest_dep)
+    def metadata_register_key(
+        body: RegisterKeyBody, be: LocalBackend = Depends(get_backend)
+    ) -> dict[str, Any]:
+        spec, promoted = be.register_key(
+            body.name, shape=body.shape, description=body.description, roles=body.roles
+        )
+        return {"key": spec.model_dump(mode="json"), "promoted": promoted}
+
+    @app.delete("/metadata/keys/{name}", dependencies=ingest_dep)
+    def metadata_remove_key(
+        name: str, demote: bool = False, be: LocalBackend = Depends(get_backend)
+    ) -> dict[str, Any]:
+        return {"held": be.remove_key(name, demote=demote)}
 
     # -- stats -----------------------------------------------------------
     @app.get("/stats", dependencies=dep)

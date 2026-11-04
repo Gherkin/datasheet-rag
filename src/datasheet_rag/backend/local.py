@@ -40,6 +40,7 @@ from datasheet_rag.config import get_settings
 from datasheet_rag.models.chunk import IMAGE_LAYOUT_TYPES, Chunk, ChunkGraph, ChunkLevel
 from datasheet_rag.store import (
     DocMetadata,
+    KeySpec,
     SearchFilters,
     SearchResult,
     TitleSource,
@@ -59,6 +60,9 @@ from datasheet_rag.store import (
     keyword_search,
     list_docs,
     list_figure_chunks,
+    list_keys,
+    register_key,
+    remove_key,
     resolve_doc_id,
     resolve_figure_path,
     set_doc_title,
@@ -68,6 +72,8 @@ from datasheet_rag.store import (
     update_figure_description,
     vector_search,
 )
+from datasheet_rag.store.keys import KeyShape
+from datasheet_rag.store.metadata import check_patch
 
 if TYPE_CHECKING:
     from datasheet_rag.ingest_pipeline import ProgressCallback
@@ -237,8 +243,7 @@ class LocalBackend(RagBackend):
         *,
         project_id: str | None = None,
         group_name: str | None = None,
-        mpn: str | None = None,
-        manufacturer: str | None = None,
+        keys: dict[str, str] | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> DocPage:
@@ -246,10 +251,8 @@ class LocalBackend(RagBackend):
             self._get_conn(),
             project_id=project_id,
             group_name=group_name,
-            mpn=mpn,
+            keys=keys,
         )
-        if manufacturer is not None:
-            docs = [d for d in docs if d.manufacturer == manufacturer]
         matched: dict[str, DocMetadata | None] = {d.doc_id: d for d in docs}
 
         # The sidecar row is optional: it is written by the metadata-tagging
@@ -257,10 +260,10 @@ class LocalBackend(RagBackend):
         # is still chunked, searchable and reachable by every other read path,
         # so list it too — with the sidecar fields left null — rather than
         # reporting an empty catalogue for a store that plainly has documents
-        # in it. Filters on group, mpn or manufacturer suppress the fallback:
-        # those fields live nowhere but the sidecar, so a document without one
-        # cannot match them.
-        if group_name is None and mpn is None and manufacturer is None:
+        # in it. Filters on group or a key suppress the fallback: those fields
+        # live nowhere but the sidecar, so a document without one cannot
+        # match them.
+        if group_name is None and not keys:
             for row in get_ingested_docs(self._get_conn(), project_id=project_id):
                 matched.setdefault(row["doc_id"], None)
 
@@ -291,11 +294,9 @@ class LocalBackend(RagBackend):
             doc_id=d.doc_id,
             project_id=d.project_id,
             group_name=d.group_name,
-            mpn=d.mpn,
-            manufacturer=d.manufacturer,
             subsystem=d.subsystem,
-            doc_type=d.doc_type,
             tags=d.tags,
+            keys=d.keys,
             doc_title=title,
             page_count=page_count,
         )
@@ -332,13 +333,34 @@ class LocalBackend(RagBackend):
         *,
         project_id: str | None = None,
         group_name: str | None = None,
-        mpn: str | None = None,
+        keys: dict[str, str] | None = None,
     ) -> list[DocMetadata]:
-        return list_docs(self._get_conn(), project_id=project_id, group_name=group_name, mpn=mpn)
+        return list_docs(self._get_conn(), project_id=project_id, group_name=group_name, keys=keys)
 
     def apply_metadata_to_chunks(self, doc_id: str) -> int:
         with self._write_lock:
             return apply_metadata_to_chunks(self._get_conn(), doc_id)
+
+    # -- metadata keys -------------------------------------------------
+    def list_keys(self) -> list[KeySpec]:
+        return list_keys(self._get_conn())
+
+    def register_key(
+        self,
+        name: str,
+        *,
+        shape: KeyShape = "single",
+        description: str = "",
+        roles: Sequence[str] = (),
+    ) -> tuple[KeySpec, int]:
+        with self._write_lock:
+            return register_key(
+                self._get_conn(), name, shape=shape, description=description, roles=roles
+            )
+
+    def remove_key(self, name: str, *, demote: bool = False) -> int:
+        with self._write_lock:
+            return remove_key(self._get_conn(), name, demote=demote)
 
     # -- stats ---------------------------------------------------------
     def stats(self, *, project_id: str | None = None, doc_id: str | None = None) -> StatsResult:
@@ -622,6 +644,10 @@ class LocalBackend(RagBackend):
 
         with self._write_lock:
             conn = self._get_conn()
+            # Reject an unregistered or mis-shaped key before any chunk is
+            # written, not after the whole ingest has run (GH #120).
+            if metadata is not None:
+                check_patch(conn, keys=metadata.keys, attributes=metadata.attributes)
             described = 0
             # The provisional insert below prunes too, so the final insert
             # finds nothing left to drop — count both or the describe path

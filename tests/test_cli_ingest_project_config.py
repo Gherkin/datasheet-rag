@@ -60,7 +60,7 @@ def test_ingest_applies_doc_type_and_attributes_from_config(
 
     assert result.exit_code == 0, result.output
     patch = fake_backend.calls[0]["metadata"]
-    assert patch.doc_type == "technical-manual"
+    assert patch.keys == {"doc_type": "technical-manual"}
     # Nearest file wins for revision; the CLI flag wins for owner.
     assert patch.attributes == {"revision": "B", "owner": "fw"}
 
