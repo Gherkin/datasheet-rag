@@ -90,11 +90,11 @@ def test_local_ingest_no_figures_trusts_existing_paths(backend: LocalBackend) ->
         )
     )
     res = backend.ingest_chunk_graph(
-        g, project_id="p1", metadata=MetadataPatch(keys={"mpn": "X1"}), embed=False
+        g, project_id="p1", metadata=MetadataPatch(fields={"mpn": "X1"}), embed=False
     )
     assert res.inserted == 1
     assert backend.stats(project_id="p1").total_chunks == 1
-    assert backend.get_metadata(did).keys["mpn"] == ["X1"]
+    assert backend.get_metadata(did).fields["mpn"] == ["X1"]
     hits = backend.search("clock stretching", mode="keyword", k=5)
     assert hits and hits[0].chunk_id == f"{did}:L2:0"
 
@@ -174,7 +174,7 @@ def test_local_delete_doc_purges_local_files(backend: LocalBackend, tmp_path, mo
     backend.ingest_chunk_graph(
         g,
         figures={f"{did}:L2:0": (png, "png")},
-        metadata=MetadataPatch(keys={"mpn": "M1"}),
+        metadata=MetadataPatch(fields={"mpn": "M1"}),
         embed=False,
     )
 
@@ -231,7 +231,7 @@ def test_server_ingest_and_query_roundtrip(client) -> None:
     payload = {
         "graph": g.model_dump(mode="json"),
         "project_id": "proj",
-        "metadata": MetadataPatch(keys={"mpn": "M1"}, tags=["t"]).model_dump(mode="json"),
+        "metadata": MetadataPatch(fields={"mpn": "M1"}, tags=["t"]).model_dump(mode="json"),
         "embed": False,
         "describe_figures": False,
     }
@@ -258,14 +258,14 @@ def test_server_ingest_and_query_roundtrip(client) -> None:
 
     # metadata write visible
     md = client.get(f"/documents/{did}/metadata").json()
-    assert md["keys"]["mpn"] == ["M1"] and md["tags"] == ["t"]
+    assert md["fields"]["mpn"] == ["M1"] and md["tags"] == ["t"]
 
     # delete
     assert client.delete(f"/documents/{did}").json()["deleted"] == 2
 
 
-def test_server_metadata_keys_routes_and_key_filters(client) -> None:
-    from datasheet_rag.backend.remote import _key_params
+def test_server_metadata_fields_routes_and_field_filters(client) -> None:
+    from datasheet_rag.backend.remote import _field_params
 
     did = "d" * 64
     g = _graph_with_figure(did)
@@ -273,52 +273,70 @@ def test_server_metadata_keys_routes_and_key_filters(client) -> None:
     files = [("payload", ("payload.json", json.dumps(payload).encode(), "application/json"))]
     assert client.post("/ingest", files=files).status_code == 200
 
-    # Register a key over HTTP; an unknown one is a 400, not a 500.
-    r = client.post("/metadata/keys", json={"name": "acme-id", "description": "ACME doc no."})
+    # Register a field over HTTP; an unknown one is a 400, not a 500.
+    r = client.post("/metadata/fields", json={"name": "acme-id", "description": "ACME doc no."})
     assert r.status_code == 200, r.text
     assert r.json() == {
-        "key": {
+        "field": {
             "name": "acme-id",
             "description": "ACME doc no.",
             "shape": "single",
             "roles": [],
             "builtin": False,
         },
-        "promoted": 0,
     }
-    names = [k["name"] for k in client.get("/metadata/keys").json()["keys"]]
+    names = [f["name"] for f in client.get("/metadata/fields").json()["fields"]]
     assert names[:3] == ["doc_type", "manufacturer", "mpn"] and "acme-id" in names
-    bad = client.patch(f"/documents/{did}/metadata", json={"keys": {"nope": "x"}})
-    assert bad.status_code == 400 and "unregistered key" in bad.text
+    bad = client.patch(f"/documents/{did}/metadata", json={"fields": {"nope": "x"}})
+    assert bad.status_code == 400 and "unregistered field" in bad.text
+    # A name the patch does not have is rejected, not silently dropped.
+    old = client.patch(f"/documents/{did}/metadata", json={"attributes": {"rev": "B"}})
+    assert old.status_code == 422
 
-    r = client.patch(f"/documents/{did}/metadata", json={"keys": {"acme-id": "D:7"}})
+    r = client.patch(f"/documents/{did}/metadata", json={"fields": {"acme-id": "D:7"}})
     assert r.status_code == 200, r.text
 
     # The query-string encoding the remote backend sends — a ':' in the value
     # survives, since names cannot hold one.
-    params = {"key": _key_params({"acme-id": "D:7"})}
+    params = {"field": _field_params({"acme-id": "D:7"})}
     docs = client.get("/documents", params=params).json()["documents"]
     assert [d["doc_id"] for d in docs] == [did]
-    assert client.get("/documents", params={"key": "acme-id:other"}).json()["documents"] == []
-    assert client.get("/documents", params={"key": "no-colon"}).status_code == 400
+    assert client.get("/documents", params={"field": "acme-id:other"}).json()["documents"] == []
+    assert client.get("/documents", params={"field": "no-colon"}).status_code == 400
 
-    # Search filters on keys (SearchFilters is serialised whole).
+    # Search filters on fields (SearchFilters is serialised whole).
     hit = client.post(
         "/search",
-        json={"query": "block diagram", "mode": "keyword", "filters": {"keys": {"acme-id": "d:7"}}},
+        json={
+            "query": "block diagram",
+            "mode": "keyword",
+            "filters": {"fields": {"acme-id": "d:7"}},
+        },
     ).json()["results"]
     assert hit and all(h["chunk"]["doc_id"] == did for h in hit)
     miss = client.post(
         "/search",
-        json={"query": "block diagram", "mode": "keyword", "filters": {"keys": {"acme-id": "x"}}},
+        json={"query": "block diagram", "mode": "keyword", "filters": {"fields": {"acme-id": "x"}}},
     ).json()["results"]
     assert miss == []
 
-    # Remove: refused while held, then demoted into attributes.
-    assert client.delete("/metadata/keys/acme-id").status_code == 400
-    assert client.delete("/metadata/keys/acme-id", params={"demote": "true"}).json() == {"held": 1}
+    # Remove: refused while held, then cleared with the field.
+    assert client.delete("/metadata/fields/acme-id").status_code == 400
+    assert client.delete("/metadata/fields/acme-id", params={"clear": "true"}).json() == {"held": 1}
     md = client.get(f"/documents/{did}/metadata").json()
-    assert md["attributes"]["acme-id"] == "D:7" and "acme-id" not in md["keys"]
+    assert "acme-id" not in md["fields"]
+
+
+def test_server_needs_reembed_route(client) -> None:
+    did = "e" * 64
+    r = client.put(f"/documents/{did}/needs-reembed", json={"value": True})
+    assert r.status_code == 200, r.text
+    assert client.get(f"/documents/{did}/metadata").json()["needs_reembed"] is True
+    client.put(f"/documents/{did}/needs-reembed", json={"value": False})
+    assert client.get(f"/documents/{did}/metadata").json()["needs_reembed"] is False
+    # Not settable through a metadata patch.
+    r = client.patch(f"/documents/{did}/metadata", json={"needs_reembed": True})
+    assert r.status_code == 422
 
 
 def test_server_ingest_pdf_streams_sse(client, monkeypatch) -> None:
@@ -422,7 +440,7 @@ def test_server_ingest_pdf_rejects_textract_without_bucket(client, monkeypatch, 
     assert "RAG_S3_BUCKET" in r.json()["detail"]
 
 
-def test_server_ingest_pdf_rejects_unregistered_key_before_parsing(client, monkeypatch) -> None:
+def test_server_ingest_pdf_rejects_unregistered_field_before_parsing(client, monkeypatch) -> None:
     import datasheet_rag.ingest_pipeline as ip
 
     monkeypatch.setattr(
@@ -432,10 +450,10 @@ def test_server_ingest_pdf_rejects_unregistered_key_before_parsing(client, monke
     r = client.post(
         "/ingest-pdf",
         files={"payload": ("x.pdf", b"%PDF-1.4 fake", "application/pdf")},
-        data={"options": json.dumps({"metadata": {"keys": {"acme-idd": "D-1"}}})},
+        data={"options": json.dumps({"metadata": {"fields": {"acme-idd": "D-1"}}})},
     )
     assert r.status_code == 400
-    assert "unregistered key(s) acme-idd" in r.json()["detail"]
+    assert "unregistered field(s) acme-idd" in r.json()["detail"]
 
 
 def test_check_backend_prerequisites_allows_cached_textract_blocks(monkeypatch, tmp_path) -> None:

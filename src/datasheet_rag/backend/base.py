@@ -33,8 +33,8 @@ from datasheet_rag.backend.models import (
 )
 from datasheet_rag.ingest_pipeline import ProgressCallback
 from datasheet_rag.models.chunk import Chunk, ChunkGraph
-from datasheet_rag.store import DocMetadata, KeySpec, SearchFilters, SearchResult, TitleSource
-from datasheet_rag.store.keys import KeyShape
+from datasheet_rag.store import DocMetadata, FieldSpec, SearchFilters, SearchResult, TitleSource
+from datasheet_rag.store.fields import FieldShape
 
 SearchMode = Literal["hybrid", "vector", "keyword"]
 
@@ -100,13 +100,13 @@ class RagBackend(ABC):
         *,
         project_id: str | None = None,
         group_name: str | None = None,
-        keys: dict[str, str] | None = None,
+        fields: dict[str, str] | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> DocPage:
         """One page of the matching documents, in ``doc_id`` order.
 
-        ``keys`` filters on registered keys (AND-ed; a list key matches if any
+        ``fields`` filters on registered fields (AND-ed; a list field matches if any
         value is equal, case-insensitive). ``limit=None`` returns every match
         from ``offset`` on.
         """
@@ -153,31 +153,42 @@ class RagBackend(ABC):
         *,
         project_id: str | None = None,
         group_name: str | None = None,
-        keys: dict[str, str] | None = None,
+        fields: dict[str, str] | None = None,
     ) -> list[DocMetadata]: ...
+
+    @abstractmethod
+    def set_needs_reembed(self, doc_id: str, value: bool) -> None:
+        """Mark (or unmark) a document as needing its chunks re-embedded.
+
+        Pipeline bookkeeping, kept apart from :meth:`set_metadata`: a
+        metadata patch cannot set it.
+        """
 
     @abstractmethod
     def apply_metadata_to_chunks(self, doc_id: str) -> int: ...
 
-    # ---- metadata keys (GH #120) ----
+    # ---- metadata fields (GH #120) ----
     @abstractmethod
-    def list_keys(self) -> list[KeySpec]:
-        """Every registered metadata key, built-ins first."""
+    def list_fields(self) -> list[FieldSpec]:
+        """Every registered metadata field, built-ins first."""
 
     @abstractmethod
-    def register_key(
+    def register_field(
         self,
         name: str,
         *,
-        shape: KeyShape = "single",
+        shape: FieldShape = "single",
         description: str = "",
         roles: Sequence[str] = (),
-    ) -> tuple[KeySpec, int]:
-        """Register a key; returns it and how many documents' attributes it promoted."""
+    ) -> FieldSpec:
+        """Register a field and return it."""
 
     @abstractmethod
-    def remove_key(self, name: str, *, demote: bool = False) -> int:
-        """Unregister a key; returns how many documents held a value."""
+    def remove_field(self, name: str, *, clear: bool = False) -> int:
+        """Unregister a field; returns how many documents held a value.
+
+        Refuses while documents hold values, unless ``clear`` deletes them.
+        """
 
     # ---- stats ----
     @abstractmethod

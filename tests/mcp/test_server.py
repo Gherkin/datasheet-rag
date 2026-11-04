@@ -21,7 +21,7 @@ from datasheet_rag.mcp.server import (
     _get_chunk_impl,
     _get_document_metadata_impl,
     _list_documents_impl,
-    _list_metadata_keys_impl,
+    _list_metadata_fields_impl,
     _navigate_impl,
     _search_impl,
     _stats_impl,
@@ -30,7 +30,7 @@ from datasheet_rag.models.chunk import Chunk, ChunkLevel, ChunkMetadata, LayoutT
 from datasheet_rag.store import (
     connect,
     insert_chunks,
-    register_key,
+    register_field,
     set_metadata,
 )
 
@@ -423,44 +423,44 @@ def test_list_documents_filters_by_project(conn: Any) -> None:
         "docA",
         project_id="p1",
         subsystem="mcu",
-        keys={"mpn": "STM32H743", "manufacturer": "ST"},
+        fields={"mpn": "STM32H743", "manufacturer": "ST"},
     )
     set_metadata(
         conn,
         "docB",
         project_id="p2",
         subsystem="power",
-        keys={"mpn": "LM317", "manufacturer": "TI"},
+        fields={"mpn": "LM317", "manufacturer": "TI"},
     )
 
     out = _list_documents_impl(project_id="p1", conn=conn)["items"]
     assert [d["doc_id"] for d in out] == ["docA"]
-    assert out[0]["keys"]["mpn"] == ["STM32H743"]
+    assert out[0]["fields"]["mpn"] == ["STM32H743"]
 
 
 def test_list_documents_manufacturer_filter(conn: Any) -> None:
-    set_metadata(conn, "docA", project_id="p1", keys={"manufacturer": "ST"})
-    set_metadata(conn, "docB", project_id="p2", keys={"manufacturer": "TI"})
+    set_metadata(conn, "docA", project_id="p1", fields={"manufacturer": "ST"})
+    set_metadata(conn, "docB", project_id="p2", fields={"manufacturer": "TI"})
     out = _list_documents_impl(manufacturer="TI", conn=conn)["items"]
     assert [d["doc_id"] for d in out] == ["docB"]
 
 
 def test_list_documents_generic_key_filter(conn: Any) -> None:
-    register_key(conn, "acme-id")
-    set_metadata(conn, "docA", keys={"acme-id": "D-1"})
-    set_metadata(conn, "docB", keys={"acme-id": "D-2"})
-    out = _list_documents_impl(keys={"acme-id": "d-2"}, conn=conn)["items"]
+    register_field(conn, "acme-id")
+    set_metadata(conn, "docA", fields={"acme-id": "D-1"})
+    set_metadata(conn, "docB", fields={"acme-id": "D-2"})
+    out = _list_documents_impl(fields={"acme-id": "d-2"}, conn=conn)["items"]
     assert [d["doc_id"] for d in out] == ["docB"]
 
 
 def test_list_documents_rejects_shortcut_that_conflicts_with_keys(conn: Any) -> None:
     with pytest.raises(ValueError, match="mpn given both"):
-        _list_documents_impl(mpn="INA226", keys={"mpn": "INA219"}, conn=conn)
+        _list_documents_impl(mpn="INA226", fields={"mpn": "INA219"}, conn=conn)
 
 
-def test_list_metadata_keys_lists_builtins_and_user_keys(conn: Any) -> None:
-    register_key(conn, "acme-pn", shape="list", roles=["part"], description="ACME part no.")
-    keys = {k["name"]: k for k in _list_metadata_keys_impl(conn=conn)["keys"]}
+def test_list_metadata_fields_lists_builtins_and_user_keys(conn: Any) -> None:
+    register_field(conn, "acme-pn", shape="list", roles=["part"], description="ACME part no.")
+    keys = {k["name"]: k for k in _list_metadata_fields_impl(conn=conn)["fields"]}
     assert {"mpn", "manufacturer", "doc_type", "acme-pn"} <= set(keys)
     assert keys["mpn"]["builtin"] is True and keys["mpn"]["shape"] == "list"
     assert keys["acme-pn"] == {
@@ -473,15 +473,15 @@ def test_list_metadata_keys_lists_builtins_and_user_keys(conn: Any) -> None:
 
 
 def test_search_rejects_unregistered_key_filter(conn: Any) -> None:
-    with pytest.raises(ValueError, match="list_metadata_keys"):
-        _search_impl("clock", mode="keyword", keys={"nope": "x"}, conn=conn)
+    with pytest.raises(ValueError, match="list_metadata_fields"):
+        _search_impl("clock", mode="keyword", fields={"nope": "x"}, conn=conn)
 
 
 def test_get_document_metadata_returns_sidecar_row(conn: Any) -> None:
-    set_metadata(conn, "docA", keys={"mpn": "STM32H743"}, tags=["mcu", "arm"])
+    set_metadata(conn, "docA", fields={"mpn": "STM32H743"}, tags=["mcu", "arm"])
     out = _get_document_metadata_impl("docA", conn=conn)
     assert out is not None
-    assert out["keys"]["mpn"] == ["STM32H743"]
+    assert out["fields"]["mpn"] == ["STM32H743"]
     assert "mcu" in out["tags"]
 
 
@@ -491,19 +491,19 @@ def test_get_document_metadata_missing_returns_none(conn: Any) -> None:
 
 def test_list_documents_includes_docs_without_a_sidecar_row(conn: Any) -> None:
     # docB is ingested but never tagged; docA is tagged. Both are documents.
-    set_metadata(conn, "docA", keys={"mpn": "STM32H743"})
+    set_metadata(conn, "docA", fields={"mpn": "STM32H743"})
 
     out = _list_documents_impl(conn=conn)["items"]
 
     assert [d["doc_id"] for d in out] == ["docA", "docB"]
     untagged = out[1]
-    assert untagged["keys"] == {}
+    assert untagged["fields"] == {}
     assert untagged["project_id"] is None
     assert untagged["tags"] == []
 
 
 def test_list_documents_sidecar_filter_excludes_untagged_docs(conn: Any) -> None:
-    set_metadata(conn, "docA", keys={"manufacturer": "ST"})
+    set_metadata(conn, "docA", fields={"manufacturer": "ST"})
     # docB has no sidecar row, so it cannot match a manufacturer filter.
     out = _list_documents_impl(manufacturer="ST", conn=conn)["items"]
     assert [d["doc_id"] for d in out] == ["docA"]
@@ -513,7 +513,7 @@ def test_get_document_metadata_returns_empty_row_for_untagged_doc(conn: Any) -> 
     out = _get_document_metadata_impl("docB", conn=conn)
     assert out is not None
     assert out["doc_id"] == "docB"
-    assert out["keys"] == {}
+    assert out["fields"] == {}
     assert out["tags"] == []
 
 
@@ -527,9 +527,9 @@ def test_get_document_metadata_does_not_list_the_store(
         raise AssertionError("get_document_metadata listed the whole store")
 
     monkeypatch.setattr(LocalBackend, "list_documents", _no_listing)
-    set_metadata(conn, "docA", keys={"mpn": "STM32H743"})
+    set_metadata(conn, "docA", fields={"mpn": "STM32H743"})
 
-    assert _get_document_metadata_impl("docA", conn=conn)["keys"]["mpn"] == ["STM32H743"]
+    assert _get_document_metadata_impl("docA", conn=conn)["fields"]["mpn"] == ["STM32H743"]
     assert _get_document_metadata_impl("docB", conn=conn)["doc_id"] == "docB"
     assert _get_document_metadata_impl("nope", conn=conn) is None
 

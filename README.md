@@ -348,50 +348,42 @@ This way you dont have to specify all metadata at runtime, and it is transferrab
 The format for `rag.toml` is as follows:
 ```
 project_id   = "stm32-h7-devboard"
-manufacturer = "STMicroelectronics"
 group        = "psu"
 subsystem    = "power"
-mpn          = ["STM32H743VIT6", "STM32H743ZIT6"]   # or a single string
-doc_type     = "reference-manual"
 tags         = ["pinout", "power-tree", "reference-manual"]
 
-[keys]
-acme-id      = "D-0172"          # a key registered with `rag keys add`
-
-[attributes]
-revision     = "B"
-reviewed_by  = "hector"
+[fields]
+mpn          = ["STM32H743VIT6", "STM32H743ZIT6"]   # or a single string
+manufacturer = "STMicroelectronics"
+doc_type     = "reference-manual"
+acme-id      = "D-0172"          # a field registered with `rag fields add`
 ```
 
-`tags` are combined across every `.rag.toml` on the path. `[keys]` and `[attributes]` are merged key by key, and the file closest to the pdf wins for a given key. `--key name=value` and `--attr key=value` on the command line win over both.
+`tags` are combined across every `.rag.toml` on the path. `[fields]` are merged name by name, and the file closest to the pdf wins for a given name. `--field name=value` (and the `--mpn`, `--manufacturer` and `--doc-type` shortcuts) on the command line win over both.
 
 The schema is closed. Any of the following makes the command fail with an error that names the file:
-- a key that is not listed above (registered keys go under `[keys]`, anything else under `[attributes]`)
-- a value of the wrong type — every value is a string, `tags` is a list of strings, `mpn` and list-valued keys may be a list of strings, and attribute values must be quoted strings
-- the same name under both `[keys]` and `[attributes]`, or `mpn`/`manufacturer`/`doc_type` both at the top level and under `[keys]`
-- an attribute the pipeline sets itself: `title_source`, `title_inferred`, `running_header`, `pdf_meta_title`, `needs_reembed`
+- a key that is not listed above (any other value goes under `[fields]`)
+- a value of the wrong type: `project_id`, `group` and `subsystem` are strings, `tags` is a list of strings, and a `[fields]` value is a string or, for a list field such as `mpn`, a list of strings
 - a file that is not valid TOML
 
 A bad file inside a directory given to `rag ingest ./datasheets` fails only the pdfs below it; the rest are still ingested.
 
-Whether a `[keys]` name is registered is checked when the values are written, not when the file is read.
+Whether a `[fields]` name is registered is checked when the values are written, not when the file is read. An unregistered name fails the write.
 
-### Metadata keys
+### Metadata fields
 
-A key is a named, typed piece of document metadata. You can filter on it in `rag list --key`, and agents can filter on it in the MCP `search` and `list_documents` tools. Three keys are built in: `mpn` (a list), `manufacturer` and `doc_type`. Register your own for things the built-ins don't cover, such as an internal document number, a vendor's document number or an internal part number:
+A field is a named, typed piece of document metadata. A field must be registered before any document can hold a value for it. You can filter on it with `rag list --field`, and agents can filter on it in the MCP `search` and `list_documents` tools. Three fields are built in: `mpn` (a list), `manufacturer` and `doc_type`. Register your own for things the built-ins don't cover, such as an internal document number, a vendor's document number or an internal part number:
 
 ```
-rag keys add acme-id --description "ACME document number"
-rag keys add intel-id --description "Intel document number"
-rag keys add acme-pn --shape list --role part
-rag keys list
+rag fields add acme-id --description "ACME document number"
+rag fields add intel-id --description "Intel document number"
+rag fields add acme-pn --shape list --role part
+rag fields list
 ```
 
-Set the values with `rag metadata <doc> --key acme-id=D-0172`. Repeat `--key` for a list key. Remove a value with `--unset-key acme-id`. Filtering matches whole values and ignores case, and a list key matches if any of its values is equal. The MCP tool `list_metadata_keys` tells an agent which keys exist.
+Set the values with `rag metadata <doc> --field acme-id=D-0172`. Repeat `--field` for a list field; `--mpn` is repeatable the same way. Remove a value with `--unset-field acme-id`. Filtering matches whole values and ignores case, and a list field matches if any of its values is equal. `rag list --columns mpn,acme-id` shows a column per field. The MCP tool `list_metadata_fields` tells an agent which fields exist.
 
-`rag keys add` moves any existing free-form attribute with the same name into the key. `rag keys remove <name> --demote` moves the values back into attributes. Built-in keys cannot be removed.
-
-A `.rag.toml` `[attributes]` entry whose name is now a registered key is applied as that key, and `rag ingest`/`rag metadata` print a warning to move it under `[keys]`.
+`rag fields remove <name>` refuses while any document has a value for the field. `rag fields remove <name> --clear` deletes those values with the field. Built-in fields cannot be removed.
 
 ## Usage
 

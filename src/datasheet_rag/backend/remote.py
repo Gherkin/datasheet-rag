@@ -54,8 +54,8 @@ if TYPE_CHECKING:
     import httpx
 
     from datasheet_rag.ingest_pipeline import ProgressCallback
-from datasheet_rag.store import DocMetadata, KeySpec, SearchFilters, SearchResult, TitleSource
-from datasheet_rag.store.keys import KeyShape
+from datasheet_rag.store import DocMetadata, FieldSpec, SearchFilters, SearchResult, TitleSource
+from datasheet_rag.store.fields import FieldShape
 
 _EXCLUDE_VECS = {"content_embedding", "context_embedding"}
 
@@ -339,14 +339,14 @@ class RemoteBackend(RagBackend):
         *,
         project_id: str | None = None,
         group_name: str | None = None,
-        keys: dict[str, str] | None = None,
+        fields: dict[str, str] | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> DocPage:
         params = _drop_none(
             project_id=project_id,
             group_name=group_name,
-            key=_key_params(keys),
+            field=_field_params(fields),
             limit=limit,
             offset=offset or None,
         )
@@ -410,37 +410,43 @@ class RemoteBackend(RagBackend):
         *,
         project_id: str | None = None,
         group_name: str | None = None,
-        keys: dict[str, str] | None = None,
+        fields: dict[str, str] | None = None,
     ) -> list[DocMetadata]:
-        params = _drop_none(project_id=project_id, group_name=group_name, key=_key_params(keys))
+        params = _drop_none(
+            project_id=project_id, group_name=group_name, field=_field_params(fields)
+        )
         data = self._json("GET", "/metadata", params=params)
         return [DocMetadata.model_validate(d) for d in data["documents"]]
+
+    def set_needs_reembed(self, doc_id: str, value: bool) -> None:
+        self._json("PUT", f"/documents/{doc_id}/needs-reembed", json={"value": value})
 
     def apply_metadata_to_chunks(self, doc_id: str) -> int:
         return int(self._json("POST", f"/documents/{doc_id}/apply-metadata")["updated"])
 
-    # -- metadata keys -------------------------------------------------
-    def list_keys(self) -> list[KeySpec]:
-        return [KeySpec.model_validate(k) for k in self._json("GET", "/metadata/keys")["keys"]]
+    # -- metadata fields -----------------------------------------------
+    def list_fields(self) -> list[FieldSpec]:
+        data = self._json("GET", "/metadata/fields")
+        return [FieldSpec.model_validate(f) for f in data["fields"]]
 
-    def register_key(
+    def register_field(
         self,
         name: str,
         *,
-        shape: KeyShape = "single",
+        shape: FieldShape = "single",
         description: str = "",
         roles: Sequence[str] = (),
-    ) -> tuple[KeySpec, int]:
+    ) -> FieldSpec:
         data = self._json(
             "POST",
-            "/metadata/keys",
+            "/metadata/fields",
             json={"name": name, "shape": shape, "description": description, "roles": list(roles)},
         )
-        return KeySpec.model_validate(data["key"]), int(data["promoted"])
+        return FieldSpec.model_validate(data["field"])
 
-    def remove_key(self, name: str, *, demote: bool = False) -> int:
-        params = {"demote": "true"} if demote else None
-        return int(self._json("DELETE", f"/metadata/keys/{name}", params=params)["held"])
+    def remove_field(self, name: str, *, clear: bool = False) -> int:
+        params = {"clear": "true"} if clear else None
+        return int(self._json("DELETE", f"/metadata/fields/{name}", params=params)["held"])
 
     # -- stats ---------------------------------------------------------
     def stats(self, *, project_id: str | None = None, doc_id: str | None = None) -> StatsResult:
@@ -873,15 +879,15 @@ def _drop_none(**kw: Any) -> dict[str, Any]:
     return {k: v for k, v in kw.items() if v is not None}
 
 
-def _key_params(keys: Mapping[str, str] | None) -> list[str] | None:
-    """Encode key filters as repeated ``key=name:value`` query params.
+def _field_params(fields: Mapping[str, str] | None) -> list[str] | None:
+    """Encode field filters as repeated ``field=name:value`` query params.
 
-    Key names cannot contain ``:`` (``store.keys`` restricts them), so the
-    server splits on the first one and the value may hold anything.
+    Field names cannot contain ``:`` (``store.fields`` restricts them), so
+    the server splits on the first one and the value may hold anything.
     """
-    if not keys:
+    if not fields:
         return None
-    return [f"{name}:{value}" for name, value in keys.items()]
+    return [f"{name}:{value}" for name, value in fields.items()]
 
 
 def _page_rows(

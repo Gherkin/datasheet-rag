@@ -1,4 +1,4 @@
-"""`rag ingest` applies every ``.rag.toml`` field, attributes included (GH #26).
+"""`rag ingest` applies every ``.rag.toml`` setting, ``[fields]`` included (GH #26).
 
 Drives the remote raw-PDF branch with a fake backend, so the test checks the
 metadata the CLI would send without running the parse pipeline.
@@ -14,18 +14,18 @@ from click.testing import CliRunner
 
 from datasheet_rag.backend.models import IngestResult
 from datasheet_rag.cli import cli
-from datasheet_rag.store.keys import BUILTIN_KEYS, KeySpec
+from datasheet_rag.store.fields import BUILTIN_FIELDS, FieldSpec
 
 
 class _FakeBackend:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
-        self.keys: list[KeySpec] = list(BUILTIN_KEYS)
-        self.list_keys_calls = 0
+        self.fields: list[FieldSpec] = list(BUILTIN_FIELDS)
+        self.list_fields_calls = 0
 
-    def list_keys(self) -> list[KeySpec]:
-        self.list_keys_calls += 1
-        return self.keys
+    def list_fields(self) -> list[FieldSpec]:
+        self.list_fields_calls += 1
+        return self.fields
 
     def ingest_pdf(self, pdf_path: Path, **kwargs: Any) -> IngestResult:
         self.calls.append({"pdf_path": pdf_path, **kwargs})
@@ -54,37 +54,42 @@ def _ingest(*args: str):
     return CliRunner().invoke(cli, ["ingest", *args])
 
 
-def test_ingest_applies_doc_type_and_attributes_from_config(
-    tmp_path: Path, fake_backend: _FakeBackend
-) -> None:
+def test_ingest_applies_fields_from_config(tmp_path: Path, fake_backend: _FakeBackend) -> None:
+    fake_backend.fields += [FieldSpec(name="revision"), FieldSpec(name="owner")]
     (tmp_path / ".rag.toml").write_text(
-        'doc_type = "technical-manual"\n[attributes]\nrevision = "A"\nowner = "hw"\n'
+        '[fields]\ndoc_type = "technical-manual"\nrevision = "A"\nowner = "hw"\n'
     )
     pdf = _pdf(tmp_path / "V700")
-    (pdf.parent / ".rag.toml").write_text('[attributes]\nrevision = "B"\n')
+    (pdf.parent / ".rag.toml").write_text('[fields]\nrevision = "B"\n')
 
-    result = _ingest(str(pdf), "--attr", "owner=fw")
+    result = _ingest(str(pdf), "--field", "owner=fw")
 
     assert result.exit_code == 0, result.output
     patch = fake_backend.calls[0]["metadata"]
-    assert patch.keys == {"doc_type": "technical-manual"}
     # Nearest file wins for revision; the CLI flag wins for owner.
-    assert patch.attributes == {"revision": "B", "owner": "fw"}
+    assert patch.fields == {"doc_type": "technical-manual", "revision": "B", "owner": "fw"}
 
 
-def test_ingest_without_attributes_sends_none(tmp_path: Path, fake_backend: _FakeBackend) -> None:
+def test_ingest_without_fields_sends_none(tmp_path: Path, fake_backend: _FakeBackend) -> None:
     pdf = _pdf(tmp_path)
 
     result = _ingest(str(pdf))
 
     assert result.exit_code == 0, result.output
-    assert fake_backend.calls[0]["metadata"].attributes is None
+    assert fake_backend.calls[0]["metadata"].fields is None
+
+
+def test_ingest_mpn_is_repeatable_and_not_split(tmp_path: Path, fake_backend: _FakeBackend) -> None:
+    result = _ingest(str(_pdf(tmp_path)), "--mpn", "INA226", "--mpn", "A,B")
+
+    assert result.exit_code == 0, result.output
+    assert fake_backend.calls[0]["metadata"].fields == {"mpn": ["INA226", "A,B"]}
 
 
 def test_ingest_rejects_bad_config_without_traceback(
     tmp_path: Path, fake_backend: _FakeBackend
 ) -> None:
-    (tmp_path / ".rag.toml").write_text("[attributes]\nrevision = 2\n")
+    (tmp_path / ".rag.toml").write_text("[fields]\nmanufacturer = 2\n")
     pdf = _pdf(tmp_path)
 
     result = _ingest(str(pdf))
@@ -92,6 +97,17 @@ def test_ingest_rejects_bad_config_without_traceback(
     assert result.exit_code == 1
     assert "must be a string" in result.output
     assert "Traceback" not in result.output
+    assert fake_backend.calls == []
+
+
+def test_ingest_rejects_an_old_attributes_table(tmp_path: Path, fake_backend: _FakeBackend) -> None:
+    (tmp_path / ".rag.toml").write_text('[attributes]\nrevision = "B"\n')
+
+    result = _ingest(str(_pdf(tmp_path)))
+
+    assert result.exit_code == 1
+    assert "unknown key(s) attributes" in result.output
+    assert "arbitrary values go under [fields]" in result.output
     assert fake_backend.calls == []
 
 
@@ -109,47 +125,31 @@ def test_bulk_ingest_skips_only_the_directory_with_a_bad_config(
     assert "1 failed" in result.output
 
 
-def test_unregistered_key_fails_before_the_pdf_is_sent(
+def test_unregistered_field_fails_before_the_pdf_is_sent(
     tmp_path: Path, fake_backend: _FakeBackend
 ) -> None:
-    result = _ingest(str(_pdf(tmp_path)), "--key", "acme-idd=D-1")
+    result = _ingest(str(_pdf(tmp_path)), "--field", "acme-idd=D-1")
 
     assert result.exit_code == 1
-    assert "unregistered key(s) acme-idd" in result.output
+    assert "unregistered field(s) acme-idd" in result.output
     assert fake_backend.calls == []
 
 
-def test_config_attribute_that_is_now_a_key_is_sent_as_the_key(
+def test_unregistered_config_field_fails_before_the_pdf_is_sent(
     tmp_path: Path, fake_backend: _FakeBackend
 ) -> None:
-    fake_backend.keys.append(KeySpec(name="revision"))
-    (tmp_path / ".rag.toml").write_text('[attributes]\nrevision = "B"\nowner = "hw"\n')
+    (tmp_path / ".rag.toml").write_text('[fields]\nrevision = "B"\n')
 
     result = _ingest(str(_pdf(tmp_path)))
 
-    assert result.exit_code == 0, result.output
-    patch = fake_backend.calls[0]["metadata"]
-    assert patch.keys == {"revision": "B"}
-    assert patch.attributes == {"owner": "hw"}
-    assert "[attributes] revision: registered key(s) now" in result.output
+    assert result.exit_code == 1
+    assert "unregistered field(s) revision" in result.output
+    assert fake_backend.calls == []
 
 
-def test_stale_config_mpn_attribute_is_split_on_commas(
-    tmp_path: Path, fake_backend: _FakeBackend
-) -> None:
-    (tmp_path / ".rag.toml").write_text('[attributes]\nmpn = "INA226, INA226A"\n')
-
-    result = _ingest(str(_pdf(tmp_path)))
-
-    assert result.exit_code == 0, result.output
-    assert fake_backend.calls[0]["metadata"].keys == {"mpn": ["INA226", "INA226A"]}
-
-
-def test_bulk_ingest_reads_the_registry_and_warns_once(
-    tmp_path: Path, fake_backend: _FakeBackend
-) -> None:
-    fake_backend.keys.append(KeySpec(name="revision"))
-    (tmp_path / ".rag.toml").write_text('[attributes]\nrevision = "B"\n')
+def test_bulk_ingest_reads_the_registry_once(tmp_path: Path, fake_backend: _FakeBackend) -> None:
+    fake_backend.fields.append(FieldSpec(name="revision"))
+    (tmp_path / ".rag.toml").write_text('[fields]\nrevision = "B"\n')
     _pdf(tmp_path / "a")
     (tmp_path / "b").mkdir()
     (tmp_path / "b" / "doc.pdf").write_bytes(b"%PDF-1.4\nb\n")
@@ -158,8 +158,7 @@ def test_bulk_ingest_reads_the_registry_and_warns_once(
 
     assert result.exit_code == 0, result.output
     assert len(fake_backend.calls) == 2
-    assert fake_backend.list_keys_calls == 1
-    assert result.output.count("registered key(s) now") == 1
+    assert fake_backend.list_fields_calls == 1
 
 
 def test_ingest_without_a_patch_does_not_read_the_registry(
@@ -168,11 +167,11 @@ def test_ingest_without_a_patch_does_not_read_the_registry(
     result = _ingest(str(_pdf(tmp_path)))
 
     assert result.exit_code == 0, result.output
-    assert fake_backend.list_keys_calls == 0
+    assert fake_backend.list_fields_calls == 0
 
 
-def test_ingest_attr_bad_format_rejected(tmp_path: Path, fake_backend: _FakeBackend) -> None:
-    result = _ingest(str(_pdf(tmp_path)), "--attr", "no-equals-sign")
+def test_ingest_field_bad_format_rejected(tmp_path: Path, fake_backend: _FakeBackend) -> None:
+    result = _ingest(str(_pdf(tmp_path)), "--field", "no-equals-sign")
 
     assert result.exit_code != 0
-    assert "KEY=VALUE" in result.output
+    assert "NAME=VALUE" in result.output

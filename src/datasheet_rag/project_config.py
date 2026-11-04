@@ -8,43 +8,40 @@ way git/pyproject-style tools find their config — but unlike those tools,
 you can build a tree of configs:
 
     netdaq/
-      .rag.toml                      # project_id, manufacturer defaults
+      .rag.toml                      # project_id, [fields] manufacturer
       datasheets/
         power-subsystem/
           .rag.toml                  # subsystem = "power", group = "psu"
           STM32H743VIT6/
-            .rag.toml                # mpn = "STM32H743VIT6"
+            .rag.toml                # [fields] mpn = ["STM32H743VIT6"]
             datasheet.pdf
 
 Running ``rag ingest`` from inside ``STM32H743VIT6/`` merges all three files:
-the mpn-level config wins for fields it sets (``mpn``), the subsystem-level
+the mpn-level config wins for what it sets (``mpn``), the subsystem-level
 config fills in ``subsystem``/``group``, and the project-level config supplies
 the rest (``project_id``, ``manufacturer``). ``tags`` are unioned across every
-level instead of overridden, and ``keys``/``attributes`` are merged key by key.
+level instead of overridden, and ``[fields]`` are merged name by name.
 
 Example ``.rag.toml``::
 
     project_id = "stm32-h7-devboard"
     group = "power-subsystem"
-    mpn = ["STM32H743VIT6", "STM32H743ZIT6"]
-    manufacturer = "STMicroelectronics"
     subsystem = "mcu"
-    doc_type = "reference-manual"
     tags = ["reference-manual"]
 
-    [keys]
-    acme-id = "D-0172"           # a key registered with `rag keys add`
+    [fields]
+    mpn = ["STM32H743VIT6", "STM32H743ZIT6"]
+    manufacturer = "STMicroelectronics"
+    doc_type = "reference-manual"
+    acme-id = "D-0172"           # a field registered with `rag fields add`
 
-    [attributes]
-    revision = "B"
+``[fields]`` sets any registered field, built-in (``mpn``, ``manufacturer``,
+``doc_type``) or user-registered (GH #120).
 
-``mpn``, ``manufacturer`` and ``doc_type`` are shortcuts for the built-in
-keys of the same name; ``[keys]`` sets any registered key (GH #120).
-
-The schema is closed: an unknown key, a value of the wrong type, a reserved
-attribute key or a file that is not valid TOML raises ``ProjectConfigError``
-rather than being dropped, since a silently ignored default mislabels every
-document ingested under it (GH #26).
+The schema is closed: an unknown key, a value of the wrong type or a file
+that is not valid TOML raises ``ProjectConfigError`` rather than being
+dropped, since a silently ignored default mislabels every document ingested
+under it (GH #26).
 """
 
 from __future__ import annotations
@@ -56,19 +53,12 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from datasheet_rag.store.keys import BUILTIN_KEYS
-from datasheet_rag.store.metadata import RESERVED_ATTRIBUTES
+from datasheet_rag.store.fields import BUILTIN_FIELDS, FieldValue
 
 CONFIG_FILENAME = ".rag.toml"
 
 _SCALAR_KEYS = ("project_id", "group", "subsystem")
-#: Top-level shortcuts for built-in metadata keys: ``mpn = "X"`` means the
-#: same as ``[keys] mpn = "X"``. ``mpn`` may be a string or a list.
-_KEY_SHORTCUTS = ("mpn", "manufacturer", "doc_type")
-_KNOWN_KEYS = frozenset({*_SCALAR_KEYS, *_KEY_SHORTCUTS, "tags", "keys", "attributes"})
-
-#: A ``[keys]`` value: a string, or a list of strings for a list-valued key.
-KeyValue = str | list[str]
+_KNOWN_KEYS = frozenset({*_SCALAR_KEYS, "tags", "fields"})
 
 
 class ProjectConfigError(ValueError):
@@ -84,68 +74,41 @@ class ProjectConfig:
     group: str | None = None
     subsystem: str | None = None
     tags: list[str] | None = None
-    #: Registered-key values, shortcuts (``mpn``, …) folded in. Whether each
-    #: key is registered is checked when the values are written, not here:
-    #: loading a config must not need the store.
-    keys: dict[str, KeyValue] | None = None
-    attributes: dict[str, str] | None = None
-
-    def key(self, name: str) -> KeyValue | None:
-        return (self.keys or {}).get(name)
+    #: Registered-field values. Whether each field is registered is checked
+    #: when the values are written, not here: loading a config must not need
+    #: the store.
+    fields: dict[str, FieldValue] | None = None
 
 
-#: Shapes of the built-in keys, known without a store. A user key's shape is
-#: only known to the store, so its value is checked when it is written.
-_BUILTIN_SHAPES = {k.name: k.shape for k in BUILTIN_KEYS}
+#: Shapes of the built-in fields, known without a store. A user field's shape
+#: is only known to the store, so its value is checked when it is written.
+_BUILTIN_SHAPES = {f.name: f.shape for f in BUILTIN_FIELDS}
 
 
-def _check_key_value(candidate: Path, key: str, value: Any) -> KeyValue:
+def _check_field_value(candidate: Path, name: str, value: Any) -> FieldValue:
     if isinstance(value, str):
         return value
-    if _BUILTIN_SHAPES.get(key) == "single":
+    if _BUILTIN_SHAPES.get(name) == "single":
         raise ProjectConfigError(
-            f"{candidate}: {key!r} must be a string, got {type(value).__name__}"
+            f"{candidate}: field {name!r} must be a string, got {type(value).__name__}"
         )
     if isinstance(value, list) and all(isinstance(v, str) for v in value):
         return list(value)
     raise ProjectConfigError(
-        f"{candidate}: {key!r} must be a string or a list of strings, got {type(value).__name__}"
+        f"{candidate}: field {name!r} must be a string or a list of strings, "
+        f"got {type(value).__name__}"
     )
 
 
-def _check_keys(candidate: Path, raw: Any) -> dict[str, KeyValue]:
+def _check_fields(candidate: Path, raw: Any) -> dict[str, FieldValue]:
     if not isinstance(raw, dict):
-        raise ProjectConfigError(f"{candidate}: 'keys' must be a table, e.g. [keys]")
-    out: dict[str, KeyValue] = {}
-    for key, value in raw.items():
-        if not key:
-            raise ProjectConfigError(f"{candidate}: [keys] has an empty key")
-        out[key] = _check_key_value(candidate, key, value)
+        raise ProjectConfigError(f"{candidate}: 'fields' must be a table, e.g. [fields]")
+    out: dict[str, FieldValue] = {}
+    for name, value in raw.items():
+        if not name:
+            raise ProjectConfigError(f"{candidate}: [fields] has an empty name")
+        out[name] = _check_field_value(candidate, name, value)
     return out
-
-
-def _check_attributes(candidate: Path, raw: Any) -> dict[str, str]:
-    if not isinstance(raw, dict):
-        raise ProjectConfigError(f"{candidate}: 'attributes' must be a table, e.g. [attributes]")
-    for key, value in raw.items():
-        if not key:
-            raise ProjectConfigError(f"{candidate}: [attributes] has an empty key")
-        if key in RESERVED_ATTRIBUTES:
-            raise ProjectConfigError(
-                f"{candidate}: attribute {key!r} is reserved — the pipeline sets it "
-                f"itself (reserved: {', '.join(sorted(RESERVED_ATTRIBUTES))})"
-            )
-        if not isinstance(value, str):
-            # Only a plain number or bool can simply be quoted; spell a bool
-            # the TOML way, not as Python's True/False.
-            hint = ""
-            if isinstance(value, (bool, int, float)):
-                shown = str(value).lower() if isinstance(value, bool) else value
-                hint = f' — quote it, e.g. {key} = "{shown}"'
-            raise ProjectConfigError(
-                f"{candidate}: attribute {key!r} must be a string, got {type(value).__name__}{hint}"
-            )
-    return dict(raw)
 
 
 def _load_config(candidate: Path) -> ProjectConfig:
@@ -161,7 +124,7 @@ def _load_config(candidate: Path) -> ProjectConfig:
     if unknown:
         raise ProjectConfigError(
             f"{candidate}: unknown key(s) {', '.join(unknown)} (known: "
-            f"{', '.join(sorted(_KNOWN_KEYS))}; arbitrary keys go under [attributes])"
+            f"{', '.join(sorted(_KNOWN_KEYS))}; arbitrary values go under [fields])"
         )
     for key in _SCALAR_KEYS:
         if key in data and not isinstance(data[key], str):
@@ -171,28 +134,7 @@ def _load_config(candidate: Path) -> ProjectConfig:
     tags = data.get("tags")
     if tags is not None and not (isinstance(tags, list) and all(isinstance(t, str) for t in tags)):
         raise ProjectConfigError(f"{candidate}: 'tags' must be a list of strings")
-    attributes = data.get("attributes")
-
-    keys = _check_keys(candidate, data["keys"]) if "keys" in data else {}
-    for shortcut in _KEY_SHORTCUTS:
-        if shortcut not in data:
-            continue
-        if shortcut in keys:
-            raise ProjectConfigError(
-                f"{candidate}: {shortcut!r} is set both at the top level and under [keys]"
-            )
-        value = _check_key_value(candidate, shortcut, data[shortcut])
-        if shortcut == "mpn" and isinstance(value, str) and "," in value:
-            # Same rule as `--mpn A,B`: a comma string is how a config listed
-            # several part numbers before mpn was a list.
-            value = [v.strip() for v in value.split(",") if v.strip()]
-        keys[shortcut] = value
-    attrs = _check_attributes(candidate, attributes) if attributes is not None else None
-    clash = sorted(set(attrs or {}) & set(keys))
-    if clash:
-        raise ProjectConfigError(
-            f"{candidate}: {', '.join(clash)} set both under [keys] and [attributes]"
-        )
+    fields = _check_fields(candidate, data["fields"]) if "fields" in data else None
 
     return ProjectConfig(
         path=candidate,
@@ -200,8 +142,7 @@ def _load_config(candidate: Path) -> ProjectConfig:
         group=data.get("group"),
         subsystem=data.get("subsystem"),
         tags=tags,
-        keys=keys or None,
-        attributes=attrs,
+        fields=fields or None,
     )
 
 
@@ -225,22 +166,22 @@ def find_project_configs(start: Path) -> list[ProjectConfig]:
 def merge_project_configs(configs: Sequence[ProjectConfig]) -> ProjectConfig | None:
     """Merge a most-specific-first chain of configs into one effective config.
 
-    Scalar fields (``project_id``, ``mpn``, ``subsystem``, …) use the nearest
+    Scalar settings (``project_id``, ``group``, ``subsystem``) use the nearest
     value that's set — a deeper ``.rag.toml`` overrides its ancestors, the
     same way directory-local config overrides project-wide config elsewhere.
     ``tags`` are unioned across every level instead, since tags are additive
     labels rather than a single value to override (de-duplicated, nearest first).
-    ``keys`` and ``attributes`` merge name by name, the nearest file winning
-    per name across both tables (a list value is replaced, not unioned).
-    The merged ``path`` is the nearest file's, since that's the config a user
-    editing files in this directory would reach for first.
+    ``[fields]`` merge name by name, the nearest file winning per name (a list
+    value is replaced, not unioned). The merged ``path`` is the nearest file's,
+    since that's the config a user editing files in this directory would reach
+    for first.
     """
     if not configs:
         return None
 
-    def _first(field: str) -> str | None:
+    def _first(name: str) -> str | None:
         for cfg in configs:
-            value: str | None = getattr(cfg, field)
+            value: str | None = getattr(cfg, name)
             if value:
                 return value
         return None
@@ -251,17 +192,9 @@ def merge_project_configs(configs: Sequence[ProjectConfig]) -> ProjectConfig | N
             if tag not in tags:
                 tags.append(tag)
 
-    attributes: dict[str, str] = {}
-    keys: dict[str, KeyValue] = {}
+    fields: dict[str, FieldValue] = {}
     for cfg in reversed(configs):
-        # One name space across both tables: a nearer [attributes] X replaces
-        # an ancestor's [keys] X, and the other way round.
-        for name in cfg.attributes or {}:
-            keys.pop(name, None)
-        for name in cfg.keys or {}:
-            attributes.pop(name, None)
-        attributes.update(cfg.attributes or {})
-        keys.update(cfg.keys or {})
+        fields.update(cfg.fields or {})
 
     return ProjectConfig(
         path=configs[0].path,
@@ -269,8 +202,7 @@ def merge_project_configs(configs: Sequence[ProjectConfig]) -> ProjectConfig | N
         group=_first("group"),
         subsystem=_first("subsystem"),
         tags=tags or None,
-        keys=keys or None,
-        attributes=attributes or None,
+        fields=fields or None,
     )
 
 

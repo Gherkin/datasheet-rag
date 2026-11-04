@@ -485,7 +485,7 @@ def test_server_records_a_client_inferred_title(server, conn) -> None:
     assert titles[did] == "TPS62840 Datasheet"
     # Recorded as inferred, so a later manual title still outranks it.
     md = server.get(f"/documents/{did}/metadata").json()
-    assert md["attributes"]["title_source"] == "inferred"
+    assert md["title_source"] == "inferred"
 
 
 def test_title_context_route_serves_the_prompt_inputs(server) -> None:

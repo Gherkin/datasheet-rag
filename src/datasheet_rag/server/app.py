@@ -54,7 +54,7 @@ from datasheet_rag.store import (
     revoke_api_key,
     stored_embedding_dim,
 )
-from datasheet_rag.store.keys import KeyShape, shapes_of
+from datasheet_rag.store.fields import FieldShape, shapes_of
 from datasheet_rag.store.metadata import check_patch_for
 
 if TYPE_CHECKING:
@@ -110,22 +110,26 @@ class TitleBody(BaseModel):
     force: bool = False
 
 
-class RegisterKeyBody(BaseModel):
+class RegisterFieldBody(BaseModel):
     name: str
-    shape: KeyShape = "single"
+    shape: FieldShape = "single"
     description: str = ""
     roles: list[str] = Field(default_factory=list)
 
 
-def _parse_key_params(raw: list[str] | None) -> dict[str, str] | None:
-    """Decode repeated ``key=name:value`` query params into a filter dict."""
+class NeedsReembedBody(BaseModel):
+    value: bool
+
+
+def _parse_field_params(raw: list[str] | None) -> dict[str, str] | None:
+    """Decode repeated ``field=name:value`` query params into a filter dict."""
     if not raw:
         return None
     out: dict[str, str] = {}
     for item in raw:
         name, sep, value = item.partition(":")
         if not sep or not name:
-            raise ValueError(f"key filter {item!r} must be name:value")
+            raise ValueError(f"field filter {item!r} must be name:value")
         out[name] = value
     return out
 
@@ -399,6 +403,13 @@ def build_app() -> FastAPI:
             "updated": be.set_doc_title(doc_id, body.title, source=body.source, force=body.force)
         }
 
+    @app.put("/documents/{doc_id}/needs-reembed", dependencies=ingest_dep)
+    def document_set_needs_reembed(
+        doc_id: str, body: NeedsReembedBody, be: LocalBackend = Depends(get_backend)
+    ) -> dict[str, Any]:
+        be.set_needs_reembed(doc_id, body.value)
+        return {"needs_reembed": body.value}
+
     @app.post("/documents/{doc_id}/apply-metadata", dependencies=ingest_dep)
     def document_apply_metadata(
         doc_id: str, be: LocalBackend = Depends(get_backend)
@@ -435,7 +446,7 @@ def build_app() -> FastAPI:
     def documents(
         project_id: str | None = None,
         group_name: str | None = None,
-        key: list[str] | None = Query(None),
+        field: list[str] | None = Query(None),
         limit: int | None = Query(None, ge=1),
         offset: int = Query(0, ge=0),
         be: LocalBackend = Depends(get_backend),
@@ -443,7 +454,7 @@ def build_app() -> FastAPI:
         page = be.list_documents(
             project_id=project_id,
             group_name=group_name,
-            keys=_parse_key_params(key),
+            fields=_parse_field_params(field),
             limit=limit,
             offset=offset,
         )
@@ -457,33 +468,33 @@ def build_app() -> FastAPI:
     def metadata(
         project_id: str | None = None,
         group_name: str | None = None,
-        key: list[str] | None = Query(None),
+        field: list[str] | None = Query(None),
         be: LocalBackend = Depends(get_backend),
     ) -> dict[str, Any]:
         docs = be.list_docs(
-            project_id=project_id, group_name=group_name, keys=_parse_key_params(key)
+            project_id=project_id, group_name=group_name, fields=_parse_field_params(field)
         )
         return {"documents": [d.model_dump(mode="json") for d in docs]}
 
-    # -- metadata keys (GH #120) ------------------------------------------
-    @app.get("/metadata/keys", dependencies=dep)
-    def metadata_keys(be: LocalBackend = Depends(get_backend)) -> dict[str, Any]:
-        return {"keys": [k.model_dump(mode="json") for k in be.list_keys()]}
+    # -- metadata fields (GH #120) ----------------------------------------
+    @app.get("/metadata/fields", dependencies=dep)
+    def metadata_fields(be: LocalBackend = Depends(get_backend)) -> dict[str, Any]:
+        return {"fields": [f.model_dump(mode="json") for f in be.list_fields()]}
 
-    @app.post("/metadata/keys", dependencies=ingest_dep)
-    def metadata_register_key(
-        body: RegisterKeyBody, be: LocalBackend = Depends(get_backend)
+    @app.post("/metadata/fields", dependencies=ingest_dep)
+    def metadata_register_field(
+        body: RegisterFieldBody, be: LocalBackend = Depends(get_backend)
     ) -> dict[str, Any]:
-        spec, promoted = be.register_key(
+        spec = be.register_field(
             body.name, shape=body.shape, description=body.description, roles=body.roles
         )
-        return {"key": spec.model_dump(mode="json"), "promoted": promoted}
+        return {"field": spec.model_dump(mode="json")}
 
-    @app.delete("/metadata/keys/{name}", dependencies=ingest_dep)
-    def metadata_remove_key(
-        name: str, demote: bool = False, be: LocalBackend = Depends(get_backend)
+    @app.delete("/metadata/fields/{name}", dependencies=ingest_dep)
+    def metadata_remove_field(
+        name: str, clear: bool = False, be: LocalBackend = Depends(get_backend)
     ) -> dict[str, Any]:
-        return {"held": be.remove_key(name, demote=demote)}
+        return {"held": be.remove_field(name, clear=clear)}
 
     # -- stats -----------------------------------------------------------
     @app.get("/stats", dependencies=dep)
@@ -701,17 +712,13 @@ def build_app() -> FastAPI:
 
         # Before the stream opens, so an unsatisfiable request is a plain 4xx
         # naming the setting rather than an opaque failure a few steps in.
-        # A bad key in the metadata patch fails here too, not after the parse.
+        # A bad field in the metadata patch fails here too, not after the parse.
         metadata: MetadataPatch | None = None
         try:
             check_backend_prerequisites(tmp_path, backend=backend, doc_id=doc_id, force=force)
             if opts.get("metadata"):
                 metadata = MetadataPatch.model_validate(opts["metadata"])
-                check_patch_for(
-                    shapes_of(be.list_keys()),
-                    keys=metadata.keys,
-                    attributes=metadata.attributes,
-                )
+                check_patch_for(shapes_of(be.list_fields()), fields=metadata.fields)
         except (BackendUnavailableError, ValueError) as exc:
             tmp_path.unlink(missing_ok=True)
             audit(
