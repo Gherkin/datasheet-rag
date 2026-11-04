@@ -230,8 +230,8 @@ def merge_project_configs(configs: Sequence[ProjectConfig]) -> ProjectConfig | N
     same way directory-local config overrides project-wide config elsewhere.
     ``tags`` are unioned across every level instead, since tags are additive
     labels rather than a single value to override (de-duplicated, nearest first).
-    ``keys`` and ``attributes`` merge key by key, the nearest file winning
-    per key (a list value is replaced, not unioned).
+    ``keys`` and ``attributes`` merge name by name, the nearest file winning
+    per name across both tables (a list value is replaced, not unioned).
     The merged ``path`` is the nearest file's, since that's the config a user
     editing files in this directory would reach for first.
     """
@@ -254,6 +254,12 @@ def merge_project_configs(configs: Sequence[ProjectConfig]) -> ProjectConfig | N
     attributes: dict[str, str] = {}
     keys: dict[str, KeyValue] = {}
     for cfg in reversed(configs):
+        # One name space across both tables: a nearer [attributes] X replaces
+        # an ancestor's [keys] X, and the other way round.
+        for name in cfg.attributes or {}:
+            keys.pop(name, None)
+        for name in cfg.keys or {}:
+            attributes.pop(name, None)
         attributes.update(cfg.attributes or {})
         keys.update(cfg.keys or {})
 

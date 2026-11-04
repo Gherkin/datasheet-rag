@@ -184,6 +184,11 @@ def key_shapes(conn: sqlite3.Connection) -> dict[str, KeyShape]:
     return {r["name"]: r["shape"] for r in conn.execute("SELECT name, shape FROM metadata_keys")}
 
 
+def shapes_of(specs: Iterable[KeySpec]) -> dict[str, KeyShape]:
+    """:func:`key_shapes` for a registry already read (``list_keys`` or an API reply)."""
+    return {k.name: k.shape for k in specs}
+
+
 def validate_key_name(name: str) -> None:
     """Raise :class:`MetadataKeyError` unless ``name`` may be registered."""
     from datasheet_rag.store.metadata import RESERVED_ATTRIBUTES

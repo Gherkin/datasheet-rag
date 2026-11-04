@@ -336,6 +336,33 @@ def test_config_attribute_that_is_now_a_key_is_applied_as_the_key(
     assert meta["attributes"] == {"owner": "hw"}
 
 
+def test_unset_attr_beats_a_config_attribute_that_is_now_a_key(
+    db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".rag.toml").write_text('[attributes]\nrevision = "B"\n')
+    monkeypatch.chdir(tmp_path)
+    assert _keys("add", "revision", "--db", str(db_path)).exit_code == 0
+
+    result = _meta(db_path, DOC_A, "--unset-attr", "revision")
+
+    assert result.exit_code == 0, result.output
+    meta = _get_json(db_path, DOC_A)
+    assert "revision" not in meta.get("keys", {})
+
+
+def test_attr_on_a_config_name_that_is_now_a_key_names_the_key(
+    db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".rag.toml").write_text('[attributes]\nrevision = "B"\n')
+    monkeypatch.chdir(tmp_path)
+    assert _keys("add", "revision", "--db", str(db_path)).exit_code == 0
+
+    result = _meta(db_path, DOC_A, "--attr", "revision=C")
+
+    assert result.exit_code != 0
+    assert "revision is a registered key" in result.output
+
+
 def test_no_flags_is_still_a_read(db_path: Path) -> None:
     _meta(db_path, DOC_A, "--mpn", "INA226")
     result = _meta(db_path, DOC_A)

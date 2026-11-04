@@ -236,6 +236,23 @@ def test_merge_project_configs_merges_attributes_key_by_key_nearest_wins(tmp_pat
     assert merged.keys == {"doc_type": "errata", "mpn": ["A", "B"]}
 
 
+def test_merge_project_configs_nearest_wins_across_keys_and_attributes(tmp_path: Path) -> None:
+    nearest = ProjectConfig(
+        path=tmp_path / "sub" / ".rag.toml",
+        keys={"owner": "fw"},
+        attributes={"revision": "B"},
+    )
+    root = ProjectConfig(
+        path=tmp_path / ".rag.toml", keys={"revision": "A"}, attributes={"owner": "hw"}
+    )
+
+    merged = merge_project_configs([nearest, root])
+
+    assert merged is not None
+    assert merged.keys == {"owner": "fw"}
+    assert merged.attributes == {"revision": "B"}
+
+
 def test_merge_project_configs_single_config_passthrough(tmp_path: Path) -> None:
     only = ProjectConfig(path=tmp_path / ".rag.toml", project_id="proj-a", tags=["x"])
 

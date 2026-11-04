@@ -54,7 +54,7 @@ from datasheet_rag.store import (
     revoke_api_key,
     stored_embedding_dim,
 )
-from datasheet_rag.store.keys import KeyShape
+from datasheet_rag.store.keys import KeyShape, shapes_of
 from datasheet_rag.store.metadata import check_patch_for
 
 if TYPE_CHECKING:
@@ -702,14 +702,15 @@ def build_app() -> FastAPI:
         # Before the stream opens, so an unsatisfiable request is a plain 4xx
         # naming the setting rather than an opaque failure a few steps in.
         # A bad key in the metadata patch fails here too, not after the parse.
+        metadata: MetadataPatch | None = None
         try:
             check_backend_prerequisites(tmp_path, backend=backend, doc_id=doc_id, force=force)
             if opts.get("metadata"):
-                patch = MetadataPatch.model_validate(opts["metadata"])
+                metadata = MetadataPatch.model_validate(opts["metadata"])
                 check_patch_for(
-                    {k.name: k.shape for k in be.list_keys()},
-                    keys=patch.keys,
-                    attributes=patch.attributes,
+                    shapes_of(be.list_keys()),
+                    keys=metadata.keys,
+                    attributes=metadata.attributes,
                 )
         except (BackendUnavailableError, ValueError) as exc:
             tmp_path.unlink(missing_ok=True)
@@ -750,9 +751,6 @@ def build_app() -> FastAPI:
                 )
                 embed_step = {"kind": "step", "text": "Embed & store", "step": max_step["n"] + 1}
                 loop.call_soon_threadsafe(queue.put_nowait, ("progress", embed_step))
-                metadata = (
-                    MetadataPatch.model_validate(opts["metadata"]) if opts.get("metadata") else None
-                )
                 result = be.ingest_chunk_graph(
                     parsed.graph,
                     project_id=opts.get("project_id"),

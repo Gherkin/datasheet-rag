@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from datasheet_rag.eval.stats import Interval, PairedDiff
     from datasheet_rag.ingest_pipeline import ProgressEvent
     from datasheet_rag.models.chunk import Chunk
+    from datasheet_rag.project_config import ProjectConfig
     from datasheet_rag.store.keys import KeySpec
     from datasheet_rag.store.metadata import DocMetadata
 
@@ -410,37 +411,84 @@ def _shortcut_keys(
     return out
 
 
-def _config_attrs_as_keys(
-    cfg_attrs: dict[str, str] | None, registered: Iterable[str]
-) -> tuple[dict[str, str], dict[str, str]]:
-    """Split ``.rag.toml`` attributes into (attributes, keys).
+class _KeyRegistry:
+    """The key registry, read at most once per command and only when asked for.
 
-    An attribute whose name has since been registered as a key (``rag keys
-    add``) is applied as that key, with a warning to move it under ``[keys]``.
-    Without this, one stale ``.rag.toml`` entry would make every write under
-    it fail on the attribute/key clash.
+    A bulk ingest shares one, so 300 PDFs cost one ``list_keys`` call and
+    print each stale-attribute warning once.
     """
+
+    def __init__(self, backend: RagBackend) -> None:
+        self._backend = backend
+        self._specs: list[KeySpec] | None = None
+        self.warned: set[str] = set()
+
+    def specs(self) -> list[KeySpec]:
+        if self._specs is None:
+            from datasheet_rag.backend import RagServerError
+
+            try:
+                self._specs = self._backend.list_keys()
+            except RagServerError as e:
+                raise _friendly_server_error(e) from e
+        return self._specs
+
+
+def _merge_config_keys(
+    proj_cfg: ProjectConfig | None,
+    registered: Iterable[str],
+    keys: dict[str, Any],
+    attributes: dict[str, Any],
+    *,
+    warned: set[str] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Fill ``.rag.toml`` ``[keys]`` and ``[attributes]`` in under the user's options.
+
+    ``keys`` and ``attributes`` are what the user typed, an unset as ``None``.
+    A name the user gave in either one, to set or to unset, is not filled from
+    the config at all. An attribute whose name has since been registered as a
+    key (``rag keys add``) is applied as that key, with a warning to move it
+    under ``[keys]``; without this, one stale entry would make every write
+    under it fail on the attribute/key clash. ``warned`` holds the warnings
+    already printed, so a bulk ingest prints each one once.
+    """
+    if proj_cfg is None:
+        return keys, attributes
+    named = set(keys) | set(attributes)
     names = set(registered)
-    attrs: dict[str, str] = {}
-    keys: dict[str, str] = {}
-    for name, value in (cfg_attrs or {}).items():
-        (keys if name in names else attrs)[name] = value
-    if keys:
-        console.print(
-            f"[yellow]Warning:[/] .rag.toml \\[attributes] {', '.join(sorted(keys))}: "
+    cfg_keys: dict[str, Any] = {n: v for n, v in (proj_cfg.keys or {}).items() if n not in named}
+    cfg_attrs: dict[str, Any] = {}
+    stale: list[str] = []
+    for name, value in (proj_cfg.attributes or {}).items():
+        if name in named:
+            continue
+        if name in names:
+            stale.append(name)
+            # Same comma rule as `--mpn A,B` and a top-level `mpn = "A,B"`.
+            cfg_keys[name] = _split_mpns(value) if name == "mpn" else value
+        else:
+            cfg_attrs[name] = value
+    if stale:
+        msg = (
+            f"[yellow]Warning:[/] .rag.toml \\[attributes] {', '.join(sorted(stale))}: "
             "registered key(s) now, applied as keys. Move them under \\[keys]."
         )
-    return attrs, keys
+        if warned is None or msg not in warned:
+            console.print(msg)
+            if warned is not None:
+                warned.add(msg)
+    return {**cfg_keys, **keys}, {**cfg_attrs, **attributes}
 
 
 def _check_key_patch(
     registered: Iterable[KeySpec], keys: dict[str, Any], attributes: dict[str, Any]
 ) -> None:
     """Reject a bad key patch before any slow work (parsing a PDF)."""
+    from datasheet_rag.store.keys import shapes_of
     from datasheet_rag.store.metadata import check_patch_for
 
     try:
-        check_patch_for({k.name: k.shape for k in registered}, keys=keys, attributes=attributes)
+        check_patch_for(shapes_of(registered), keys=keys, attributes=attributes)
     except ValueError as e:
         raise click.ClickException(str(e)) from e
 
@@ -2796,7 +2844,12 @@ def ingest(
     skipped unless --force is given, and --show-cost prints a combined
     estimate across all of them in addition to each document's breakdown.
     """
+    # A store write follows unless this is a dry run. Built once, so a bulk
+    # ingest shares one backend and one read of the key registry.
+    store_backend = None if dry_run or show_cost else _backend_for(db_path)
     common: dict[str, Any] = dict(
+        store_backend=store_backend,
+        key_registry=_KeyRegistry(store_backend) if store_backend is not None else None,
         project_id=project_id,
         group_name=group_name,
         subsystem=subsystem,
@@ -2847,7 +2900,9 @@ def ingest(
     ingested_ids: set[str] = set()
     if not show_cost:
         try:
-            ingested_ids = {d.doc_id for d in _backend_for(db_path).get_ingested_docs()}
+            ingested_ids = {
+                d.doc_id for d in (store_backend or _backend_for(db_path)).get_ingested_docs()
+            }
         except Exception:
             ingested_ids = set()
 
@@ -2911,6 +2966,8 @@ def _ingest_one(
     pdf_path: Path,
     *,
     doc_id: str | None,
+    store_backend: RagBackend | None,
+    key_registry: _KeyRegistry | None,
     project_id: str | None,
     group_name: str | None,
     subsystem: str | None,
@@ -2963,27 +3020,24 @@ def _ingest_one(
             "[yellow]--show-cost: estimating AWS spend, skipping priced Bedrock/Textract calls.[/]"
         )
 
-    # Unless this is a dry run, a store write follows: read the key registry
-    # now, so a bad key fails before the PDF is parsed, not after.
-    backend_obj: RagBackend | None = None
+    # A store write follows (store_backend is None on a dry run): read the
+    # key registry now, so a bad key fails before the PDF is parsed, not
+    # after. A patch with no keys or attributes has nothing to check.
+    backend_obj = store_backend
     registered: list[KeySpec] = []
-    if not dry_run:
-        from datasheet_rag.backend import LocalBackend, RagServerError, get_backend
-
-        # `rag ingest --db` targets a specific local file; honor it by
-        # building a LocalBackend on that path rather than the configured one.
-        backend_obj = LocalBackend(db_path) if db_path is not None else get_backend()
-        try:
-            registered = backend_obj.list_keys()
-        except RagServerError as e:
-            raise _friendly_server_error(e) from e
-    if proj_cfg is not None:
-        cfg_attrs, cfg_attr_keys = _config_attrs_as_keys(
-            proj_cfg.attributes, (k.name for k in registered)
-        )
-        keys = {**cfg_attr_keys, **(proj_cfg.keys or {}), **keys}
-        attributes = {**cfg_attrs, **attributes}
-    if backend_obj is not None:
+    has_patch = bool(
+        keys or attributes or (proj_cfg is not None and (proj_cfg.keys or proj_cfg.attributes))
+    )
+    if key_registry is not None and has_patch:
+        registered = key_registry.specs()
+    keys, attributes = _merge_config_keys(
+        proj_cfg,
+        (k.name for k in registered),
+        keys,
+        attributes,
+        warned=key_registry.warned if key_registry is not None else None,
+    )
+    if key_registry is not None and has_patch:
         _check_key_patch(registered, keys, attributes)
 
     settings = get_settings()
@@ -3921,29 +3975,20 @@ def metadata_cmd(
         subsystem = proj_cfg.subsystem if subsystem is None else subsystem
         if not tags and proj_cfg.tags:
             tags = tuple(proj_cfg.tags)
-        for name, value in (proj_cfg.keys or {}).items():
-            if name not in keys and name not in unset_keys:
-                keys[name] = value
     for name in unset_keys:
         keys[name] = None
 
     be = _backend_for(db_path)
 
-    # Config attributes fill the keys the user did not name; --attr and
-    # --unset-attr both win for the keys they touch. A config attribute that
-    # is a registered key now is applied as that key.
-    attributes: dict[str, Any] = {}
-    if proj_cfg is not None and proj_cfg.attributes:
-        cfg_attrs, cfg_attr_keys = _config_attrs_as_keys(
-            proj_cfg.attributes, (k.name for k in be.list_keys())
-        )
-        attributes.update(cfg_attrs)
-        for name, value in cfg_attr_keys.items():
-            if name not in keys:
-                keys[name] = value
-    attributes.update(_parse_attr_items(attrs))
+    # Config [keys] and [attributes] fill only the names the user did not
+    # touch: --key/--unset-key and --attr/--unset-attr all win for theirs.
+    attributes: dict[str, Any] = _parse_attr_items(attrs)
     for key in unset_attrs:
         attributes[key] = None
+    registered = (
+        [k.name for k in be.list_keys()] if proj_cfg is not None and proj_cfg.attributes else []
+    )
+    keys, attributes = _merge_config_keys(proj_cfg, registered, keys, attributes)
 
     doc_id = _backend_resolve(be, doc_id)
 

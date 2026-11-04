@@ -21,8 +21,10 @@ class _FakeBackend:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
         self.keys: list[KeySpec] = list(BUILTIN_KEYS)
+        self.list_keys_calls = 0
 
     def list_keys(self) -> list[KeySpec]:
+        self.list_keys_calls += 1
         return self.keys
 
     def ingest_pdf(self, pdf_path: Path, **kwargs: Any) -> IngestResult:
@@ -129,6 +131,44 @@ def test_config_attribute_that_is_now_a_key_is_sent_as_the_key(
     patch = fake_backend.calls[0]["metadata"]
     assert patch.keys == {"revision": "B"}
     assert patch.attributes == {"owner": "hw"}
+    assert "[attributes] revision: registered key(s) now" in result.output
+
+
+def test_stale_config_mpn_attribute_is_split_on_commas(
+    tmp_path: Path, fake_backend: _FakeBackend
+) -> None:
+    (tmp_path / ".rag.toml").write_text('[attributes]\nmpn = "INA226, INA226A"\n')
+
+    result = _ingest(str(_pdf(tmp_path)))
+
+    assert result.exit_code == 0, result.output
+    assert fake_backend.calls[0]["metadata"].keys == {"mpn": ["INA226", "INA226A"]}
+
+
+def test_bulk_ingest_reads_the_registry_and_warns_once(
+    tmp_path: Path, fake_backend: _FakeBackend
+) -> None:
+    fake_backend.keys.append(KeySpec(name="revision"))
+    (tmp_path / ".rag.toml").write_text('[attributes]\nrevision = "B"\n')
+    _pdf(tmp_path / "a")
+    (tmp_path / "b").mkdir()
+    (tmp_path / "b" / "doc.pdf").write_bytes(b"%PDF-1.4\nb\n")
+
+    result = _ingest(str(tmp_path))
+
+    assert result.exit_code == 0, result.output
+    assert len(fake_backend.calls) == 2
+    assert fake_backend.list_keys_calls == 1
+    assert result.output.count("registered key(s) now") == 1
+
+
+def test_ingest_without_a_patch_does_not_read_the_registry(
+    tmp_path: Path, fake_backend: _FakeBackend
+) -> None:
+    result = _ingest(str(_pdf(tmp_path)))
+
+    assert result.exit_code == 0, result.output
+    assert fake_backend.list_keys_calls == 0
 
 
 def test_ingest_attr_bad_format_rejected(tmp_path: Path, fake_backend: _FakeBackend) -> None:
