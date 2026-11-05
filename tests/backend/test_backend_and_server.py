@@ -338,6 +338,9 @@ def test_server_needs_reembed_route(client) -> None:
     # An id that is not in the store is a 400 and leaves no sidecar row.
     r = client.put(f"/documents/{did}/needs-reembed", json={"value": True})
     assert r.status_code == 400
+    r = client.patch(f"/documents/{did}/metadata", json={"subsystem": "power"})
+    assert r.status_code == 400
+    assert client.put(f"/documents/{did}/title", json={"title": "X"}).status_code == 400
     assert client.get(f"/documents/{did}/metadata").status_code == 204
 
     payload = {"graph": _graph_with_figure(did).model_dump(mode="json"), "embed": False}

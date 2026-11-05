@@ -393,15 +393,15 @@ def build_app() -> FastAPI:
     def document_set_metadata(
         doc_id: str, patch: MetadataPatch, be: LocalBackend = Depends(get_backend)
     ) -> dict[str, Any]:
-        return be.set_metadata(doc_id, patch).model_dump(mode="json")
+        # Resolve first: a prefix or an unknown id must not create a sidecar row.
+        return be.set_metadata(be.resolve_doc_id(doc_id), patch).model_dump(mode="json")
 
     @app.put("/documents/{doc_id}/title", dependencies=ingest_dep)
     def document_set_title(
         doc_id: str, body: TitleBody, be: LocalBackend = Depends(get_backend)
     ) -> dict[str, Any]:
-        return {
-            "updated": be.set_doc_title(doc_id, body.title, source=body.source, force=body.force)
-        }
+        did = be.resolve_doc_id(doc_id)  # an unknown id must not create a sidecar row
+        return {"updated": be.set_doc_title(did, body.title, source=body.source, force=body.force)}
 
     @app.put("/documents/{doc_id}/needs-reembed", dependencies=ingest_dep)
     def document_set_needs_reembed(
