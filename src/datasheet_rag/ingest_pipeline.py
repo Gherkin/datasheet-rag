@@ -62,8 +62,8 @@ class ParseResult:
     doc_id: str
     resolved_backend: str
     #: What the Docling outline gave. ``None`` when no outline was read (a
-    #: cached chunk graph, or Textract, which has no hints), so the store
-    #: keeps the hints it has instead of clearing them.
+    #: cached chunk graph with no outline beside it, or Textract, which has no
+    #: hints), so the store keeps the hints it has instead of clearing them.
     title_hints: dict[str, str] | None = None
     figure_count: int = 0
 
@@ -266,10 +266,9 @@ def parse_pdf_to_graph(
             # the parse's hints. With no outline, None keeps the stored ones.
             if outline_path.exists():
                 with open(outline_path) as f:
-                    cached_outline = json.load(f)["outline"]
+                    cached_outline = DocumentOutline.from_dict(json.load(f)["outline"])
                 title_hints = _title_hints(
-                    cached_outline.get("running_header", ""),
-                    cached_outline.get("pdf_meta_title", ""),
+                    cached_outline.running_header, cached_outline.pdf_meta_title
                 )
         else:
             _step("Docling layout analysis")

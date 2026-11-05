@@ -69,6 +69,13 @@ def test_cached_chunk_graph_reads_hints_from_its_outline(pdf: Path) -> None:
     assert parsed.title_hints == {"running_header": "LM317"}
 
 
+def test_cached_chunk_graph_with_hintless_outline_reports_an_empty_dict(pdf: Path) -> None:
+    _write_chunk_cache()
+    _write_outline(DocumentOutline(doc_id=DID))
+    parsed = parse_pdf_to_graph(pdf, doc_id=DID, skip_figures=True)
+    assert parsed.title_hints == {}
+
+
 def test_outline_without_hints_reports_an_empty_dict(pdf: Path) -> None:
     _write_outline(DocumentOutline(doc_id=DID))
     parsed = parse_pdf_to_graph(pdf, doc_id=DID, skip_figures=True)
