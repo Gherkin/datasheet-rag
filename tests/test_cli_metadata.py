@@ -354,6 +354,30 @@ def test_project_config_does_not_undo_a_remove(
     assert _get_json(db_path, DOC_A)["projects"] == ["board-a"]
 
 
+def test_blank_project_config_project_is_ignored_on_a_write(
+    db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".rag.toml").write_text('project_id = " "\n')
+    monkeypatch.chdir(tmp_path)
+    get_project_config.cache_clear()
+    result = _meta(db_path, DOC_A, "--tag", "x")
+    assert result.exit_code == 0, result.output
+    assert _get_json(db_path, DOC_A)["projects"] == []
+
+
+def test_shared_project_skips_documents_missing_from_the_store(db_path: Path) -> None:
+    from types import SimpleNamespace
+
+    from datasheet_rag.backend import LocalBackend
+    from datasheet_rag.cli import _shared_project
+
+    _meta(db_path, DOC_A, "--add-project", "board-a", "--add-project", "board-b")
+    _meta(db_path, DOC_B, "--add-project", "board-b")
+    be = LocalBackend(conn=connect(db_path))
+    needs = [SimpleNamespace(doc_id=d) for d in (DOC_A, DOC_B, "not-in-store")]
+    assert _shared_project(be, needs) == "board-b"
+
+
 def test_list_scopes_to_every_project_a_document_is_in(db_path: Path) -> None:
     _meta(db_path, DOC_A, "--add-project", "board-a", "--add-project", "board-b")
     _meta(db_path, DOC_B, "--add-project", "board-b")

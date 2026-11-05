@@ -92,6 +92,24 @@ def test_v3_store_moves_projects_into_doc_projects(tmp_path: Path) -> None:
         c.close()
 
 
+def test_v4_migration_refuses_a_user_field_named_projects(tmp_path: Path) -> None:
+    path = tmp_path / "rag.sqlite"
+    _make_v3_store(path)
+    raw = sqlite3.connect(path)
+    raw.execute("INSERT INTO metadata_fields (name, shape) VALUES ('projects', 'list')")
+    raw.commit()
+    raw.close()
+
+    with pytest.raises(RuntimeError, match="'projects'"):
+        connect(path, embedding_dim=EMBED_DIM)
+
+    raw = sqlite3.connect(path)
+    try:
+        assert raw.execute("SELECT version FROM schema_version").fetchone()[0] == 3
+    finally:
+        raw.close()
+
+
 def test_failed_v4_migration_leaves_the_v3_store(tmp_path: Path) -> None:
     path = tmp_path / "rag.sqlite"
     _make_v3_store(path)

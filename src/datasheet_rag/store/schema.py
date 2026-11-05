@@ -202,6 +202,20 @@ def _migrate_to_v4(conn: sqlite3.Connection) -> None:
         if row is not None and int(row["version"]) >= 4:
             conn.commit()
             return
+        # "projects" becomes a built-in column name; a v3 user field by that
+        # name would be hidden behind it. Fail rather than guess a new name.
+        has_fields = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'metadata_fields'"
+        ).fetchone()
+        if (
+            has_fields
+            and conn.execute("SELECT 1 FROM metadata_fields WHERE name = 'projects'").fetchone()
+        ):
+            raise RuntimeError(
+                "cannot upgrade the store to v4: a registered field is named "
+                "'projects', which is now reserved. Remove that field "
+                "(`rag fields remove projects`) with the previous version first."
+            )
         ensure_projects_table(conn)
         for table, index in (
             ("chunks", "ix_chunks_project_id"),

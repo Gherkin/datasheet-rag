@@ -717,8 +717,9 @@ def get_ingested_docs(
         """
     params: list[Any] = []
     if project_id:
-        clause, params = project_scope_sql(project_id, doc_id_column="doc_id")
+        clause, clause_params = project_scope_sql(project_id, doc_id_column="doc_id")
         sql += f" WHERE {clause}"
+        params.extend(clause_params)
     sql += " GROUP BY doc_id ORDER BY doc_id"
     rows = conn.execute(sql, params).fetchall()
 

@@ -2245,7 +2245,7 @@ def describe_figures_cmd(
 
     \b
         rag repair figures --doc-id <doc>
-        rag repair embeddings <doc> --project-id <p>
+        rag repair embeddings <doc>
     """
     be = _backend_for(db_path)
     if doc_id:
@@ -3873,8 +3873,10 @@ def metadata_cmd(
     # no project change: `--remove-project <toml project>` must not be undone.
     proj_cfg = get_project_config()
     if proj_cfg is not None:
-        if proj_cfg.project_id and not (add_projects or remove_projects):
-            add_projects = (proj_cfg.project_id,)
+        # A blank project_id means no project, as it does for ingest.
+        toml_project = (proj_cfg.project_id or "").strip()
+        if toml_project and not (add_projects or remove_projects):
+            add_projects = (toml_project,)
         group_name = proj_cfg.group if group_name is None else group_name
         subsystem = proj_cfg.subsystem if subsystem is None else subsystem
         if not tags and proj_cfg.tags:
@@ -4824,14 +4826,17 @@ def eval_answer(
         console.print(f"[green]Report JSON →[/] {json_out}")
 
 
-def _shared_project(project_lists: list[list[str]]) -> str:
+def _shared_project(backend: Any, needs: list[Any]) -> str:
     """The one project every needed document belongs to.
 
     A document can be in several projects (GH #121), so this is the
     intersection of their projects. It must hold exactly one project, or the
-    eval cannot tell which project's catalogue to hand the agent.
+    eval cannot tell which project's catalogue to hand the agent. A needed
+    document missing from the store is skipped.
     """
-    shared = set(project_lists[0]) if project_lists else set()
+    found = (backend.get_document(i) for i in sorted({n.doc_id for n in needs if n.doc_id}))
+    project_lists: list[list[str]] = [d.projects for d in found if d is not None]
+    shared: set[str] = set(project_lists[0]) if project_lists else set()
     for projects in project_lists[1:]:
         shared &= set(projects)
     if len(shared) != 1:
@@ -4922,14 +4927,11 @@ def _run_answer_eval(
 
     db = _require_local_db(db_path)
     conn = connect(db)
-    from datasheet_rag.store.projects import get_projects_for_docs
-
-    doc_ids = sorted({n.doc_id for n in needs if n.doc_id})
-    by_doc = get_projects_for_docs(conn, doc_ids)
-    project = _shared_project([by_doc.get(i, []) for i in doc_ids])
+    local = LocalBackend(conn=conn)
+    project = _shared_project(local, needs)
     from datasheet_rag.store.fields import display_value
 
-    listing = LocalBackend(conn=conn).list_documents(project_id=project).documents
+    listing = local.list_documents(project_id=project).documents
     docs = [
         {
             "doc_id": d.doc_id,
@@ -5212,8 +5214,7 @@ def eval_claude_code(
         from datasheet_rag.backend import get_backend
 
         backend = get_backend()
-        found = (backend.get_document(i) for i in sorted({n.doc_id for n in needs if n.doc_id}))
-        project = _shared_project([d.projects for d in found if d is not None])
+        project = _shared_project(backend, needs)
         from datasheet_rag.store.fields import display_value
 
         listing = backend.list_documents(project_id=project).documents

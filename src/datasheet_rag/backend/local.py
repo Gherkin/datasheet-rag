@@ -658,6 +658,18 @@ class LocalBackend(RagBackend):
             # written, not after the whole ingest has run (GH #120).
             if metadata is not None:
                 check_patch(conn, fields=metadata.fields)
+            # Build the sidecar patch now: a project both added and removed
+            # raises here, before any chunk is written. Ingest only ever adds
+            # a project (GH #121): a document already in others stays in them.
+            patch = (metadata or MetadataPatch()).model_copy(deep=True)
+            patch.add_project(project_id)
+            if group_name is not None:
+                patch.group_name = patch.group_name or group_name
+            # Join the projects before the chunks land, so a failure later
+            # (a stopped figure describe) never leaves a new document stored
+            # outside its project.
+            if patch.add_projects:
+                set_metadata(conn, did, add_projects=patch.add_projects)
             described = 0
             # The provisional insert below prunes too, so the final insert
             # finds nothing left to drop — count both or the describe path
@@ -684,7 +696,6 @@ class LocalBackend(RagBackend):
                     group_name=group_name,
                 ).pruned
                 conn.commit()
-                # By doc_id alone: a new document joins its project in step 4.
                 descriptions = describe_figures_in_store(
                     conn,
                     doc_id=did,
@@ -722,12 +733,7 @@ class LocalBackend(RagBackend):
             pruned += stats.pruned
             conn.commit()
 
-            # 4. Metadata sidecar. Ingest only ever adds a project (GH #121):
-            #    a document already in other projects stays in them.
-            patch = (metadata or MetadataPatch()).model_copy(deep=True)
-            patch.add_project(project_id)
-            if group_name is not None:
-                patch.group_name = patch.group_name or group_name
+            # 4. Metadata sidecar (the patch built above).
             if not patch.is_empty():
                 set_metadata(conn, did, **patch.kwargs())
                 apply_metadata_to_chunks(conn, did)
