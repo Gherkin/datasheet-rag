@@ -483,7 +483,8 @@ def write_field_values(
     """
     check_patch_project(scopes, patch, project)
     for field, values in patch.items():
-        if scopes.get(field) == "project" and project is not None:
+        if scopes.get(field) == "project":
+            assert project is not None  # check_patch_project raised otherwise
             _write_project_values(conn, doc_id, project, field, values)
         else:
             _write_values(conn, doc_id, field, values)

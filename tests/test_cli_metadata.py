@@ -457,6 +457,21 @@ def test_project_config_subsystem_does_not_block_leaving_its_project(
     assert meta["projects"] == [] and meta["project_fields"] == {}
 
 
+def test_project_config_checks_compare_stripped_project_names(
+    db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".rag.toml").write_text(_BOARD_A_TOML)
+    monkeypatch.chdir(tmp_path)
+    # The store strips project names; the .rag.toml checks must too.
+    result = _meta(db_path, DOC_A, "--project", " board-a ", "--tag", "x")
+    assert result.exit_code == 0, result.output
+    assert _get_json(db_path, DOC_A)["project_fields"] == {"board-a": {"subsystem": "power"}}
+    result = _meta(db_path, DOC_A, "--remove-project", "board-a ")
+    assert result.exit_code == 0, result.output
+    meta = _get_json(db_path, DOC_A)
+    assert meta["projects"] == [] and meta["project_fields"] == {}
+
+
 def test_project_config_subsystem_is_not_dropped_silently(
     db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -487,6 +502,10 @@ def test_clearing_a_subsystem_outside_the_project_prints_a_note(db_path: Path) -
     assert result.exit_code == 0, result.output
     output = " ".join(result.output.split())  # Rich wraps the note
     assert "not in project 'gone'" in output and "nothing was cleared" in output
+    # A blank value is a clear too.
+    result = _meta(db_path, DOC_A, "--project", "gone", "--field", "subsystem= ")
+    assert result.exit_code == 0, result.output
+    assert "nothing was cleared" in " ".join(result.output.split())
     # In a project the document is in, no note.
     result = _meta(db_path, DOC_A, "--project", "board-a", "--unset-field", "subsystem")
     assert result.exit_code == 0, result.output

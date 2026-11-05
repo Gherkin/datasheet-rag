@@ -2986,7 +2986,8 @@ def _ingest_one(
             proj_cfg,
             fields,
             scopes=scopes_of(field_registry.specs()) if field_registry is not None else None,
-            in_config_project=proj_cfg.project_id in (None, project_id),
+            in_config_project=proj_cfg.project_id
+            in (None, project_id.strip() if project_id else None),
         )
     if field_registry is not None and fields:
         _check_field_patch(field_registry.specs(), fields, project=project_id)
@@ -3944,6 +3945,18 @@ def metadata_cmd(
     # .rag.toml fills only what the user did not pass; an explicit blank
     # beats a config default. Its project is added only when the user named
     # no project change: `--remove-project <toml project>` must not be undone.
+    # Strip the project names as the store does, so the .rag.toml checks
+    # below compare the same names the store will write.
+    from datasheet_rag.store.projects import normalize_projects
+
+    try:
+        add_projects = tuple(normalize_projects(add_projects))
+        remove_projects = tuple(normalize_projects(remove_projects))
+    except ValueError as e:
+        raise click.ClickException(str(e)) from e
+    if fields_project is not None:
+        fields_project = fields_project.strip()
+
     proj_cfg = get_project_config()
     if proj_cfg is not None:
         if proj_cfg.project_id and not (add_projects or remove_projects):
@@ -4044,7 +4057,14 @@ def _note_clears_outside_project(
     document is not in: the store does nothing then, and the user may have
     meant another project. Leaving that project in the same call is not
     worth a note; its values go with the membership."""
-    cleared = [n for n, v in fields.items() if v is None or v == "" or v == []]
+    # A blank or all-blank value is a clear in the store too (_coerce).
+    cleared = [
+        n
+        for n, v in fields.items()
+        if v is None
+        or (isinstance(v, str) and not v.strip())
+        or (isinstance(v, list) and not any(isinstance(x, str) and x.strip() for x in v))
+    ]
     project = project.strip() if project else None
     if not cleared or project is None or project in meta.projects or project in remove_projects:
         return

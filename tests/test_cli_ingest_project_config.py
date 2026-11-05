@@ -87,6 +87,11 @@ def test_ingest_keeps_config_subsystem_in_the_config_project(
     assert fake_backend.calls[1]["project_id"] == "board-b"
     assert fake_backend.calls[1]["metadata"].fields == {"manufacturer": "TI"}
 
+    # A padded --project-id is still board-a: the subsystem stays.
+    result = _ingest(str(pdf), "--project-id", "board-a ")
+    assert result.exit_code == 0, result.output
+    assert fake_backend.calls[2]["metadata"].fields == {"subsystem": "power", "manufacturer": "TI"}
+
 
 def test_ingest_without_fields_sends_none(tmp_path: Path, fake_backend: _FakeBackend) -> None:
     pdf = _pdf(tmp_path)
