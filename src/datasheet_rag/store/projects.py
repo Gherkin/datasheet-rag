@@ -11,7 +11,8 @@ is the scoping mechanism behind ``/mcp/<project>``, ``.rag.toml`` and the
 default project.
 
 Writes go through ``store.metadata.set_metadata`` (``add_projects`` /
-``remove_projects``), which also keeps the document's ``doc_metadata`` row.
+``remove_projects``) or, for ingest, ``store.metadata.join_projects``. Both
+also keep the document's ``doc_metadata`` row.
 """
 
 from __future__ import annotations

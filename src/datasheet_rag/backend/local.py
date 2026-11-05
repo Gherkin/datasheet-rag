@@ -73,8 +73,13 @@ from datasheet_rag.store import (
     vector_search,
 )
 from datasheet_rag.store.fields import FieldShape, check_filter_fields
-from datasheet_rag.store.metadata import check_patch, set_needs_reembed, set_title_hints
-from datasheet_rag.store.projects import change_projects, project_scope_sql
+from datasheet_rag.store.metadata import (
+    check_patch,
+    join_projects,
+    set_needs_reembed,
+    set_title_hints,
+)
+from datasheet_rag.store.projects import project_scope_sql
 
 if TYPE_CHECKING:
     from datasheet_rag.ingest_pipeline import ProgressCallback
@@ -689,7 +694,7 @@ class LocalBackend(RagBackend):
                 vectors_tmp = (
                     embed_chunk_graph(graph, embedder=self._get_embedder()) if embed else vectors
                 )
-                change_projects(conn, did, add=join)
+                join_projects(conn, did, join)
                 pruned += insert_chunk_graph(
                     conn,
                     graph,
@@ -725,7 +730,7 @@ class LocalBackend(RagBackend):
             # graph does not carry (descriptions, a curated title, a relinked
             # figure path) for every id that survives, which is why this is not
             # a delete-then-insert.
-            change_projects(conn, did, add=join)
+            join_projects(conn, did, join)
             stats = insert_chunk_graph(
                 conn,
                 graph,

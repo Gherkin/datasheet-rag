@@ -157,6 +157,9 @@ def test_ingest_joins_the_project_with_the_chunks(
             _plain_graph(did), project_id="p1", embed=False, describe_figures=True
         )
     assert _doc_projects(backend, did) == ["p1"]
+    md = backend.get_metadata(did)
+    assert md is not None and md.projects == ["p1"]
+    assert [d.doc_id for d in backend.list_docs(project_id="p1")] == [did]
 
 
 def test_failed_ingest_before_any_chunk_leaves_no_project_row(

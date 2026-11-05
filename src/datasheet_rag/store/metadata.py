@@ -316,6 +316,20 @@ def set_metadata(
     return refreshed
 
 
+def join_projects(conn: sqlite3.Connection, doc_id: str, projects: list[str]) -> None:
+    """Add ``doc_id`` to ``projects`` and make sure it has a sidecar row. Does not commit.
+
+    Ingest calls this inside the chunk-insert transaction, so the projects
+    commit with the chunks. The sidecar row is what document listings read;
+    without it a document would be searchable in a project but not listed
+    in it. ``projects`` are normalised already (``MetadataPatch``).
+    """
+    if not projects:
+        return
+    conn.execute("INSERT OR IGNORE INTO doc_metadata (doc_id) VALUES (?)", (doc_id,))
+    change_projects(conn, doc_id, add=projects)
+
+
 def delete_metadata(conn: sqlite3.Connection, doc_id: str) -> int:
     """Delete the sidecar row for ``doc_id``, if any, its field values and
     its project memberships.
