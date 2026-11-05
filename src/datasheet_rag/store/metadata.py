@@ -1,8 +1,13 @@
 """Document-level metadata sidecar.
 
-Sits next to ``chunks`` and stores per-document fields (project, MPN,
-manufacturer, …) that are independent of any single chunk. Two
-properties of this sidecar matter:
+Sits next to ``chunks`` and stores per-document fields (project, group,
+tags, and the values of registered fields such as MPN and manufacturer —
+see ``store.fields``) that are independent of any single chunk. It also
+holds the pipeline's own bookkeeping for each document: title provenance,
+the ingest-time title hints and the re-embed marker. Those are typed
+columns the pipeline writes; a metadata patch cannot set them.
+
+Two properties of this sidecar matter:
 
 * It can be written **before** ingestion completes — useful for the CLI
   to register a PDF up front so chunks land with the right
@@ -16,9 +21,21 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Mapping
 from typing import Any, Literal, get_args
 
 from pydantic import BaseModel, Field
+
+from datasheet_rag.store.fields import (
+    FieldShape,
+    check_filter_fields,
+    delete_doc_values,
+    field_filter_sql,
+    field_shapes,
+    get_values_for_docs,
+    normalize_field_patch_for,
+    write_field_values,
+)
 
 
 class DocMetadata(BaseModel):
@@ -27,24 +44,20 @@ class DocMetadata(BaseModel):
     doc_id: str
     project_id: str | None = None
     group_name: str | None = None
-    mpn: str | None = None
-    manufacturer: str | None = None
     subsystem: str | None = None
-    doc_type: str | None = None
     tags: list[str] = Field(default_factory=list)
-    attributes: dict[str, Any] = Field(default_factory=dict)
+    #: Values of registered fields (``store.fields``), including the built-in
+    #: ``mpn`` (a list), ``manufacturer`` and ``doc_type``. A field with no
+    #: value on this document is absent.
+    fields: dict[str, str | list[str]] = Field(default_factory=dict)
+    #: Pipeline bookkeeping, read-only through the metadata API: where the
+    #: title came from (see below), whether `rag repair` marked the document
+    #: for re-embedding, and the two title hints captured at ingest.
+    title_source: str = "auto"
+    needs_reembed: bool = False
+    pdf_meta_title: str | None = None
+    running_header: str | None = None
     updated_at: str | None = None
-
-
-#: ``attributes`` keys the pipeline writes itself: title provenance
-#: (``title_source``/``title_inferred``, below), the ingest-time title hints
-#: (``running_header``/``pdf_meta_title``, ``ingest_pipeline``) and the
-#: re-embed marker (``needs_reembed``, ``rag repair``). A ``.rag.toml`` may not
-#: set them — a directory default would either be overwritten at ingest or
-#: mislabel every document under it.
-RESERVED_ATTRIBUTES = frozenset(
-    {"title_source", "title_inferred", "running_header", "pdf_meta_title", "needs_reembed"}
-)
 
 
 # ---------------------------------------------------------------------------
@@ -95,61 +108,88 @@ def validate_title_source(source: str) -> None:
         raise ValueError(f"unknown title source {source!r} (expected one of {TITLE_SOURCES})")
 
 
-def title_source_of(attributes: dict[str, Any]) -> str:
-    """Read title provenance out of a sidecar ``attributes`` dict.
-
-    Defaults to ``"auto"`` when nothing is recorded — an unmarked title is
-    one the parser produced, which is exactly the weakest case.
-
-    Older stores recorded provenance as a boolean ``title_inferred: true``
-    instead. That is read as ``"inferred"`` here, and rewritten into
-    ``title_source`` the next time the document's title is set, so no
-    separate migration step is needed.
-
-    Split out from :func:`get_title_source` so callers holding metadata
-    they already fetched — notably the CLI talking to a remote backend, which
-    has no connection to query — can classify it without a second round trip.
-    """
-    source = attributes.get("title_source")
-    if isinstance(source, str) and source in _TITLE_RANK:
-        return source
-
-    if attributes.get("title_inferred"):
-        return "inferred"
-    return "auto"
-
-
 def get_title_source(conn: sqlite3.Connection, doc_id: str) -> str:
-    """Return the recorded provenance of ``doc_id``'s title."""
-    md = get_metadata(conn, doc_id)
-    return title_source_of(md.attributes if md is not None else {})
+    """Return the recorded provenance of ``doc_id``'s title (``auto`` if none)."""
+    row = conn.execute(
+        "SELECT title_source FROM doc_metadata WHERE doc_id = ?", (doc_id,)
+    ).fetchone()
+    return (row["title_source"] if row is not None else None) or "auto"
 
 
-def set_title_source(conn: sqlite3.Connection, doc_id: str, source: str) -> None:
-    """Record ``doc_id``'s title provenance, retiring the legacy boolean."""
-    validate_title_source(source)
-    set_metadata(
-        conn,
-        doc_id,
-        attributes={"title_source": source, "title_inferred": None},
+def _set_bookkeeping(conn: sqlite3.Connection, doc_id: str, **columns: object) -> None:
+    """Upsert pipeline bookkeeping columns for ``doc_id``. Does not commit.
+
+    ``columns`` names come from this module only, never from user input.
+    """
+    names = list(columns)
+    conn.execute(
+        f"INSERT INTO doc_metadata (doc_id, {', '.join(names)}, updated_at) "
+        f"VALUES (?, {', '.join('?' * len(names))}, CURRENT_TIMESTAMP) "
+        "ON CONFLICT(doc_id) DO UPDATE SET "
+        + ", ".join(f"{n} = excluded.{n}" for n in names)
+        + ", updated_at = CURRENT_TIMESTAMP",
+        (doc_id, *columns.values()),
     )
 
 
-def _row_to_metadata(row: sqlite3.Row) -> DocMetadata:
+def set_title_source(conn: sqlite3.Connection, doc_id: str, source: str) -> None:
+    """Record ``doc_id``'s title provenance."""
+    validate_title_source(source)
+    _set_bookkeeping(conn, doc_id, title_source=source)
+    conn.commit()
+
+
+def set_title_hints(
+    conn: sqlite3.Connection,
+    doc_id: str,
+    *,
+    pdf_meta_title: str | None,
+    running_header: str | None,
+) -> None:
+    """Record the ingest-time title hints, replacing both (``None`` clears one).
+
+    With neither hint this only clears an existing row's hints; it does not
+    create a sidecar row for a document that has none.
+    """
+    if not pdf_meta_title and not running_header:
+        conn.execute(
+            "UPDATE doc_metadata SET pdf_meta_title = NULL, running_header = NULL, "
+            "updated_at = CURRENT_TIMESTAMP "
+            "WHERE doc_id = ? AND (pdf_meta_title IS NOT NULL OR running_header IS NOT NULL)",
+            (doc_id,),
+        )
+    else:
+        _set_bookkeeping(
+            conn,
+            doc_id,
+            pdf_meta_title=pdf_meta_title or None,
+            running_header=running_header or None,
+        )
+    conn.commit()
+
+
+def set_needs_reembed(conn: sqlite3.Connection, doc_id: str, value: bool) -> None:
+    """Mark (or unmark) ``doc_id`` as needing its chunks re-embedded."""
+    _set_bookkeeping(conn, doc_id, needs_reembed=1 if value else None)
+    conn.commit()
+
+
+def _row_to_metadata(
+    row: sqlite3.Row, fields: dict[str, str | list[str]] | None = None
+) -> DocMetadata:
     tags_raw = row["tags"]
-    attrs_raw = row["attributes"]
     tags = json.loads(tags_raw) if tags_raw else []
-    attributes = json.loads(attrs_raw) if attrs_raw else {}
     return DocMetadata(
         doc_id=row["doc_id"],
         project_id=row["project_id"],
         group_name=row["group_name"],
-        mpn=row["mpn"],
-        manufacturer=row["manufacturer"],
         subsystem=row["subsystem"],
-        doc_type=row["doc_type"],
         tags=tags,
-        attributes=attributes,
+        fields=dict(fields or {}),
+        title_source=row["title_source"] or "auto",
+        needs_reembed=bool(row["needs_reembed"]),
+        pdf_meta_title=row["pdf_meta_title"],
+        running_header=row["running_header"],
         updated_at=row["updated_at"],
     )
 
@@ -162,7 +202,30 @@ def get_metadata(conn: sqlite3.Connection, doc_id: str) -> DocMetadata | None:
     ).fetchone()
     if row is None:
         return None
-    return _row_to_metadata(row)
+    values = get_values_for_docs(conn, [doc_id])
+    return _row_to_metadata(row, values.get(doc_id))
+
+
+def check_patch(
+    conn: sqlite3.Connection, *, fields: Mapping[str, Any] | None = None
+) -> dict[str, list[str]]:
+    """Validate the ``fields`` of a metadata write.
+
+    Returns the normalised field patch (see
+    ``store.fields.normalize_field_patch``). Raises :class:`MetadataFieldError`
+    for an unregistered field or a value that does not fit its field's shape.
+    Writes nothing, so a caller can check a patch before work it would be a
+    waste to throw away (ingest does).
+    """
+    return check_patch_for(field_shapes(conn), fields=fields)
+
+
+def check_patch_for(
+    shapes: Mapping[str, FieldShape], *, fields: Mapping[str, Any] | None = None
+) -> dict[str, list[str]]:
+    """:func:`check_patch` against a registry already read (``{name: shape}``),
+    so a client can reject a bad patch before parsing a PDF."""
+    return normalize_field_patch_for(shapes, fields or {})
 
 
 def set_metadata(
@@ -171,101 +234,63 @@ def set_metadata(
     *,
     project_id: str | None = None,
     group_name: str | None = None,
-    mpn: str | None = None,
-    manufacturer: str | None = None,
     subsystem: str | None = None,
-    doc_type: str | None = None,
     tags: list[str] | None = None,
-    attributes: dict[str, Any] | None = None,
+    fields: Mapping[str, Any] | None = None,
 ) -> DocMetadata:
     """Upsert metadata for ``doc_id`` with **partial** merge semantics.
 
     A parameter left as ``None`` (its default) means "leave the existing
     value alone". To clear a string field, pass an empty string; to
-    clear ``tags`` pass ``[]``; to drop an attribute pass an empty dict
-    (note: ``attributes`` is **deep-merged** key-by-key, so passing
-    ``{}`` keeps everything — see below).
+    clear ``tags`` pass ``[]``.
 
     Merge rules
     -----------
     * Scalar fields: overwrite with the new value when not ``None``.
     * ``tags``: replace wholesale (not merged).
-    * ``attributes``: shallow key-merge — new keys are added, existing
-      keys are overwritten, omitted keys are preserved. To remove a
-      single key set it to ``None`` and the merge will drop it.
+    * ``fields``: per field — a field named in the patch has its value
+      replaced; ``None``, ``""`` or ``[]`` removes it; fields not named are
+      left alone. Every field must be registered (``store.fields``) and its
+      value must fit the field's shape, or :class:`MetadataFieldError` is
+      raised before anything is written.
 
     Returns the resulting :class:`DocMetadata` after the upsert.
     """
+    field_patch = check_patch(conn, fields=fields)
+
     existing = get_metadata(conn, doc_id)
-
     if existing is None:
-        merged = DocMetadata(
-            doc_id=doc_id,
-            project_id=project_id,
-            group_name=group_name,
-            mpn=mpn,
-            manufacturer=manufacturer,
-            subsystem=subsystem,
-            doc_type=doc_type,
-            tags=list(tags) if tags is not None else [],
-            # A None value means "drop this key" (see the merge branch
-            # below). There is nothing to drop on a brand-new row, but the
-            # key must not be stored as a null either.
-            attributes={k: v for k, v in (attributes or {}).items() if v is not None},
-        )
-    else:
-        merged_attrs = dict(existing.attributes)
-        if attributes is not None:
-            for k, v in attributes.items():
-                if v is None:
-                    merged_attrs.pop(k, None)
-                else:
-                    merged_attrs[k] = v
-
-        merged = existing.model_copy(
-            update={
-                "project_id": project_id if project_id is not None else existing.project_id,
-                "group_name": group_name if group_name is not None else existing.group_name,
-                "mpn": mpn if mpn is not None else existing.mpn,
-                "manufacturer": (
-                    manufacturer if manufacturer is not None else existing.manufacturer
-                ),
-                "subsystem": subsystem if subsystem is not None else existing.subsystem,
-                "doc_type": doc_type if doc_type is not None else existing.doc_type,
-                "tags": list(tags) if tags is not None else existing.tags,
-                "attributes": merged_attrs,
-            }
-        )
+        existing = DocMetadata(doc_id=doc_id)
+    merged = existing.model_copy(
+        update={
+            "project_id": project_id if project_id is not None else existing.project_id,
+            "group_name": group_name if group_name is not None else existing.group_name,
+            "subsystem": subsystem if subsystem is not None else existing.subsystem,
+            "tags": list(tags) if tags is not None else existing.tags,
+        }
+    )
 
     conn.execute(
         """
         INSERT INTO doc_metadata (
-            doc_id, project_id, group_name, mpn, manufacturer,
-            subsystem, doc_type, tags, attributes, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            doc_id, project_id, group_name, subsystem, tags, updated_at
+        ) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(doc_id) DO UPDATE SET
             project_id   = excluded.project_id,
             group_name   = excluded.group_name,
-            mpn          = excluded.mpn,
-            manufacturer = excluded.manufacturer,
             subsystem    = excluded.subsystem,
-            doc_type     = excluded.doc_type,
             tags         = excluded.tags,
-            attributes   = excluded.attributes,
             updated_at   = CURRENT_TIMESTAMP
         """,
         (
             merged.doc_id,
             merged.project_id,
             merged.group_name,
-            merged.mpn,
-            merged.manufacturer,
             merged.subsystem,
-            merged.doc_type,
             json.dumps(merged.tags),
-            json.dumps(merged.attributes),
         ),
     )
+    write_field_values(conn, doc_id, field_patch)
     conn.commit()
 
     # Re-read so updated_at reflects the DB clock.
@@ -275,17 +300,18 @@ def set_metadata(
 
 
 def delete_metadata(conn: sqlite3.Connection, doc_id: str) -> int:
-    """Delete the sidecar row for ``doc_id``, if any.
+    """Delete the sidecar row for ``doc_id``, if any, and its field values.
 
     Not covered by the ``chunks`` cascade (`doc_metadata` is intentionally
     not FK'd to `chunks` — see module docstring), so callers that fully
     delete a document must call this alongside :func:`datasheet_rag.store.sqlite.delete_doc`.
 
-    Returns the number of rows deleted (0 or 1).
+    Returns the number of sidecar rows deleted (0 or 1).
     """
     cur = conn.cursor()
     cur.execute("DELETE FROM doc_metadata WHERE doc_id = ?", (doc_id,))
     deleted = cur.rowcount
+    delete_doc_values(conn, doc_id)
     conn.commit()
     return int(deleted)
 
@@ -295,9 +321,15 @@ def list_docs(
     *,
     project_id: str | None = None,
     group_name: str | None = None,
-    mpn: str | None = None,
+    fields: dict[str, str] | None = None,
 ) -> list[DocMetadata]:
-    """Return all sidecar rows matching the optional filters."""
+    """Return all sidecar rows matching the optional filters.
+
+    ``fields`` filters on registered fields, AND-ed: ``{"mpn": "INA226"}``
+    keeps documents whose mpn list contains INA226 (case-insensitive). Naming
+    an unregistered field raises :class:`MetadataFieldError` rather than
+    silently matching nothing.
+    """
     clauses: list[str] = []
     params: list[object] = []
     if project_id is not None:
@@ -306,17 +338,20 @@ def list_docs(
     if group_name is not None:
         clauses.append("group_name = ?")
         params.append(group_name)
-    if mpn is not None:
-        # mpn column may hold comma-separated aliases; match any token
-        clauses.append("(mpn = ? OR mpn LIKE ? OR mpn LIKE ? OR mpn LIKE ?)")
-        params.extend([mpn, f"{mpn},%", f"%,{mpn},%", f"%,{mpn}"])
+    if fields:
+        check_filter_fields(field_shapes(conn), fields)
+        field_clauses, field_params = field_filter_sql(fields, doc_id_column="doc_id")
+        clauses.extend(field_clauses)
+        params.extend(field_params)
 
     where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
     rows = conn.execute(
         f"SELECT * FROM doc_metadata{where} ORDER BY doc_id",
         params,
     ).fetchall()
-    return [_row_to_metadata(r) for r in rows]
+    # Unfiltered: read every value rather than binding one parameter per row.
+    values = get_values_for_docs(conn, [r["doc_id"] for r in rows] if clauses else None)
+    return [_row_to_metadata(r, values.get(r["doc_id"])) for r in rows]
 
 
 def apply_metadata_to_chunks(conn: sqlite3.Connection, doc_id: str) -> int:

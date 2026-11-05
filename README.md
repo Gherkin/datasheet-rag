@@ -348,27 +348,42 @@ This way you dont have to specify all metadata at runtime, and it is transferrab
 The format for `rag.toml` is as follows:
 ```
 project_id   = "stm32-h7-devboard"
-manufacturer = "STMicroelectronics"
 group        = "psu"
 subsystem    = "power"
-mpn          = "STM32H743VIT6"
-doc_type     = "reference-manual"
 tags         = ["pinout", "power-tree", "reference-manual"]
 
-[attributes]
-revision     = "B"
-reviewed_by  = "hector"
+[fields]
+mpn          = ["STM32H743VIT6", "STM32H743ZIT6"]   # or a single string
+manufacturer = "STMicroelectronics"
+doc_type     = "reference-manual"
+acme-id      = "D-0172"          # a field registered with `rag fields add`
 ```
 
-`tags` are combined across every `.rag.toml` on the path. `[attributes]` are merged key by key, and the file closest to the pdf wins for a given key. `--attr key=value` on the command line wins over both.
+`tags` are combined across every `.rag.toml` on the path. `[fields]` are merged name by name, and the file closest to the pdf wins for a given name. `--field name=value` (and the `--mpn`, `--manufacturer` and `--doc-type` shortcuts) on the command line win over both.
 
 The schema is closed. Any of the following makes the command fail with an error that names the file:
-- a key that is not listed above (arbitrary keys go under `[attributes]`)
-- a value of the wrong type — every value is a string, `tags` is a list of strings, and attribute values must be quoted strings
-- an attribute the pipeline sets itself: `title_source`, `title_inferred`, `running_header`, `pdf_meta_title`, `needs_reembed`
+- a key that is not listed above (any other value goes under `[fields]`)
+- a value of the wrong type: `project_id`, `group` and `subsystem` are strings, `tags` is a list of strings, and a `[fields]` value is a string or, for a list field such as `mpn`, a list of strings
 - a file that is not valid TOML
 
 A bad file inside a directory given to `rag ingest ./datasheets` fails only the pdfs below it; the rest are still ingested.
+
+Whether a `[fields]` name is registered is checked when the values are written, not when the file is read. An unregistered name fails the write.
+
+### Metadata fields
+
+A field is a named, typed piece of document metadata. A field must be registered before any document can hold a value for it. You can filter on it with `rag list --field`, and agents can filter on it in the MCP `search` and `list_documents` tools. Three fields are built in: `mpn` (a list), `manufacturer` and `doc_type`. Register your own for things the built-ins don't cover, such as an internal document number, a vendor's document number or an internal part number:
+
+```
+rag fields add acme-id --description "ACME document number"
+rag fields add intel-id --description "Intel document number"
+rag fields add acme-pn --shape list --role part
+rag fields list
+```
+
+Set the values with `rag metadata <doc> --field acme-id=D-0172`. Repeat `--field` for a list field; `--mpn` is repeatable the same way. Remove a value with `--unset-field acme-id`. Filtering matches whole values and ignores case, and a list field matches if any of its values is equal. `rag list --columns mpn,acme-id` shows a column per field. The MCP tool `list_metadata_fields` tells an agent which fields exist.
+
+`rag fields remove <name>` refuses while any document has a value for the field. `rag fields remove <name> --clear` deletes those values with the field. Built-in fields cannot be removed.
 
 ## Usage
 

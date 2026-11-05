@@ -54,6 +54,8 @@ from datasheet_rag.store import (
     revoke_api_key,
     stored_embedding_dim,
 )
+from datasheet_rag.store.fields import FieldShape, shapes_of
+from datasheet_rag.store.metadata import check_patch_for
 
 if TYPE_CHECKING:
     # Runtime import stays inside the ingest endpoint: pulling the pipeline in
@@ -106,6 +108,30 @@ class TitleBody(BaseModel):
     title: str
     source: TitleSource = "manual"
     force: bool = False
+
+
+class RegisterFieldBody(BaseModel):
+    name: str
+    shape: FieldShape = "single"
+    description: str = ""
+    roles: list[str] = Field(default_factory=list)
+
+
+class NeedsReembedBody(BaseModel):
+    value: bool
+
+
+def _parse_field_params(raw: list[str] | None) -> dict[str, str] | None:
+    """Decode repeated ``field=name:value`` query params into a filter dict."""
+    if not raw:
+        return None
+    out: dict[str, str] = {}
+    for item in raw:
+        name, sep, value = item.partition(":")
+        if not sep or not name:
+            raise ValueError(f"field filter {item!r} must be name:value")
+        out[name] = value
+    return out
 
 
 class FigureDescriptionBody(BaseModel):
@@ -367,15 +393,23 @@ def build_app() -> FastAPI:
     def document_set_metadata(
         doc_id: str, patch: MetadataPatch, be: LocalBackend = Depends(get_backend)
     ) -> dict[str, Any]:
-        return be.set_metadata(doc_id, patch).model_dump(mode="json")
+        # Resolve first: a prefix or an unknown id must not create a sidecar row.
+        return be.set_metadata(be.resolve_doc_id(doc_id), patch).model_dump(mode="json")
 
     @app.put("/documents/{doc_id}/title", dependencies=ingest_dep)
     def document_set_title(
         doc_id: str, body: TitleBody, be: LocalBackend = Depends(get_backend)
     ) -> dict[str, Any]:
-        return {
-            "updated": be.set_doc_title(doc_id, body.title, source=body.source, force=body.force)
-        }
+        did = be.resolve_doc_id(doc_id)  # an unknown id must not create a sidecar row
+        return {"updated": be.set_doc_title(did, body.title, source=body.source, force=body.force)}
+
+    @app.put("/documents/{doc_id}/needs-reembed", dependencies=ingest_dep)
+    def document_set_needs_reembed(
+        doc_id: str, body: NeedsReembedBody, be: LocalBackend = Depends(get_backend)
+    ) -> dict[str, Any]:
+        # Resolve first: a prefix or an unknown id must not create a sidecar row.
+        be.set_needs_reembed(be.resolve_doc_id(doc_id), body.value)
+        return {"needs_reembed": body.value}
 
     @app.post("/documents/{doc_id}/apply-metadata", dependencies=ingest_dep)
     def document_apply_metadata(
@@ -413,8 +447,7 @@ def build_app() -> FastAPI:
     def documents(
         project_id: str | None = None,
         group_name: str | None = None,
-        mpn: str | None = None,
-        manufacturer: str | None = None,
+        field: list[str] | None = Query(None),
         limit: int | None = Query(None, ge=1),
         offset: int = Query(0, ge=0),
         be: LocalBackend = Depends(get_backend),
@@ -422,8 +455,7 @@ def build_app() -> FastAPI:
         page = be.list_documents(
             project_id=project_id,
             group_name=group_name,
-            mpn=mpn,
-            manufacturer=manufacturer,
+            fields=_parse_field_params(field),
             limit=limit,
             offset=offset,
         )
@@ -437,11 +469,33 @@ def build_app() -> FastAPI:
     def metadata(
         project_id: str | None = None,
         group_name: str | None = None,
-        mpn: str | None = None,
+        field: list[str] | None = Query(None),
         be: LocalBackend = Depends(get_backend),
     ) -> dict[str, Any]:
-        docs = be.list_docs(project_id=project_id, group_name=group_name, mpn=mpn)
+        docs = be.list_docs(
+            project_id=project_id, group_name=group_name, fields=_parse_field_params(field)
+        )
         return {"documents": [d.model_dump(mode="json") for d in docs]}
+
+    # -- metadata fields (GH #120) ----------------------------------------
+    @app.get("/metadata/fields", dependencies=dep)
+    def metadata_fields(be: LocalBackend = Depends(get_backend)) -> dict[str, Any]:
+        return {"fields": [f.model_dump(mode="json") for f in be.list_fields()]}
+
+    @app.post("/metadata/fields", dependencies=ingest_dep)
+    def metadata_register_field(
+        body: RegisterFieldBody, be: LocalBackend = Depends(get_backend)
+    ) -> dict[str, Any]:
+        spec = be.register_field(
+            body.name, shape=body.shape, description=body.description, roles=body.roles
+        )
+        return {"field": spec.model_dump(mode="json")}
+
+    @app.delete("/metadata/fields/{name}", dependencies=ingest_dep)
+    def metadata_remove_field(
+        name: str, clear: bool = False, be: LocalBackend = Depends(get_backend)
+    ) -> dict[str, Any]:
+        return {"held": be.remove_field(name, clear=clear)}
 
     # -- stats -----------------------------------------------------------
     @app.get("/stats", dependencies=dep)
@@ -581,6 +635,12 @@ def build_app() -> FastAPI:
             if data.get("vectors")
             else None
         )
+        # null keeps the stored hints; a dict of strings replaces them whole.
+        title_hints = data.get("title_hints")
+        if title_hints is not None and not (
+            isinstance(title_hints, dict) and all(isinstance(v, str) for v in title_hints.values())
+        ):
+            raise HTTPException(422, "title_hints must be null or an object of strings")
         try:
             result = be.ingest_chunk_graph(
                 graph,
@@ -591,7 +651,7 @@ def build_app() -> FastAPI:
                 embed=data.get("embed", True),
                 describe_figures=data.get("describe_figures", False),
                 infer_title=data.get("infer_title", False),
-                title_hints=data.get("title_hints"),
+                title_hints=title_hints,
                 vectors=vectors,
                 inferred_title=data.get("inferred_title"),
             )
@@ -659,9 +719,14 @@ def build_app() -> FastAPI:
 
         # Before the stream opens, so an unsatisfiable request is a plain 4xx
         # naming the setting rather than an opaque failure a few steps in.
+        # A bad field in the metadata patch fails here too, not after the parse.
+        metadata: MetadataPatch | None = None
         try:
             check_backend_prerequisites(tmp_path, backend=backend, doc_id=doc_id, force=force)
-        except BackendUnavailableError as exc:
+            if opts.get("metadata"):
+                metadata = MetadataPatch.model_validate(opts["metadata"])
+                check_patch_for(shapes_of(be.list_fields()), fields=metadata.fields)
+        except (BackendUnavailableError, ValueError) as exc:
             tmp_path.unlink(missing_ok=True)
             audit(
                 request,
@@ -700,9 +765,6 @@ def build_app() -> FastAPI:
                 )
                 embed_step = {"kind": "step", "text": "Embed & store", "step": max_step["n"] + 1}
                 loop.call_soon_threadsafe(queue.put_nowait, ("progress", embed_step))
-                metadata = (
-                    MetadataPatch.model_validate(opts["metadata"]) if opts.get("metadata") else None
-                )
                 result = be.ingest_chunk_graph(
                     parsed.graph,
                     project_id=opts.get("project_id"),
@@ -711,7 +773,7 @@ def build_app() -> FastAPI:
                     embed=True,
                     describe_figures=not skip_figures and not skip_describe,
                     infer_title=bool(opts.get("infer_title", False)),
-                    title_hints=parsed.title_hints or None,
+                    title_hints=parsed.title_hints,
                 )
                 loop.call_soon_threadsafe(
                     queue.put_nowait, ("result", result.model_dump(mode="json"))

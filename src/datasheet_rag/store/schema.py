@@ -9,15 +9,21 @@ Tables created by :func:`init_schema`:
                        over ``context_text`` and ``text``. Content-linked
                        to ``chunks`` via triggers.
 * ``doc_metadata``   – sidecar table for document-level metadata
-                       (project, mpn, manufacturer, …). Independent of
-                       ``chunks`` so metadata can be registered before
-                       ingestion completes.
+                       (project, group, subsystem, tags) and the
+                       pipeline's bookkeeping (title provenance, title
+                       hints, the re-embed marker).
+                       Independent of ``chunks`` so metadata can be
+                       registered before ingestion completes.
+* ``metadata_fields`` – registry of typed, filterable fields (GH #120),
+  ``doc_field_values`` and their per-document values — see
+                       :mod:`datasheet_rag.store.fields`.
 * ``schema_version`` – single-row table recording the schema version and
                        the embedding dimension the DB was created with.
 """
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 from typing import NamedTuple
@@ -29,7 +35,7 @@ from datasheet_rag.config import get_settings
 
 console = Console()
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Columns added in each schema version, used for in-place migration of
 # databases created at an older version. Each entry is (column_name, DDL
@@ -40,6 +46,140 @@ _CHUNKS_COLUMNS_BY_VERSION: dict[int, list[tuple[str, str]]] = {
         ("figure_description", "figure_description TEXT"),
     ],
 }
+
+#: ``doc_metadata`` columns that v3 moved onto registered fields (GH #120).
+_V3_MOVED_COLUMNS = ("mpn", "manufacturer", "doc_type")
+
+#: Bookkeeping columns v3 adds to ``doc_metadata``. Their values used to live
+#: in the free-form ``attributes`` JSON, which v3 drops.
+_V3_BOOKKEEPING_COLUMNS = (
+    ("title_source", "TEXT"),
+    ("needs_reembed", "INTEGER"),
+    ("pdf_meta_title", "TEXT"),
+    ("running_header", "TEXT"),
+)
+
+
+class MigrationError(RuntimeError):
+    """A migration found stored data it cannot carry forward. Nothing was
+    changed; the store stays at its old version."""
+
+
+def _v3_bookkeeping(attrs: dict[str, object]) -> tuple[list[str], dict[str, object]]:
+    """Read one document's ``attributes`` JSON into the v3 bookkeeping columns.
+
+    Returns the attribute names that cannot be carried forward (unknown names
+    or values of the wrong type), and the column values. ``title_inferred:
+    true`` (the older form of title provenance) becomes ``'inferred'`` unless a
+    ``title_source`` is also recorded, which wins.
+    """
+    from datasheet_rag.store.metadata import TITLE_SOURCES
+
+    bad: list[str] = []
+    out: dict[str, object] = {}
+    for name, value in attrs.items():
+        if value is None:
+            continue
+        if name == "title_source" and value in TITLE_SOURCES:
+            out["title_source"] = value
+        elif name == "title_inferred" and isinstance(value, bool):
+            if value:
+                out.setdefault("title_source", "inferred")
+        elif name == "needs_reembed" and isinstance(value, bool):
+            if value:  # NULL means "no", as set_needs_reembed writes it
+                out["needs_reembed"] = 1
+        elif name in ("pdf_meta_title", "running_header") and isinstance(value, str):
+            if value:  # NULL means "no hint", as set_title_hints writes it
+                out[name] = value
+        else:
+            bad.append(name)
+    return bad, out
+
+
+def _migrate_to_v3(conn: sqlite3.Connection) -> None:
+    """Move ``doc_metadata`` onto registered fields and typed bookkeeping columns.
+
+    * ``mpn``/``manufacturer``/``doc_type`` become values of the built-in
+      fields. ``mpn`` held a comma-separated alias list (matched with
+      ``LIKE``); it is split into a real list here — stripped, empties
+      dropped, order kept.
+    * The pipeline's bookkeeping in the ``attributes`` JSON (title provenance,
+      title hints, the re-embed marker) moves to its own columns.
+    * ``attributes`` and the old columns and index are dropped.
+
+    Any other attribute, or a bookkeeping value of the wrong type, makes the
+    migration fail with the document ids and names rather than lose data.
+    One transaction: a failure leaves the v2 store as it was.
+    """
+    from datasheet_rag.store.fields import _coerce, ensure_field_tables, write_field_values
+
+    if conn.in_transaction:
+        conn.commit()
+    # IMMEDIATE takes the write lock before anything is read, so a second
+    # process opening the same v2 store waits, then sees v3 and does nothing.
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        row = conn.execute("SELECT version FROM schema_version WHERE id = 1").fetchone()
+        if row is not None and int(row["version"]) >= 3:
+            conn.commit()
+            return
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(doc_metadata)")}
+        ensure_field_tables(conn)
+        for col, ddl in _V3_BOOKKEEPING_COLUMNS:
+            if col not in cols:
+                conn.execute(f"ALTER TABLE doc_metadata ADD COLUMN {col} {ddl}")
+        present = [c for c in _V3_MOVED_COLUMNS if c in cols]
+        has_attrs = "attributes" in cols
+        select = ["doc_id", *present, *(["attributes"] if has_attrs else [])]
+        rows = conn.execute(f"SELECT {', '.join(select)} FROM doc_metadata").fetchall()
+        problems: list[str] = []
+        for row in rows:
+            patch: dict[str, list[str]] = {}
+            for col in present:
+                raw = row[col]
+                if not raw:
+                    continue
+                if col == "mpn":
+                    patch[col] = _coerce(raw.split(","), "list")
+                else:
+                    patch[col] = _coerce(raw, "single")
+            write_field_values(conn, row["doc_id"], patch)
+            if not has_attrs or not row["attributes"]:
+                continue
+            attrs = json.loads(row["attributes"])
+            bad, values = _v3_bookkeeping(attrs)
+            if bad:
+                problems.append(f"{row['doc_id']}: {', '.join(sorted(bad))}")
+                continue
+            if values:
+                sets = ", ".join(f"{c} = ?" for c in values)
+                conn.execute(
+                    f"UPDATE doc_metadata SET {sets} WHERE doc_id = ?",
+                    (*values.values(), row["doc_id"]),
+                )
+        if problems:
+            raise MigrationError(
+                "cannot migrate the store to v3: these documents hold attributes "
+                "v3 cannot carry forward — a free-form attribute (v3 has none), or "
+                "a title_source/title_inferred/needs_reembed/pdf_meta_title/"
+                "running_header value of the wrong type. With the old version, "
+                "copy out and remove a free-form attribute, or correct the value's "
+                "type; then open the store again:\n  " + "\n  ".join(problems)
+            )
+        conn.execute("DROP INDEX IF EXISTS ix_doc_metadata_mpn")
+        for col in [*present, *(["attributes"] if has_attrs else [])]:
+            conn.execute(f"ALTER TABLE doc_metadata DROP COLUMN {col}")
+        # In this transaction, so no other process sees the new layout at v2.
+        conn.execute("UPDATE schema_version SET version = 3 WHERE id = 1")
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+
+
+#: Data migrations run when an older store is opened, keyed by the version
+#: they bring it to. Run after that version's chunk columns are added.
+_MIGRATIONS_BY_VERSION = {3: _migrate_to_v3}
 
 
 def connect(
@@ -100,6 +240,12 @@ def connect(
     # chunk schema version and embedding dim, so ensure them on every open
     # — IF NOT EXISTS makes this idempotent and brings older DBs forward.
     _ensure_control_tables(conn)
+    # Re-seed the built-in fields on every open too, so a field added to
+    # BUILTIN_FIELDS in a later release reaches stores created before it.
+    from datasheet_rag.store.fields import ensure_field_tables
+
+    ensure_field_tables(conn)
+    conn.commit()
     # Same reasoning: the FTS index is ensured on every open, not only on a
     # fresh DB, so a store that predates it gets one instead of an error.
     _ensure_fts(conn)
@@ -137,6 +283,9 @@ def _migrate_if_needed(conn: sqlite3.Connection) -> None:
             if col_name not in existing_cols:
                 cur.execute(f"ALTER TABLE chunks ADD COLUMN {ddl_frag}")
                 existing_cols.add(col_name)
+        migration = _MIGRATIONS_BY_VERSION.get(target_version)
+        if migration is not None:
+            migration(conn)
         console.print(f"[yellow]Migrated chunks store {current} → {target_version}[/]")
 
     cur.execute(
@@ -487,19 +636,25 @@ def init_schema(conn: sqlite3.Connection, *, embedding_dim: int) -> None:
             doc_id       TEXT PRIMARY KEY,
             project_id   TEXT,
             group_name   TEXT,
-            mpn          TEXT,
-            manufacturer TEXT,
             subsystem    TEXT,
-            doc_type     TEXT,
             tags         TEXT,             -- JSON array of strings
-            attributes   TEXT,             -- JSON object (free-form)
+            title_source   TEXT,           -- auto | inferred | manual; NULL = auto
+            needs_reembed  INTEGER,        -- 1 once `rag repair` marks it; NULL = no
+            pdf_meta_title TEXT,           -- ingest-time title hint
+            running_header TEXT,           -- ingest-time title hint
             updated_at   TEXT DEFAULT CURRENT_TIMESTAMP
         )
         """
     )
     cur.execute("CREATE INDEX IF NOT EXISTS ix_doc_metadata_project ON doc_metadata(project_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS ix_doc_metadata_group ON doc_metadata(group_name)")
-    cur.execute("CREATE INDEX IF NOT EXISTS ix_doc_metadata_mpn ON doc_metadata(mpn)")
+
+    # ---- metadata_fields / doc_field_values ------------------------------
+    # Registered fields and their per-document values (GH #120). mpn,
+    # manufacturer and doc_type live here as pre-registered fields.
+    from datasheet_rag.store.fields import ensure_field_tables
+
+    ensure_field_tables(conn)
 
     # ---- schema_version --------------------------------------------------
     cur.execute(

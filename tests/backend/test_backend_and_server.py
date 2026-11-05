@@ -90,13 +90,67 @@ def test_local_ingest_no_figures_trusts_existing_paths(backend: LocalBackend) ->
         )
     )
     res = backend.ingest_chunk_graph(
-        g, project_id="p1", metadata=MetadataPatch(mpn="X1"), embed=False
+        g, project_id="p1", metadata=MetadataPatch(fields={"mpn": "X1"}), embed=False
     )
     assert res.inserted == 1
     assert backend.stats(project_id="p1").total_chunks == 1
-    assert backend.get_metadata(did).mpn == "X1"
+    assert backend.get_metadata(did).fields["mpn"] == ["X1"]
     hits = backend.search("clock stretching", mode="keyword", k=5)
     assert hits and hits[0].chunk_id == f"{did}:L2:0"
+
+
+def test_local_reingest_title_hints_none_keeps_dict_replaces(backend: LocalBackend) -> None:
+    did = "b" * 64
+    g = _graph_with_figure(did)
+    hints = {"pdf_meta_title": "Guide", "running_header": "LM317"}
+    backend.ingest_chunk_graph(g, title_hints=hints, embed=False)
+    # None: no parse computed hints (cached graph, `rag repair embeddings`).
+    backend.ingest_chunk_graph(g, embed=False)
+    md = backend.get_metadata(did)
+    assert md is not None and md.pdf_meta_title == "Guide" and md.running_header == "LM317"
+    # A partial set replaces both.
+    backend.ingest_chunk_graph(g, title_hints={"running_header": "LM317A"}, embed=False)
+    md = backend.get_metadata(did)
+    assert md is not None and md.pdf_meta_title is None and md.running_header == "LM317A"
+    # {}: the parse ran and found none, so both are cleared.
+    backend.ingest_chunk_graph(g, title_hints={}, embed=False)
+    md = backend.get_metadata(did)
+    assert md is not None and md.pdf_meta_title is None and md.running_header is None
+
+
+def test_resolve_doc_id_treats_like_wildcards_literally(backend: LocalBackend) -> None:
+    did = "c" * 64
+    backend.ingest_chunk_graph(_graph_with_figure(did), embed=False)
+    assert backend.resolve_doc_id("ccc") == did
+    for wildcard in ("_", "%", "c_c"):
+        with pytest.raises(ValueError, match="No ingested document"):
+            backend.resolve_doc_id(wildcard)
+
+
+def _plain_graph(did: str) -> ChunkGraph:
+    g = ChunkGraph(doc_id=did)
+    g.add(
+        Chunk(
+            id=f"{did}:L2:0",
+            doc_id=did,
+            level=ChunkLevel.MICRO,
+            text="text",
+            metadata=ChunkMetadata(doc_id=did, page_numbers=[1]),
+        )
+    )
+    return g
+
+
+def test_resolve_doc_id_exact_wins_and_is_case_sensitive(backend: LocalBackend) -> None:
+    for did in ("lm317", "lm317a", "ABC"):
+        backend.ingest_chunk_graph(_plain_graph(did), embed=False)
+    assert backend.resolve_doc_id("lm317") == "lm317"
+    assert backend.resolve_doc_id("lm317a") == "lm317a"
+    with pytest.raises(ValueError, match="ambiguous"):
+        backend.resolve_doc_id("lm3")
+    assert backend.resolve_doc_id("AB") == "ABC"
+    with pytest.raises(ValueError, match="No ingested document"):
+        backend.resolve_doc_id("ab")
 
 
 def test_local_reingest_prunes_and_reports_stale_chunks(
@@ -174,7 +228,7 @@ def test_local_delete_doc_purges_local_files(backend: LocalBackend, tmp_path, mo
     backend.ingest_chunk_graph(
         g,
         figures={f"{did}:L2:0": (png, "png")},
-        metadata=MetadataPatch(mpn="M1"),
+        metadata=MetadataPatch(fields={"mpn": "M1"}),
         embed=False,
     )
 
@@ -231,7 +285,7 @@ def test_server_ingest_and_query_roundtrip(client) -> None:
     payload = {
         "graph": g.model_dump(mode="json"),
         "project_id": "proj",
-        "metadata": MetadataPatch(mpn="M1", tags=["t"]).model_dump(mode="json"),
+        "metadata": MetadataPatch(fields={"mpn": "M1"}, tags=["t"]).model_dump(mode="json"),
         "embed": False,
         "describe_figures": False,
     }
@@ -258,10 +312,103 @@ def test_server_ingest_and_query_roundtrip(client) -> None:
 
     # metadata write visible
     md = client.get(f"/documents/{did}/metadata").json()
-    assert md["mpn"] == "M1" and md["tags"] == ["t"]
+    assert md["fields"]["mpn"] == ["M1"] and md["tags"] == ["t"]
 
     # delete
     assert client.delete(f"/documents/{did}").json()["deleted"] == 2
+
+
+def test_server_metadata_fields_routes_and_field_filters(client) -> None:
+    from datasheet_rag.backend.remote import _field_params
+
+    did = "d" * 64
+    g = _graph_with_figure(did)
+    payload = {"graph": g.model_dump(mode="json"), "embed": False, "describe_figures": False}
+    files = [("payload", ("payload.json", json.dumps(payload).encode(), "application/json"))]
+    assert client.post("/ingest", files=files).status_code == 200
+
+    # Register a field over HTTP; an unknown one is a 400, not a 500.
+    r = client.post("/metadata/fields", json={"name": "acme-id", "description": "ACME doc no."})
+    assert r.status_code == 200, r.text
+    assert r.json() == {
+        "field": {
+            "name": "acme-id",
+            "description": "ACME doc no.",
+            "shape": "single",
+            "roles": [],
+            "builtin": False,
+        },
+    }
+    names = [f["name"] for f in client.get("/metadata/fields").json()["fields"]]
+    assert names[:3] == ["doc_type", "manufacturer", "mpn"] and "acme-id" in names
+    bad = client.patch(f"/documents/{did}/metadata", json={"fields": {"nope": "x"}})
+    assert bad.status_code == 400 and "unregistered field" in bad.text
+    # A name the patch does not have is rejected, not silently dropped.
+    old = client.patch(f"/documents/{did}/metadata", json={"attributes": {"rev": "B"}})
+    assert old.status_code == 422
+
+    r = client.patch(f"/documents/{did}/metadata", json={"fields": {"acme-id": "D:7"}})
+    assert r.status_code == 200, r.text
+
+    # The query-string encoding the remote backend sends — a ':' in the value
+    # survives, since names cannot hold one.
+    params = {"field": _field_params({"acme-id": "D:7"})}
+    docs = client.get("/documents", params=params).json()["documents"]
+    assert [d["doc_id"] for d in docs] == [did]
+    assert client.get("/documents", params={"field": "acme-id:other"}).json()["documents"] == []
+    assert client.get("/documents", params={"field": "no-colon"}).status_code == 400
+
+    # Search filters on fields (SearchFilters is serialised whole).
+    hit = client.post(
+        "/search",
+        json={
+            "query": "block diagram",
+            "mode": "keyword",
+            "filters": {"fields": {"acme-id": "d:7"}},
+        },
+    ).json()["results"]
+    assert hit and all(h["chunk"]["doc_id"] == did for h in hit)
+    miss = client.post(
+        "/search",
+        json={"query": "block diagram", "mode": "keyword", "filters": {"fields": {"acme-id": "x"}}},
+    ).json()["results"]
+    assert miss == []
+    # A misspelt field name is a 400, not an empty result.
+    typo = client.post(
+        "/search",
+        json={"query": "block", "mode": "keyword", "filters": {"fields": {"acme_id": "d:7"}}},
+    )
+    assert typo.status_code == 400 and "unregistered field" in typo.text
+
+    # Remove: refused while held, then cleared with the field.
+    assert client.delete("/metadata/fields/acme-id").status_code == 400
+    assert client.delete("/metadata/fields/acme-id", params={"clear": "true"}).json() == {"held": 1}
+    md = client.get(f"/documents/{did}/metadata").json()
+    assert "acme-id" not in md["fields"]
+
+
+def test_server_needs_reembed_route(client) -> None:
+    did = "e" * 64
+    # An id that is not in the store is a 400 and leaves no sidecar row.
+    r = client.put(f"/documents/{did}/needs-reembed", json={"value": True})
+    assert r.status_code == 400
+    r = client.patch(f"/documents/{did}/metadata", json={"subsystem": "power"})
+    assert r.status_code == 400
+    assert client.put(f"/documents/{did}/title", json={"title": "X"}).status_code == 400
+    assert client.get(f"/documents/{did}/metadata").status_code == 204
+
+    payload = {"graph": _graph_with_figure(did).model_dump(mode="json"), "embed": False}
+    files = [("payload", ("payload.json", json.dumps(payload).encode(), "application/json"))]
+    assert client.post("/ingest", files=files).status_code == 200
+    # A short prefix resolves to the full id.
+    r = client.put(f"/documents/{did[:8]}/needs-reembed", json={"value": True})
+    assert r.status_code == 200, r.text
+    assert client.get(f"/documents/{did}/metadata").json()["needs_reembed"] is True
+    client.put(f"/documents/{did}/needs-reembed", json={"value": False})
+    assert client.get(f"/documents/{did}/metadata").json()["needs_reembed"] is False
+    # Not settable through a metadata patch.
+    r = client.patch(f"/documents/{did}/metadata", json={"needs_reembed": True})
+    assert r.status_code == 422
 
 
 def test_server_ingest_pdf_streams_sse(client, monkeypatch) -> None:
@@ -363,6 +510,22 @@ def test_server_ingest_pdf_rejects_textract_without_bucket(client, monkeypatch, 
     )
     assert r.status_code == 400
     assert "RAG_S3_BUCKET" in r.json()["detail"]
+
+
+def test_server_ingest_pdf_rejects_unregistered_field_before_parsing(client, monkeypatch) -> None:
+    import datasheet_rag.ingest_pipeline as ip
+
+    monkeypatch.setattr(
+        ip, "parse_pdf_to_graph", lambda *a, **kw: pytest.fail("pipeline should not run")
+    )
+
+    r = client.post(
+        "/ingest-pdf",
+        files={"payload": ("x.pdf", b"%PDF-1.4 fake", "application/pdf")},
+        data={"options": json.dumps({"metadata": {"fields": {"acme-idd": "D-1"}}})},
+    )
+    assert r.status_code == 400
+    assert "unregistered field(s) acme-idd" in r.json()["detail"]
 
 
 def test_check_backend_prerequisites_allows_cached_textract_blocks(monkeypatch, tmp_path) -> None:
@@ -686,6 +849,80 @@ def test_server_answers_one_document_summary(client, conn: sqlite3.Connection) -
     assert r.status_code == 200
     assert r.json()["doc_id"] == "d2"
     assert client.get("/documents/nope/summary").status_code == 204
+
+
+def test_remote_title_hints_none_keeps_and_empty_clears(client) -> None:
+    """null vs {} must survive RemoteBackend → JSON → /ingest: keep vs clear."""
+    from datasheet_rag.backend.remote import RemoteBackend
+
+    be = RemoteBackend.__new__(RemoteBackend)
+    be._client = client
+    be._compute = "server"
+    did = "e" * 64
+    g = _plain_graph(did)
+    be.ingest_chunk_graph(g, title_hints={"running_header": "LM317"}, embed=False)
+    be.ingest_chunk_graph(g, title_hints=None, embed=False)
+    assert client.get(f"/documents/{did}/metadata").json()["running_header"] == "LM317"
+    be.ingest_chunk_graph(g, title_hints={}, embed=False)
+    assert client.get(f"/documents/{did}/metadata").json()["running_header"] is None
+
+
+def test_remote_ingest_sends_graph_hints_and_the_field_wins(client, monkeypatch) -> None:
+    """The graph goes over the wire with its hints; the server stores the field's."""
+    from datasheet_rag.backend.remote import RemoteBackend
+
+    received: list[dict[str, str] | None] = []
+    real_validate = ChunkGraph.model_validate
+
+    def spy(data, *a, **kw):  # type: ignore[no-untyped-def]
+        graph = real_validate(data, *a, **kw)
+        received.append(graph.title_hints)
+        return graph
+
+    monkeypatch.setattr(ChunkGraph, "model_validate", spy)
+    be = RemoteBackend.__new__(RemoteBackend)
+    be._client = client
+    be._compute = "server"
+    did = "e" * 64
+    g = _plain_graph(did)
+    g.title_hints = {"running_header": "OTHER"}
+    be.ingest_chunk_graph(g, title_hints={"running_header": "LM317"}, embed=False)
+    assert received == [{"running_header": "OTHER"}]
+    assert client.get(f"/documents/{did}/metadata").json()["running_header"] == "LM317"
+
+
+def test_remote_client_inference_uses_stored_hints_when_none_sent(client, monkeypatch) -> None:
+    from datasheet_rag.backend.remote import RemoteBackend
+
+    seen: list[dict[str, str] | None] = []
+
+    def fake_infer(graph: ChunkGraph, *, title_hints: dict[str, str] | None = None) -> None:
+        seen.append(title_hints)
+
+    monkeypatch.setattr("datasheet_rag.titling.infer_title_from_graph", fake_infer)
+    be = RemoteBackend.__new__(RemoteBackend)
+    be._client = client
+    be._compute = "client"
+    did = "f" * 64
+    g = _plain_graph(did)
+    be.ingest_chunk_graph(g, title_hints={"pdf_meta_title": "Guide"}, embed=False)
+    be.ingest_chunk_graph(g, title_hints=None, embed=False, infer_title=True)
+    assert seen == [{"pdf_meta_title": "Guide"}]
+
+
+def test_server_ingest_rejects_malformed_title_hints(client) -> None:
+    did = "e" * 64
+    for bad in ([], {"running_header": 5}, "LM317"):
+        payload = {
+            "graph": _plain_graph(did).model_dump(mode="json"),
+            "embed": False,
+            "title_hints": bad,
+        }
+        r = client.post(
+            "/ingest",
+            files=[("payload", ("payload.json", json.dumps(payload).encode(), "application/json"))],
+        )
+        assert r.status_code == 422, r.text
 
 
 def test_remote_get_document_reads_the_summary_route(client, conn: sqlite3.Connection) -> None:

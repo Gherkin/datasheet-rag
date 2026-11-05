@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import glob
 import json
 import os
 import random
 import re
 import socket
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar
 
@@ -32,6 +33,8 @@ if TYPE_CHECKING:
     from datasheet_rag.eval.stats import Interval, PairedDiff
     from datasheet_rag.ingest_pipeline import ProgressEvent
     from datasheet_rag.models.chunk import Chunk
+    from datasheet_rag.project_config import ProjectConfig
+    from datasheet_rag.store.fields import FieldSpec
     from datasheet_rag.store.metadata import DocMetadata
 
 console = Console()
@@ -106,7 +109,8 @@ def _resolve_cached_doc_id(doc_id: str, suffix: str = "_outline.json") -> str:
     if full is not None and (settings.output_dir / f"{full}{suffix}").is_file():
         return full
 
-    matches = sorted(settings.output_dir.glob(f"{doc_id}*{suffix}"))
+    # The prefix is user input: `*`, `?` and `[` must not act as wildcards.
+    matches = sorted(settings.output_dir.glob(f"{glob.escape(doc_id)}*{suffix}"))
     if not matches:
         raise click.ClickException(
             f"No cached {suffix.lstrip('_')} matching doc_id {doc_id!r} in "
@@ -130,8 +134,9 @@ def _require_docling_outline(doc_id: str) -> str:
     that reads like the document was never ingested.
     """
     settings = get_settings()
-    if not sorted(settings.output_dir.glob(f"{doc_id}*_outline.json")):
-        if sorted(settings.output_dir.glob(f"{doc_id}*_blocks.json")):
+    prefix = glob.escape(doc_id)
+    if not sorted(settings.output_dir.glob(f"{prefix}*_outline.json")):
+        if sorted(settings.output_dir.glob(f"{prefix}*_blocks.json")):
             raise click.ClickException(
                 f"Document {doc_id!r} was ingested with the Textract backend, and "
                 "the table commands are Docling-only — they read Docling's "
@@ -350,15 +355,99 @@ class OrderedGroup(click.Group):
             raise
 
 
-def _parse_attr_items(items: tuple[str, ...]) -> dict[str, str]:
-    """Parse repeated ``--attr KEY=VALUE`` options into a dict."""
-    parsed: dict[str, str] = {}
+def _parse_field_items(items: tuple[str, ...], *, option: str = "--field") -> dict[str, Any]:
+    """Parse repeated ``--field NAME=VALUE`` options into a field patch.
+
+    A name given once maps to its string; a name given more than once maps
+    to the list of its values, in order — which is how a list field such as
+    ``mpn`` gets several values. The store coerces a lone string to a
+    one-entry list for a list field, and rejects a list for a single field.
+    """
+    parsed: dict[str, Any] = {}
     for item in items:
-        key, sep, value = item.partition("=")
-        if not sep or not key:
-            raise click.BadParameter(f"--attr expects KEY=VALUE, got {item!r}", param_hint="--attr")
-        parsed[key] = value
+        name, sep, value = item.partition("=")
+        if not sep or not name:
+            raise click.BadParameter(
+                f"{option} expects NAME=VALUE, got {item!r}", param_hint=option
+            )
+        if name not in parsed:
+            parsed[name] = value
+        elif isinstance(parsed[name], list):
+            parsed[name].append(value)
+        else:
+            parsed[name] = [parsed[name], value]
     return parsed
+
+
+def _shortcut_fields(
+    *, mpn: tuple[str, ...], manufacturer: str | None, doc_type: str | None
+) -> dict[str, Any]:
+    """The built-in-field shortcut options as a field patch (unset ones omitted).
+
+    ``--mpn`` is repeatable, one part number each. An empty string is kept:
+    it means "clear this field", the same as for any other metadata option.
+    """
+    out: dict[str, Any] = {}
+    if mpn:
+        out["mpn"] = list(mpn)
+    if manufacturer is not None:
+        out["manufacturer"] = manufacturer
+    if doc_type is not None:
+        out["doc_type"] = doc_type
+    return out
+
+
+class _FieldRegistry:
+    """The field registry, read at most once per command and only when asked for.
+
+    A bulk ingest shares one, so 300 PDFs cost one ``list_fields`` call.
+    """
+
+    def __init__(self, backend: RagBackend) -> None:
+        self._backend = backend
+        self._specs: list[FieldSpec] | None = None
+
+    def specs(self) -> list[FieldSpec]:
+        if self._specs is None:
+            from datasheet_rag.backend import RagServerError
+
+            try:
+                self._specs = self._backend.list_fields()
+            except RagServerError as e:
+                raise _friendly_server_error(e) from e
+        return self._specs
+
+
+def _merge_config_fields(proj_cfg: ProjectConfig | None, fields: dict[str, Any]) -> dict[str, Any]:
+    """Fill ``.rag.toml`` ``[fields]`` in under the user's options.
+
+    ``fields`` is what the user typed, an unset as ``None``. A name the user
+    gave, to set or to unset, is not filled from the config.
+    """
+    if proj_cfg is None or not proj_cfg.fields:
+        return fields
+    return {**proj_cfg.fields, **fields}
+
+
+def _check_field_patch(registered: Iterable[FieldSpec], fields: dict[str, Any]) -> None:
+    """Reject a bad field patch before any slow work (parsing a PDF)."""
+    from datasheet_rag.store.fields import shapes_of
+    from datasheet_rag.store.metadata import check_patch_for
+
+    try:
+        check_patch_for(shapes_of(registered), fields=fields)
+    except ValueError as e:
+        raise click.ClickException(str(e)) from e
+
+
+def _merge_shortcuts(fields: dict[str, Any], shortcuts: dict[str, Any]) -> dict[str, Any]:
+    """Fold shortcut options into ``--field`` items; naming a field both ways is an error."""
+    both = sorted(set(fields) & set(shortcuts))
+    if both:
+        raise click.UsageError(
+            f"{', '.join(both)} given both as --{both[0].replace('_', '-')} and --field; use one"
+        )
+    return {**fields, **shortcuts}
 
 
 @click.group(
@@ -367,6 +456,7 @@ def _parse_attr_items(items: tuple[str, ...]) -> dict[str, str]:
     order=[
         "ingest",
         "metadata",
+        "fields",
         "search",
         "list",
         "get",
@@ -594,9 +684,9 @@ def repair_group() -> None:
 
 # The column vocabulary `rag list --columns` understands. Split by where the
 # value lives: the store's own row (`IngestedDoc`) or the metadata sidecar
-# (`DocMetadata`). Anything *not* named here is looked up as a key in the
-# sidecar's free-form `attributes` dict — those keys are arbitrary by design,
-# so they can't be enumerated, and reaching them is the point of the flag.
+# (`DocMetadata`). Anything *not* named here must be a registered field
+# (mpn, manufacturer, doc_type and user fields — GH #120); each field is a
+# column of its own.
 _DOC_COLUMNS: dict[str, Callable[[IngestedDoc], Any]] = {
     "doc_id": lambda d: d.doc_id[:SHORT_DOC_ID_LEN],
     "title": lambda d: d.doc_title,
@@ -608,19 +698,15 @@ _DOC_COLUMNS: dict[str, Callable[[IngestedDoc], Any]] = {
 _META_COLUMNS: dict[str, Callable[[DocMetadata], Any]] = {
     "project": lambda m: m.project_id,
     "group": lambda m: m.group_name,
-    "mpn": lambda m: m.mpn,
-    "manufacturer": lambda m: m.manufacturer,
     "subsystem": lambda m: m.subsystem,
-    "doc_type": lambda m: m.doc_type,
     "tags": lambda m: m.tags,
     "updated": lambda m: m.updated_at,
-    "stale": lambda m: "[yellow]re-embed[/]" if m.attributes.get(_STALE_ATTR) else "",
+    "stale": lambda m: "[yellow]re-embed[/]" if m.needs_reembed else "",
 }
 
-# Field names that would otherwise fall through to an (always empty)
-# attribute column. Anyone who knows the model or the JSON `rag metadata`
-# prints reaches for these spellings, so map them rather than silently
-# printing a column of em-dashes.
+# Model attribute names that are not column names. Anyone who knows the
+# model or the JSON `rag metadata` prints reaches for these spellings, so map
+# them rather than rejecting them as unknown.
 _LIST_COLUMN_ALIASES = {
     "id": "doc_id",
     "doc_title": "title",
@@ -653,18 +739,15 @@ def _parse_list_columns(columns: tuple[str, ...]) -> list[str]:
 def _list_cell(name: str, doc: IngestedDoc, meta: DocMetadata | None) -> Any:
     """Value of column *name* for one row, or None when it has none.
 
-    An ``attr:`` prefix forces the attribute reading, which is the only way to
-    reach an attribute whose key collides with a built-in column name.
+    A name that is not a built-in column is a registered field.
     """
-    if name.startswith("attr:"):
-        return meta.attributes.get(name[len("attr:") :]) if meta is not None else None
     if (doc_getter := _DOC_COLUMNS.get(name)) is not None:
         return doc_getter(doc)
     if meta is None:
         return None
     if (meta_getter := _META_COLUMNS.get(name)) is not None:
         return meta_getter(meta)
-    return meta.attributes.get(name)
+    return meta.fields.get(name)
 
 
 def _fmt_list_cell(value: Any) -> str:
@@ -697,19 +780,20 @@ def _fmt_list_cell(value: Any) -> str:
 @click.option("--group", "group_name", default=None, help="Only show documents in this group.")
 @click.option("--mpn", default=None, help="Only show documents with this part number.")
 @click.option(
+    "--field",
+    "field_items",
+    multiple=True,
+    metavar="NAME=VALUE",
+    help="Only show documents whose registered field NAME holds VALUE "
+    "(repeatable, all must match; a list field matches any entry; "
+    "case-insensitive). See `rag fields list`.",
+)
+@click.option(
     "--tag",
     "tags",
     multiple=True,
     help="Only show documents that have this tag (repeatable — "
     "with multiple --tag, a document must have all of them).",
-)
-@click.option(
-    "--attr",
-    "attrs",
-    multiple=True,
-    metavar="KEY=VALUE",
-    help="Only show documents whose attributes contain this "
-    "key=value pair (repeatable, all must match).",
 )
 @click.option(
     "--columns",
@@ -719,17 +803,16 @@ def _fmt_list_cell(value: Any) -> str:
     metavar="COL,COL,...",
     help="Choose the columns to show (comma-separated, repeatable). "
     "Built-ins: title, chunks, pages, ingested, project, group, mpn, "
-    "manufacturer, subsystem, doc_type, tags, updated, stale. Any other "
-    "name is read as an attribute key set by `rag metadata --attr` "
-    "(prefix with `attr:` to force that reading). doc_id is always shown.",
+    "manufacturer, subsystem, doc_type, tags, updated, stale, and any "
+    "registered field (`rag fields list`). doc_id is always shown.",
 )
 @click.option(
     "--wide",
     "-w",
     is_flag=True,
     help="Show the sidecar columns (project, group, mpn, manufacturer, "
-    "subsystem, tags) in place of the chunk/page/ingest columns. "
-    "Implied whenever a filter is given.",
+    "subsystem, tags, then each user-registered field) in place of the "
+    "chunk/page/ingest columns. Implied whenever a filter is given.",
 )
 @click.option(
     "--s3",
@@ -743,8 +826,8 @@ def list_docs(
     is_global: bool,
     group_name: str | None,
     mpn: str | None,
+    field_items: tuple[str, ...],
     tags: tuple[str, ...],
-    attrs: tuple[str, ...],
     columns: tuple[str, ...],
     wide: bool,
     show_s3: bool,
@@ -756,15 +839,10 @@ def list_docs(
     (project, group, mpn, manufacturer, subsystem, tags) instead; filters
     narrow the listing to documents whose sidecar row matches.
 
-    --columns replaces both views with exactly the columns you name, and is
-    the only way to see free-form attributes:
+    --columns replaces both views with exactly the columns you name. Each
+    registered field is a column of its own:
 
-      rag list --columns mpn,revision,reviewed_by
-
-    Names that aren't built-in columns are read as attribute keys, so that
-    prints `revision` and `reviewed_by` as set by
-    `rag metadata <doc> --attr revision=B`. An attribute whose name collides
-    with a built-in column needs the `attr:` prefix (`--columns attr:tags`).
+      rag list --columns mpn,acme-id
     """
     from datasheet_rag.project_config import resolve_cli_project_id
 
@@ -798,10 +876,42 @@ def list_docs(
         console.print(table)
         return
 
-    attr_filters = _parse_attr_items(attrs)
+    field_filters: dict[str, str] = {}
+    for name, value in _parse_field_items(field_items).items():
+        if isinstance(value, list):
+            raise click.BadParameter(
+                f"--field {name} given more than once; a filter takes one value per field",
+                param_hint="--field",
+            )
+        field_filters[name] = value
+    if mpn is not None:
+        if "mpn" in field_filters:
+            raise click.UsageError("mpn given both as --mpn and --field; use one")
+        field_filters["mpn"] = mpn
 
-    filtering = bool(group_name or mpn or tags or attr_filters)
+    filtering = bool(group_name or field_filters or tags)
     be = _backend_for(db_path)
+    # The default view shows no field columns, so it needs no registry read
+    # (one fewer round trip in remote mode).
+    registered = be.list_fields() if (filtering or wide or chosen) else []
+    field_names = {f.name for f in registered}
+    unknown = sorted(set(field_filters) - field_names)
+    if unknown:
+        raise click.BadParameter(
+            f"unregistered field(s) {', '.join(unknown)} (see `rag fields list`)",
+            param_hint="--field",
+        )
+    unknown_cols = sorted(
+        n
+        for n in chosen or []
+        if n not in _DOC_COLUMNS and n not in _META_COLUMNS and n not in field_names
+    )
+    if unknown_cols:
+        raise click.BadParameter(
+            f"unknown column(s) {', '.join(unknown_cols)}: not a built-in column or a "
+            "registered field (see `rag fields list`)",
+            param_hint="--columns",
+        )
     docs = be.get_ingested_docs(project_id=project_id)
 
     # The sidecar is a separate table from the chunk store, so join by doc_id
@@ -810,7 +920,10 @@ def list_docs(
     # sidecar and belongs in the default view.
     try:
         meta_by_id = {
-            m.doc_id: m for m in be.list_docs(project_id=project_id, group_name=group_name, mpn=mpn)
+            m.doc_id: m
+            for m in be.list_docs(
+                project_id=project_id, group_name=group_name, fields=field_filters or None
+            )
         }
     except Exception:
         meta_by_id = {}
@@ -820,9 +933,7 @@ def list_docs(
         docs = [
             d
             for d in docs
-            if (m := meta_by_id.get(d.doc_id)) is not None
-            and wanted_tags.issubset(set(m.tags))
-            and all(m.attributes.get(k) == v for k, v in attr_filters.items())
+            if (m := meta_by_id.get(d.doc_id)) is not None and wanted_tags.issubset(set(m.tags))
         ]
 
     if not docs:
@@ -836,15 +947,15 @@ def list_docs(
         return
 
     stale_ids = {
-        d.doc_id
-        for d in docs
-        if (m := meta_by_id.get(d.doc_id)) is not None and m.attributes.get(_STALE_ATTR)
+        d.doc_id for d in docs if (m := meta_by_id.get(d.doc_id)) is not None and m.needs_reembed
     }
 
     if chosen is not None:
         shown = list(chosen)
     else:
         shown = list(_LIST_WIDE_COLUMNS if (wide or filtering) else _LIST_DEFAULT_COLUMNS)
+        if wide or filtering:
+            shown.extend(f.name for f in registered if not f.builtin)
     # doc_id is the handle every other `rag` command takes, so a listing
     # without it is a dead end; the stale marker is a health flag rather than
     # metadata, and is worth showing whatever view was asked for.
@@ -855,36 +966,17 @@ def list_docs(
 
     table = Table(title="Ingested Documents")
     for name in shown:
-        label = name[len("attr:") :] if name.startswith("attr:") else name
         table.add_column(
-            label,
+            name,
             style="cyan" if name == "doc_id" else None,
             justify="right" if name in _LIST_RIGHT_ALIGNED else "left",
         )
 
-    # An attribute column that is empty on every row is usually a typo or a
-    # case mismatch, not a fleet of documents that all happen to lack it.
-    empty_attr_cols = {
-        name for name in shown if name not in _DOC_COLUMNS and name not in _META_COLUMNS
-    }
     for doc in docs:
         meta = meta_by_id.get(doc.doc_id)
-        row: list[str] = []
-        for name in shown:
-            value = _list_cell(name, doc, meta)
-            if value not in (None, "", [], {}):
-                empty_attr_cols.discard(name)
-            row.append(_fmt_list_cell(value))
-        table.add_row(*row)
+        table.add_row(*(_fmt_list_cell(_list_cell(name, doc, meta)) for name in shown))
 
     console.print(table)
-    if empty_attr_cols:
-        names = ", ".join(sorted(empty_attr_cols))
-        console.print(
-            f"  [yellow]No listed document has the attribute(s):[/] {names}. "
-            "Attribute names are case-sensitive — check one document's with "
-            "[cyan]rag metadata <doc-id>[/]."
-        )
     if stale_ids:
         console.print(
             f"  [yellow]{len(stale_ids)} document(s) were repaired since they were "
@@ -1280,7 +1372,7 @@ def get_text_cmd(doc_id: str, output: Path | None) -> None:
     Section titles are emitted as headings so the dump keeps the document's
     structure rather than running together as one wall of prose.
     """
-    _, outline = _load_outline(doc_id)
+    _, _, outline = _load_outline(doc_id)
 
     parts: list[str] = []
     for section in outline.all_sections_flat:
@@ -1340,7 +1432,7 @@ def _resolve_layout_input(arg: str) -> tuple[str, str, Path]:
                 return full, backend, path
 
     for suffix, backend in artifacts:
-        if sorted(settings.output_dir.glob(f"{arg}*{suffix}")):
+        if sorted(settings.output_dir.glob(f"{glob.escape(arg)}*{suffix}")):
             doc_id = _resolve_cached_doc_id(arg, suffix)
             return doc_id, backend, _cache_path(doc_id, suffix)
 
@@ -1351,9 +1443,9 @@ def _resolve_layout_input(arg: str) -> tuple[str, str, Path]:
     )
 
 
-def _load_outline(arg: str) -> tuple[str, DocumentOutline]:
+def _load_outline(arg: str) -> tuple[str, str, DocumentOutline]:
     """Load a cached layout artifact as a `DocumentOutline`, whichever backend
-    produced it.
+    produced it. Returns ``(doc_id, backend, outline)``.
 
     `DocumentOutline` is the backend-neutral representation the whole chunking
     pipeline already runs on — Docling builds one directly, and Textract blocks
@@ -1369,8 +1461,8 @@ def _load_outline(arg: str) -> tuple[str, DocumentOutline]:
 
     if backend == "docling":
         # The cache wraps the outline alongside its figure regions.
-        return doc_id, DocumentOutline.from_dict(data["outline"])
-    return doc_id, parse_textract_blocks(data, doc_id=doc_id)
+        return doc_id, backend, DocumentOutline.from_dict(data["outline"])
+    return doc_id, backend, parse_textract_blocks(data, doc_id=doc_id)
 
 
 class _FlaggedTable(NamedTuple):
@@ -1549,7 +1641,7 @@ def chunk_cmd(
     )
     from datasheet_rag.chunking.splitter import SplitterConfig
 
-    doc_id, outline = _load_outline(doc_id)
+    doc_id, backend, outline = _load_outline(doc_id)
 
     # Default to the manifest ingest wrote for this document — without it a
     # re-chunk would silently drop every figure from the graph.
@@ -1574,6 +1666,8 @@ def chunk_cmd(
         config=config,
         summarizer_mode=summarizer,
     )
+    # Only a Docling outline has title hints; Textract has none to report.
+    graph.title_hints = outline.title_hints() if backend == "docling" else None
 
     # Save
     settings = get_settings()
@@ -1814,14 +1908,12 @@ def search(
     console.print("[dim]Fetch a full chunk with: rag get chunk <chunk_id>[/]")
 
 
-# Sidecar attribute marking a document whose stored text has moved on from
-# its vectors. Set by the repairs that change embedded text, cleared by
-# `rag repair embeddings`, and surfaced as a column in `rag list`.
-_STALE_ATTR = "needs_reembed"
-
-
 def _set_stale(doc_id: str | None, stale: bool) -> None:
     """Best-effort flip of the stale marker on *doc_id*'s sidecar row.
+
+    The marker (``needs_reembed``) says the document's stored text has moved
+    on from its vectors. Set by the repairs that change embedded text, cleared
+    by `rag repair embeddings`, and surfaced as a column in `rag list`.
 
     Deliberately swallows every failure: a repair that already succeeded must
     not be reported as failed because a bookkeeping write didn't land, and
@@ -1830,14 +1922,9 @@ def _set_stale(doc_id: str | None, stale: bool) -> None:
     """
     if not doc_id:
         return
-    from datasheet_rag.backend import MetadataPatch
-
     try:
         be = _backend_for()
-        be.set_metadata(
-            be.resolve_doc_id(doc_id),
-            MetadataPatch(attributes={_STALE_ATTR: True if stale else None}),
-        )
+        be.set_needs_reembed(be.resolve_doc_id(doc_id), stale)
     except Exception:
         pass
 
@@ -2493,7 +2580,11 @@ def _print_cost_table(cost: CostEstimate, heading: str = "Estimated AWS cost") -
 @click.option("--doc-id", default=None, help="Explicit document ID (default: content hash).")
 @click.option("--project-id", default=None, help="Project ID attached to all chunks.")
 @click.option("--group", "group_name", default=None, help="Group name attached to all chunks.")
-@click.option("--mpn", default=None, help="Manufacturer part number, e.g. STM32H743VIT6.")
+@click.option(
+    "--mpn",
+    multiple=True,
+    help="Manufacturer part number, e.g. STM32H743VIT6. Repeat for several.",
+)
 @click.option("--manufacturer", default=None, help="Manufacturer name, e.g. STMicroelectronics.")
 @click.option("--subsystem", default=None, help="e.g. power, rf, mcu.")
 @click.option(
@@ -2506,17 +2597,17 @@ def _print_cost_table(cost: CostEstimate, heading: str = "Estimated AWS cost") -
     help="Free-text tag for this document, e.g. --tag mcu --tag "
     "reviewed (repeatable). Sets the sidecar's whole tag list "
     "for this ingest. Change it later without a re-ingest via "
-    "`rag metadata <doc-id> --tag ...`; for arbitrary "
-    "key=value tagging use --attr key=value instead.",
+    "`rag metadata <doc-id> --tag ...`; for name=value metadata "
+    "use --field.",
 )
 @click.option(
-    "--attr",
-    "attrs",
+    "--field",
+    "field_items",
     multiple=True,
-    metavar="KEY=VALUE",
-    help="Arbitrary key=value attribute, repeatable, e.g. --attr "
-    "revision=B. Merged over any [attributes] from .rag.toml, key by "
-    "key. Change it later via `rag metadata <doc-id> --attr ...`.",
+    metavar="NAME=VALUE",
+    help="Value of a registered field (see `rag fields list`), repeatable; "
+    "repeat a list field to give several values. Merged over any [fields] "
+    "from .rag.toml, field by field.",
 )
 @click.option(
     "--skip-figures",
@@ -2610,12 +2701,12 @@ def ingest(
     doc_id: str | None,
     project_id: str | None,
     group_name: str | None,
-    mpn: str | None,
+    mpn: tuple[str, ...],
     manufacturer: str | None,
     subsystem: str | None,
     doc_type: str | None,
     tags: tuple[str, ...],
-    attrs: tuple[str, ...],
+    field_items: tuple[str, ...],
     skip_figures: bool,
     upload_figures: bool,
     skip_describe: bool,
@@ -2646,15 +2737,26 @@ def ingest(
     skipped unless --force is given, and --show-cost prints a combined
     estimate across all of them in addition to each document's breakdown.
     """
+    # A store write follows unless this is a dry run. Built once, so a bulk
+    # ingest shares one backend and one read of the field registry.
+    store_backend = None if dry_run or show_cost else _backend_for(db_path)
     common: dict[str, Any] = dict(
+        store_backend=store_backend,
+        field_registry=_FieldRegistry(store_backend) if store_backend is not None else None,
         project_id=project_id,
         group_name=group_name,
-        mpn=mpn,
-        manufacturer=manufacturer,
         subsystem=subsystem,
-        doc_type=doc_type,
         tags=tags,
-        attributes=_parse_attr_items(attrs),
+        fields=_merge_shortcuts(
+            _parse_field_items(field_items),
+            # Empty shortcut values were never a "clear" on ingest (there is
+            # nothing to clear yet), so drop them rather than send "".
+            _shortcut_fields(
+                mpn=tuple(m for m in mpn if m),
+                manufacturer=manufacturer or None,
+                doc_type=doc_type or None,
+            ),
+        ),
         skip_figures=skip_figures,
         upload_figures=upload_figures,
         skip_describe=skip_describe,
@@ -2692,7 +2794,9 @@ def ingest(
     ingested_ids: set[str] = set()
     if not show_cost:
         try:
-            ingested_ids = {d.doc_id for d in _backend_for(db_path).get_ingested_docs()}
+            ingested_ids = {
+                d.doc_id for d in (store_backend or _backend_for(db_path)).get_ingested_docs()
+            }
         except Exception:
             ingested_ids = set()
 
@@ -2756,14 +2860,13 @@ def _ingest_one(
     pdf_path: Path,
     *,
     doc_id: str | None,
+    store_backend: RagBackend | None,
+    field_registry: _FieldRegistry | None,
     project_id: str | None,
     group_name: str | None,
-    mpn: str | None,
-    manufacturer: str | None,
     subsystem: str | None,
-    doc_type: str | None,
     tags: tuple[str, ...],
-    attributes: dict[str, str],
+    fields: dict[str, Any],
     skip_figures: bool,
     upload_figures: bool,
     skip_describe: bool,
@@ -2800,19 +2903,23 @@ def _ingest_one(
     if proj_cfg is not None:
         project_id = project_id or proj_cfg.project_id
         group_name = group_name or proj_cfg.group
-        mpn = mpn or proj_cfg.mpn
-        manufacturer = manufacturer or proj_cfg.manufacturer
         subsystem = subsystem or proj_cfg.subsystem
-        doc_type = doc_type or proj_cfg.doc_type
         if not tags and proj_cfg.tags:
             tags = tuple(proj_cfg.tags)
-        attributes = {**(proj_cfg.attributes or {}), **attributes}
 
     if show_cost:
         dry_run = True
         console.print(
             "[yellow]--show-cost: estimating AWS spend, skipping priced Bedrock/Textract calls.[/]"
         )
+
+    # A store write follows (store_backend is None on a dry run): read the
+    # field registry now, so a bad field fails before the PDF is parsed, not
+    # after. A patch with no fields has nothing to check.
+    backend_obj = store_backend
+    fields = _merge_config_fields(proj_cfg, fields)
+    if field_registry is not None and fields:
+        _check_field_patch(field_registry.specs(), fields)
 
     settings = get_settings()
     if accurate_tables is None:
@@ -2856,18 +2963,16 @@ def _ingest_one(
         and not dry_run
         and not show_cost
     ):
-        from datasheet_rag.backend import MetadataPatch, RagServerError, get_backend
+        from datasheet_rag.backend import MetadataPatch, RagServerError
 
+        assert backend_obj is not None  # built above for every non-dry run
         meta_patch = MetadataPatch(
-            mpn=mpn or None,
-            manufacturer=manufacturer or None,
             subsystem=subsystem or None,
-            doc_type=doc_type or None,
             tags=list(tags) if tags else None,
-            attributes=attributes or None,
+            fields=fields or None,
         )
         try:
-            result = get_backend().ingest_pdf(
+            result = backend_obj.ingest_pdf(
                 pdf_path,
                 doc_id=doc_id,
                 project_id=project_id,
@@ -2965,16 +3070,9 @@ def _ingest_one(
     step_state["n"] += 1
     where = "here" if backend_mode() == "local" or compute_mode() == "client" else "on the server"
     console.rule(f"[bold cyan]Step {step_state['n']} — Embed & store ({where})[/]")
-    from datasheet_rag.backend import MetadataPatch, get_backend
+    from datasheet_rag.backend import MetadataPatch
 
-    # `rag ingest --db` targets a specific local file; honor it by building a
-    # LocalBackend on that path rather than the configured backend.
-    if db_path is not None:
-        from datasheet_rag.backend import LocalBackend
-
-        backend_obj: RagBackend = LocalBackend(db_path)
-    else:
-        backend_obj = get_backend()
+    assert backend_obj is not None  # built above for every non-dry run
 
     # In remote mode the cropped figure images live only on this client —
     # ship their bytes so the server stores them and rewrites the host-local
@@ -2985,15 +3083,10 @@ def _ingest_one(
         _warn_missing_figure_crops(missing, len(figures_upload))
 
     meta_patch = MetadataPatch(
-        mpn=mpn or None,
-        manufacturer=manufacturer or None,
         subsystem=subsystem or None,
-        doc_type=doc_type or None,
         tags=list(tags) if tags else None,
-        attributes=attributes or None,
+        fields=fields or None,
     )
-    title_hints = dict(parsed.title_hints)
-
     from datasheet_rag.backend import RagServerError
 
     try:
@@ -3006,7 +3099,7 @@ def _ingest_one(
             embed=True,
             describe_figures=do_describe,
             infer_title=infer_title,
-            title_hints=title_hints or None,
+            title_hints=parsed.title_hints,
             # This path parsed the PDF here — that is what --local-parse and
             # RAG_COMPUTE=client both mean. A remote backend has therefore
             # never seen the file and uploads it; a local one already has it
@@ -3615,14 +3708,15 @@ def repair_tables_cmd(
 @click.option("--group", "group_name", default=None, help="Set the document's group name.")
 @click.option(
     "--mpn",
-    default=None,
-    help="Manufacturer part number, e.g. STM32H743VIT6. Replaces the current value.",
+    multiple=True,
+    help="Manufacturer part number, e.g. STM32H743VIT6. Repeat for several. "
+    "Replaces the whole mpn list; --mpn '' clears it.",
 )
 @click.option(
     "--mpn-alias",
     "mpn_aliases",
     multiple=True,
-    help="Add an MPN alias without replacing existing ones (repeatable).",
+    help="Append an MPN to the list without replacing existing ones (repeatable).",
 )
 @click.option(
     "--manufacturer",
@@ -3645,21 +3739,20 @@ def repair_tables_cmd(
 )
 @click.option("--clear-tags", is_flag=True, help="Remove all tags. Ignored if --tag is also given.")
 @click.option(
-    "--attr",
-    "attrs",
+    "--field",
+    "field_items",
     multiple=True,
-    metavar="KEY=VALUE",
-    help="Arbitrary key=value tag, repeatable, e.g. --attr "
-    "revision=B --attr reviewed_by=hector. Unlike --tag, "
-    "attributes are merged key-by-key: existing keys not "
-    "mentioned are left alone. Use --unset-attr to remove one.",
+    metavar="NAME=VALUE",
+    help="Set a registered field (see `rag fields list`), repeatable. Each field "
+    "named is replaced; repeat a list field to give several values, e.g. "
+    "--field acme-pn=P1 --field acme-pn=P2. Fields not named are left alone.",
 )
 @click.option(
-    "--unset-attr",
-    "unset_attrs",
+    "--unset-field",
+    "unset_fields",
     multiple=True,
-    metavar="KEY",
-    help="Remove a single attribute key (repeatable).",
+    metavar="NAME",
+    help="Remove a field's value from the document (repeatable).",
 )
 @_db_option
 @click.option(
@@ -3672,34 +3765,35 @@ def metadata_cmd(
     doc_title: str | None,
     project_id: str | None,
     group_name: str | None,
-    mpn: str | None,
+    mpn: tuple[str, ...],
     mpn_aliases: tuple[str, ...],
     manufacturer: str | None,
     subsystem: str | None,
     doc_type: str | None,
     tags: tuple[str, ...],
     clear_tags: bool,
-    attrs: tuple[str, ...],
-    unset_attrs: tuple[str, ...],
+    field_items: tuple[str, ...],
+    unset_fields: tuple[str, ...],
     db_path: Path | None,
     apply_to_chunks: bool,
 ) -> None:
     """Show a document's metadata sidecar row, or update it.
 
     With no options this prints the document's current metadata. Pass any
-    field to update instead — only the fields you pass are touched:
+    option to update instead — only what you pass is touched:
 
     \b
         rag metadata <doc_id>                 # show
         rag metadata <doc_id> --mpn INA226    # set
 
-    Multiple MPNs (variants/aliases) can be stored on the same document.
-    Use --mpn to set the primary MPN and --mpn-alias to append extras:
+    A document's mpn is a list (variants/aliases). --mpn replaces the list,
+    --mpn-alias appends to it:
 
         rag metadata <doc_id> --mpn INA226 --mpn-alias INA226A --mpn-alias INA226B
 
     Filtering with --mpn on `rag list` or via the MCP tools matches any
-    token in the comma-separated list.
+    entry in the list. --mpn, --manufacturer and --doc-type are shortcuts
+    for --field on the built-in fields; `rag fields list` shows every field.
     """
     from datasheet_rag.backend import MetadataPatch
     from datasheet_rag.project_config import get_project_config
@@ -3709,9 +3803,9 @@ def metadata_cmd(
     # would silently turn every `rag metadata <doc>` into a write. The scalar
     # options are tested against None, not truthiness: `--title ''` is an
     # explicit request to clear the field, not an absent option.
-    scalars = (doc_title, project_id, group_name, mpn, manufacturer, subsystem, doc_type)
+    scalars = (doc_title, project_id, group_name, manufacturer, subsystem, doc_type)
     is_read = all(v is None for v in scalars) and not any(
-        (mpn_aliases, tags, clear_tags, attrs, unset_attrs)
+        (mpn, mpn_aliases, tags, clear_tags, field_items, unset_fields)
     )
     if is_read:
         be = _backend_for(db_path)
@@ -3722,44 +3816,43 @@ def metadata_cmd(
         console.print(existing.model_dump_json(indent=2, exclude_none=True))
         return
 
-    # .rag.toml fills only the fields the user did not pass; an explicit blank
+    fields: dict[str, Any] = _merge_shortcuts(
+        _parse_field_items(field_items),
+        _shortcut_fields(mpn=mpn, manufacturer=manufacturer, doc_type=doc_type),
+    )
+    both = sorted(set(fields) & set(unset_fields))
+    if both:
+        raise click.UsageError(f"{', '.join(both)} given both to set and to --unset-field")
+    for name in unset_fields:
+        fields[name] = None
+
+    # .rag.toml fills only what the user did not pass; an explicit blank
     # beats a config default.
     proj_cfg = get_project_config()
     if proj_cfg is not None:
         project_id = proj_cfg.project_id if project_id is None else project_id
         group_name = proj_cfg.group if group_name is None else group_name
-        mpn = proj_cfg.mpn if mpn is None else mpn
-        manufacturer = proj_cfg.manufacturer if manufacturer is None else manufacturer
         subsystem = proj_cfg.subsystem if subsystem is None else subsystem
-        doc_type = proj_cfg.doc_type if doc_type is None else doc_type
         if not tags and proj_cfg.tags:
             tags = tuple(proj_cfg.tags)
-
-    # Config attributes fill the keys the user did not name; --attr and
-    # --unset-attr both win for the keys they touch.
-    attributes: dict[str, Any] = dict(proj_cfg.attributes or {}) if proj_cfg is not None else {}
-    attributes.update(_parse_attr_items(attrs))
-    for key in unset_attrs:
-        attributes[key] = None
+    fields = _merge_config_fields(proj_cfg, fields)
 
     be = _backend_for(db_path)
     doc_id = _backend_resolve(be, doc_id)
 
-    # Merge --mpn-alias values into the mpn field as a comma-separated list.
+    # --mpn-alias appends to the mpn list: the one --mpn (or .rag.toml) just
+    # gave, else the one already stored.
     if mpn_aliases:
-        if mpn is None:
-            # No --mpn given; read existing to append aliases without clobbering
-            existing_meta = be.get_metadata(doc_id)
-            base = existing_meta.mpn if existing_meta else None
+        if fields.get("mpn") is not None:
+            base = fields["mpn"]
         else:
-            base = mpn
-        all_mpns: list[str] = []
-        if base:
-            all_mpns = [t.strip() for t in base.split(",") if t.strip()]
+            existing_meta = be.get_metadata(doc_id)
+            base = existing_meta.fields.get("mpn") if existing_meta else None
+        all_mpns: list[str] = [base] if isinstance(base, str) else list(base or [])
         for alias in mpn_aliases:
             if alias not in all_mpns:
                 all_mpns.append(alias)
-        mpn = ",".join(all_mpns)
+        fields["mpn"] = all_mpns
 
     if doc_title is not None:
         updated = be.set_doc_title(doc_id, doc_title)
@@ -3772,25 +3865,116 @@ def metadata_cmd(
     else:
         new_tags = None
 
-    meta = be.set_metadata(
-        doc_id,
-        MetadataPatch(
-            project_id=project_id,
-            group_name=group_name,
-            mpn=mpn,
-            manufacturer=manufacturer,
-            subsystem=subsystem,
-            doc_type=doc_type,
-            tags=new_tags,
-            attributes=attributes or None,
-        ),
-    )
+    try:
+        meta = be.set_metadata(
+            doc_id,
+            MetadataPatch(
+                project_id=project_id,
+                group_name=group_name,
+                subsystem=subsystem,
+                tags=new_tags,
+                fields=fields or None,
+            ),
+        )
+    except ValueError as e:
+        raise click.ClickException(str(e)) from e
     console.print(f"[green]Saved metadata for[/] {doc_id}")
     console.print(meta.model_dump_json(indent=2, exclude_none=True))
 
     if apply_to_chunks:
         updated = be.apply_metadata_to_chunks(doc_id)
         console.print(f"  Propagated to {updated} chunk rows.")
+
+
+# ---------------------------------------------------------------------------
+# fields (registered metadata fields — GH #120)
+# ---------------------------------------------------------------------------
+
+
+@cli.group("fields", short_help="Register the metadata fields documents can carry.")
+def fields_group() -> None:
+    """Register, list and remove metadata fields.
+
+    A field is a named, typed, filterable piece of document metadata — e.g.
+    an internal document number, a vendor's document number, an internal
+    part number. A field must be registered before a document can hold a
+    value for it. Then set it with `rag metadata <doc> --field NAME=VALUE`
+    or a `[fields]` table in .rag.toml, filter with `rag list --field`, and
+    agents can filter `search` on it. mpn, manufacturer and doc_type are
+    built in.
+    """
+
+
+@fields_group.command("list", short_help="Show every registered field.")
+@_db_option
+def fields_list_cmd(db_path: Path | None) -> None:
+    """Show every registered field: name, shape, roles, description."""
+    table = Table(title="Metadata fields")
+    for col in ("name", "shape", "roles", "built in", "description"):
+        table.add_column(col, style="cyan" if col == "name" else None)
+    for f in _backend_for(db_path).list_fields():
+        table.add_row(
+            f.name, f.shape, ", ".join(f.roles) or "—", "yes" if f.builtin else "", f.description
+        )
+    console.print(table)
+
+
+@fields_group.command("add", short_help="Register a new field.")
+@click.argument("name")
+@click.option(
+    "--shape",
+    type=click.Choice(["single", "list"]),
+    default="single",
+    help="single: one value per document. list: several, in order.",
+)
+@click.option("--description", default="", help="Shown to agents and in `rag fields list`.")
+@click.option(
+    "--role",
+    "roles",
+    multiple=True,
+    type=click.Choice(["part"]),
+    help="part: the values are part numbers (used to match a BOM).",
+)
+@_db_option
+def fields_add_cmd(
+    name: str, shape: str, description: str, roles: tuple[str, ...], db_path: Path | None
+) -> None:
+    """Register field NAME (lower case, digits, '-' and '_').
+
+    \b
+        rag fields add acme-id --description "ACME document number"
+        rag fields add acme-pn --shape list --role part
+    """
+    try:
+        spec = _backend_for(db_path).register_field(
+            name,
+            shape=shape,  # type: ignore[arg-type]  # click.Choice guarantees the literal
+            description=description,
+            roles=roles,
+        )
+    except ValueError as e:
+        raise click.ClickException(str(e)) from e
+    console.print(f"[green]Registered[/] {spec.name} ({spec.shape})")
+
+
+@fields_group.command("remove", short_help="Unregister a field.")
+@click.argument("name")
+@click.option(
+    "--clear",
+    is_flag=True,
+    help="Delete the field's values from every document with it, instead of "
+    "refusing while any document has one.",
+)
+@_db_option
+def fields_remove_cmd(name: str, clear: bool, db_path: Path | None) -> None:
+    """Unregister field NAME. Built-in fields cannot be removed."""
+    try:
+        held = _backend_for(db_path).remove_field(name, clear=clear)
+    except ValueError as e:
+        raise click.ClickException(str(e)) from e
+    console.print(f"[green]Removed[/] {name}")
+    if held:
+        console.print(f"  Deleted its values on {held} document(s).")
 
 
 # ---------------------------------------------------------------------------
@@ -3834,7 +4018,7 @@ def fix_titles_cmd(
     hand outranks an inferred one and is left alone — pass --force to
     replace it anyway, or to overwrite an existing inferred title.
     """
-    from datasheet_rag.store.metadata import title_rank, title_source_of
+    from datasheet_rag.store.metadata import title_rank
 
     be = _backend_for(db_path)
 
@@ -3866,7 +4050,7 @@ def fix_titles_cmd(
         short_id = d.doc_id[:SHORT_DOC_ID_LEN]
         current = d.doc_title
         md = be.get_metadata(d.doc_id)
-        source = title_source_of(md.attributes if md is not None else {})
+        source = md.title_source if md is not None else "auto"
         # Say why we're leaving a hand-set title alone, rather than letting
         # the store's refusal surface as an indistinguishable "could not
         # infer" further down.
@@ -4688,13 +4872,15 @@ def _run_answer_eval(
             f"the needs' documents should sit in one project, found {projects or 'none'}"
         )
     project = projects[0]
+    from datasheet_rag.store.fields import display_value
+
     listing = LocalBackend(conn=conn).list_documents(project_id=project).documents
     docs = [
         {
             "doc_id": d.doc_id,
             "title": d.doc_title,
-            "mpn": d.mpn,
-            "manufacturer": d.manufacturer,
+            "mpn": display_value(d.fields.get("mpn")),
+            "manufacturer": display_value(d.fields.get("manufacturer")),
             "pages": d.page_count,
         }
         for d in listing
@@ -4981,8 +5167,13 @@ def eval_claude_code(
                 f"the needs' documents should sit in one project, found {projects or 'none'}"
             )
         project = str(projects.pop())
+        from datasheet_rag.store.fields import display_value
+
         listing = backend.list_documents(project_id=project).documents
-        docs = [{"doc_id": d.doc_id, "title": d.doc_title, "mpn": d.mpn} for d in listing]
+        docs = [
+            {"doc_id": d.doc_id, "title": d.doc_title, "mpn": display_value(d.fields.get("mpn"))}
+            for d in listing
+        ]
         copied = ws.prepare(docs, backend.get_pdf_bytes, project)
         console.print(
             f"[cyan]Workspace[/] {ws.root}: {len(docs)} PDFs of project {project}"

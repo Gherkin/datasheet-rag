@@ -61,11 +61,15 @@
     },
     {
       "name": "list_documents",
-      "description": "List documents in the current project, optionally filtered by group/MPN/manufacturer"
+      "description": "List documents in the current project, optionally filtered by group/MPN/manufacturer or any registered metadata field"
+    },
+    {
+      "name": "list_metadata_fields",
+      "description": "List the metadata fields documents carry and can be filtered on (built-in and user-registered)"
     },
     {
       "name": "get_document_metadata",
-      "description": "Fetch the metadata sidecar for a document (MPN, manufacturer, tags, subsystem)"
+      "description": "Fetch the metadata sidecar for a document (metadata fields such as MPN and manufacturer, tags, subsystem)"
     },
     {
       "name": "stats",

@@ -18,18 +18,29 @@ from collections.abc import Sequence
 from typing import Literal
 
 import numpy as np
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from datasheet_rag.models.chunk import Chunk, ChunkLevel, LayoutType
+from datasheet_rag.store.fields import field_filter_sql
 from datasheet_rag.store.sqlite import get_chunk
 
 
 class SearchFilters(BaseModel):
-    """Optional metadata filters applied on top of a search query."""
+    """Optional metadata filters applied on top of a search query.
+
+    Unknown names are rejected: a filter that was silently ignored would
+    return unfiltered results that look filtered.
+    """
+
+    model_config = ConfigDict(extra="forbid")
 
     doc_ids: list[str] | None = None
     project_id: str | None = None
     group_name: str | None = None
+    #: Registered-field filters, AND-ed: ``{"mpn": "INA226"}`` keeps chunks
+    #: of documents whose mpn list holds INA226 (case-insensitive). See
+    #: ``store.fields``.
+    fields: dict[str, str] | None = None
     level: ChunkLevel | list[ChunkLevel] | None = None
     layout_types: list[LayoutType] | None = None
     min_page: int | None = None
@@ -60,6 +71,11 @@ class SearchFilters(BaseModel):
         if self.group_name is not None:
             clauses.append("c.group_name = ?")
             params.append(self.group_name)
+
+        if self.fields:
+            field_clauses, field_params = field_filter_sql(self.fields, doc_id_column="c.doc_id")
+            clauses.extend(field_clauses)
+            params.extend(field_params)
 
         if self.level is not None:
             if isinstance(self.level, list):

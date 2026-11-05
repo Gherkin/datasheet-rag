@@ -13,11 +13,7 @@ import pytest
 
 from datasheet_rag.config import get_settings
 from datasheet_rag.models.chunk import Chunk, ChunkLevel, ChunkMetadata, LayoutType
-from datasheet_rag.store.metadata import (
-    get_title_source,
-    set_metadata,
-    title_source_of,
-)
+from datasheet_rag.store.metadata import get_metadata, get_title_source, set_metadata
 from datasheet_rag.store.schema import connect
 from datasheet_rag.store.sqlite import insert_chunks, set_doc_title
 
@@ -161,47 +157,22 @@ def test_reembed_keeps_inferred_title(conn) -> None:
     assert _title(conn) == "Inferred Title"
 
 
-# -- legacy stores ----------------------------------------------------------
+# -- where provenance is stored ----------------------------------------------
 
 
-def test_legacy_title_inferred_boolean_reads_as_inferred(conn) -> None:
+def test_title_source_defaults_to_auto(conn) -> None:
+    assert get_title_source(conn, DOC) == "auto"
     _ingest(conn, "Contents")
-    set_metadata(conn, DOC, attributes={"title_inferred": True})
-
-    assert get_title_source(conn, DOC) == "inferred"
-
-    _ingest(conn, "Contents")  # must not demote a pre-migration inferred title
-    assert _title(conn) == "Contents"
+    set_metadata(conn, DOC, project_id="p")
+    assert get_title_source(conn, DOC) == "auto"
 
 
-def test_legacy_boolean_is_retired_on_next_write(conn) -> None:
-    _ingest(conn, "Contents")
-    set_metadata(conn, DOC, attributes={"title_inferred": True})
-
-    set_doc_title(conn, DOC, "Hand Written", source="manual")
-
-    from datasheet_rag.store.metadata import get_metadata
-
-    attrs = get_metadata(conn, DOC).attributes
-    assert attrs["title_source"] == "manual"
-    assert "title_inferred" not in attrs
-
-
-def test_title_source_of_defaults_to_auto() -> None:
-    assert title_source_of({}) == "auto"
-    assert title_source_of({"title_source": "nonsense"}) == "auto"
-
-
-def test_provenance_does_not_leave_a_null_legacy_key(conn) -> None:
-    """Retiring `title_inferred` must drop the key, not store a null.
-
-    `set_metadata` documents "set an attribute to None to drop it", but
-    only honoured that when the sidecar row already existed — the first
-    write for a document took the create branch and stored the null.
-    """
+def test_provenance_is_a_column_a_metadata_write_leaves_alone(conn) -> None:
     _ingest(conn, "Contents")
     set_doc_title(conn, DOC, "Hand Written", source="manual")
+    set_metadata(conn, DOC, subsystem="power")
 
-    from datasheet_rag.store.metadata import get_metadata
-
-    assert get_metadata(conn, DOC).attributes == {"title_source": "manual"}
+    md = get_metadata(conn, DOC)
+    assert md is not None and md.title_source == "manual"
+    _ingest(conn, "Contents")  # must not demote the manual title
+    assert _title(conn) == "Hand Written"

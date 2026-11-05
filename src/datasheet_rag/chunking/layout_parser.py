@@ -176,6 +176,11 @@ class DocumentOutline:
             _walk(s)
         return result
 
+    def title_hints(self) -> dict[str, str]:
+        """The title hints this outline found, without the empty ones."""
+        hints = {"running_header": self.running_header, "pdf_meta_title": self.pdf_meta_title}
+        return {k: v for k, v in hints.items() if v}
+
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a JSON-able dict (used to cache Docling's output —
         layout analysis is the slowest step on large PDFs, so persisting its

@@ -80,6 +80,7 @@ from datasheet_rag.backend import (
 from datasheet_rag.config import get_settings
 from datasheet_rag.models.chunk import IMAGE_LAYOUT_TYPES, ChunkLevel, LayoutType
 from datasheet_rag.store import DocMetadata, SearchFilters, SearchResult
+from datasheet_rag.store.fields import MetadataFieldError, check_filter_fields
 
 # ---------------------------------------------------------------------------
 # Return annotations on the content-block tools
@@ -476,6 +477,7 @@ def _search_impl(
     doc_id: str | None = None,
     level: str | None = None,
     layout_types: list[str] | None = None,
+    fields: dict[str, str] | None = None,
     backend: RagBackend | None = None,
     conn: Any | None = None,
     embedder: Any | None = None,
@@ -486,10 +488,13 @@ def _search_impl(
     _check_page_args(limit, offset)
 
     be = _backend(backend, conn, embedder)
+    if fields:
+        _check_filter_fields(be, fields)
 
     filters = SearchFilters(
         doc_ids=[doc_id] if doc_id else None,
         project_id=_resolve_project(project_id),
+        fields=fields or None,
         level=_resolve_level(level),
         layout_types=_resolve_layout_types(layout_types),
     )
@@ -590,19 +595,30 @@ def _list_documents_impl(
     group: str | None = None,
     mpn: str | None = None,
     manufacturer: str | None = None,
+    fields: dict[str, str] | None = None,
     limit: int = DEFAULT_PAGE_SIZE,
     offset: int = 0,
     backend: RagBackend | None = None,
     conn: Any | None = None,
 ) -> dict[str, Any]:
-    """List one page of the store's documents, optionally filtered by sidecar metadata."""
+    """List one page of the store's documents, optionally filtered by sidecar metadata.
+
+    ``mpn`` and ``manufacturer`` are shortcuts for the built-in fields of
+    the same name; they merge into ``fields``.
+    """
     _check_page_args(limit, offset)
     be = _backend(backend, conn)
+    field_filter = dict(fields or {})
+    for name, value in (("mpn", mpn), ("manufacturer", manufacturer)):
+        if value is None:
+            continue
+        if name in field_filter:
+            raise ValueError(f"{name} given both as {name}= and in fields; use one")
+        field_filter[name] = value
     page = be.list_documents(
         project_id=_resolve_project(project_id),
         group_name=group,
-        mpn=mpn,
-        manufacturer=manufacturer,
+        fields=field_filter or None,
         limit=limit,
         offset=offset,
     )
@@ -611,10 +627,8 @@ def _list_documents_impl(
             "doc_id": d.doc_id,
             "project_id": d.project_id,
             "group_name": d.group_name,
-            "mpn": d.mpn,
-            "manufacturer": d.manufacturer,
             "subsystem": d.subsystem,
-            "doc_type": d.doc_type,
+            "fields": d.fields,
             "tags": d.tags,
             **({"doc_title": d.doc_title} if d.doc_title else {}),
             **({"page_count": d.page_count} if d.page_count is not None else {}),
@@ -627,6 +641,36 @@ def _list_documents_impl(
         total=page.total,
         more=offset + len(page.documents) < page.total,
     )
+
+
+def _doc_label(meta: dict[str, Any] | None) -> str:
+    """``"<first mpn> — <manufacturer>"`` for a viewer caption, or ``""``."""
+    if not meta:
+        return ""
+    fields = meta.get("fields") or {}
+    mpn = fields.get("mpn") or []
+    parts = [mpn[0] if isinstance(mpn, list) and mpn else "", fields.get("manufacturer") or ""]
+    return " — ".join(p for p in parts if p)
+
+
+def _check_filter_fields(be: RagBackend, fields: dict[str, str]) -> None:
+    """Reject a filter on an unregistered field with the list of valid ones.
+
+    A search filter on a misspelt field would otherwise match nothing and look
+    like "the store has no such documents".
+    """
+    try:
+        check_filter_fields((f.name for f in be.list_fields()), fields)
+    except MetadataFieldError as e:
+        raise ValueError(f"{e} (see list_metadata_fields)") from None
+
+
+def _list_metadata_fields_impl(
+    *, backend: RagBackend | None = None, conn: Any | None = None
+) -> dict[str, Any]:
+    """Every registered field: name, description, shape, roles, builtin."""
+    be = _backend(backend, conn)
+    return {"fields": [f.model_dump(mode="json") for f in be.list_fields()]}
 
 
 def _get_document_metadata_impl(
@@ -956,6 +1000,7 @@ def build_server(
         doc_id: str | None = None,
         level: str | None = None,
         layout_types: list[str] | None = None,
+        fields: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Search the RAG database for chunks relevant to a query.
 
@@ -972,6 +1017,11 @@ def build_server(
         - `level`: 'macro' (chapter summaries), 'meso' (subsections),
                    'micro' (paragraphs / tables).
         - `layout_types`: restrict to text/table/figure/formula/key_value/list.
+        - `fields`: restrict to documents whose metadata fields match, e.g.
+                    {"mpn": "INA226"} or {"manufacturer": "TI"}. All must
+                    match; a list field (like mpn) matches if any value is
+                    equal; case-insensitive. `list_metadata_fields` names
+                    the fields.
         """
         return _search_impl(
             query,
@@ -982,6 +1032,7 @@ def build_server(
             doc_id=doc_id,
             level=level,
             layout_types=layout_types,
+            fields=fields,
             backend=backend,
         )
 
@@ -1031,6 +1082,7 @@ def build_server(
         group: str | None = None,
         mpn: str | None = None,
         manufacturer: str | None = None,
+        fields: dict[str, str] | None = None,
         limit: int = DEFAULT_PAGE_SIZE,
         offset: int = 0,
     ) -> dict[str, Any]:
@@ -1038,22 +1090,42 @@ def build_server(
 
         Every ingested document appears, whether or not metadata has been
         assigned to it; untagged ones come back with null sidecar fields.
-        Filtering by group, mpn or manufacturer narrows this to documents
-        that do have metadata, since that is the only place those live.
+        Each row's `fields` holds its metadata-field values (mpn, manufacturer,
+        doc_type and any user-registered field — see `list_metadata_fields`).
+
+        Filtering by group or a field narrows this to documents that do have
+        metadata, since that is the only place those live. `mpn` and
+        `manufacturer` are shortcuts for `fields={"mpn": …}` /
+        `{"manufacturer": …}`; `fields` filters on any registered field (all
+        must match, case-insensitive).
         """
         return _list_documents_impl(
             project_id=project_id,
             group=group,
             mpn=mpn,
             manufacturer=manufacturer,
+            fields=fields,
             limit=limit,
             offset=offset,
             backend=backend,
         )
 
     @mcp.tool()
+    def list_metadata_fields() -> dict[str, Any]:
+        """List the metadata fields documents can carry and be filtered on.
+
+        Each field has a name, a description, a shape ('single' value or
+        'list' of values), roles ('part' = its values are part numbers) and
+        whether it is built in. Use the names with the `fields` filter of
+        `search` and `list_documents`. Built-ins: mpn, manufacturer, doc_type;
+        the rest are registered by whoever runs this store, e.g. an internal
+        document number.
+        """
+        return _list_metadata_fields_impl(backend=backend)
+
+    @mcp.tool()
     def get_document_metadata(doc_id: str) -> dict[str, Any] | None:
-        """Fetch the metadata sidecar row for a document (mpn, manufacturer, tags, …).
+        """Fetch the metadata sidecar row for a document (fields such as mpn, tags, …).
 
         An ingested document with no metadata assigned returns a row of null
         fields. ``None`` means no such document is in the store.
@@ -1336,11 +1408,7 @@ def build_server(
                 return [TextContent(type="text", text=f"Error: {exc}")]
             except Exception as exc:
                 return [TextContent(type="text", text=f"Failed to load PDF: {exc}")]
-            meta = _get_document_metadata_impl(doc_id, backend=backend)
-            label = ""
-            if meta:
-                parts = [meta.get("mpn") or "", meta.get("manufacturer") or ""]
-                label = " — ".join(p for p in parts if p)
+            label = _doc_label(_get_document_metadata_impl(doc_id, backend=backend))
             desc = f" ({label})" if label else ""
             return [
                 TextContent(
@@ -1392,11 +1460,7 @@ def build_server(
         buf = io.BytesIO()
         images[0].save(buf, format="PNG")
         img_b64 = base64.b64encode(buf.getvalue()).decode()
-        meta = _get_document_metadata_impl(doc_id, backend=backend)
-        label = ""
-        if meta:
-            parts = [meta.get("mpn") or "", meta.get("manufacturer") or ""]
-            label = " — ".join(p for p in parts if p)
+        label = _doc_label(_get_document_metadata_impl(doc_id, backend=backend))
         caption = f"page {page}" + (f" · {label}" if label else "")
         return [
             ImageContent(type="image", data=img_b64, mime_type="image/png"),

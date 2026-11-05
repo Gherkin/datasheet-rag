@@ -116,6 +116,12 @@ class ChunkGraph(BaseModel):
 
     doc_id: str
     chunks: dict[str, Chunk] = Field(default_factory=dict, description="chunk_id → Chunk")
+    #: The title hints of the Docling outline this graph was chunked from.
+    #: ``None`` when it was not chunked from one (Textract, or a cached graph
+    #: written before this field existed). Kept with the graph so a resumed
+    #: ingest reports the hints of the graph it stores, not of whatever
+    #: outline sits beside it in the cache.
+    title_hints: dict[str, str] | None = None
 
     def add(self, chunk: Chunk) -> None:
         self.chunks[chunk.id] = chunk

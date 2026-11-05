@@ -8,37 +8,40 @@ way git/pyproject-style tools find their config — but unlike those tools,
 you can build a tree of configs:
 
     netdaq/
-      .rag.toml                      # project_id, manufacturer defaults
+      .rag.toml                      # project_id, [fields] manufacturer
       datasheets/
         power-subsystem/
           .rag.toml                  # subsystem = "power", group = "psu"
           STM32H743VIT6/
-            .rag.toml                # mpn = "STM32H743VIT6"
+            .rag.toml                # [fields] mpn = ["STM32H743VIT6"]
             datasheet.pdf
 
 Running ``rag ingest`` from inside ``STM32H743VIT6/`` merges all three files:
-the mpn-level config wins for fields it sets (``mpn``), the subsystem-level
+the mpn-level config wins for what it sets (``mpn``), the subsystem-level
 config fills in ``subsystem``/``group``, and the project-level config supplies
 the rest (``project_id``, ``manufacturer``). ``tags`` are unioned across every
-level instead of overridden, and ``attributes`` are merged key by key.
+level instead of overridden, and ``[fields]`` are merged name by name.
 
 Example ``.rag.toml``::
 
     project_id = "stm32-h7-devboard"
     group = "power-subsystem"
-    mpn = "STM32H743VIT6"
-    manufacturer = "STMicroelectronics"
     subsystem = "mcu"
-    doc_type = "reference-manual"
     tags = ["reference-manual"]
 
-    [attributes]
-    revision = "B"
+    [fields]
+    mpn = ["STM32H743VIT6", "STM32H743ZIT6"]
+    manufacturer = "STMicroelectronics"
+    doc_type = "reference-manual"
+    acme-id = "D-0172"           # a field registered with `rag fields add`
 
-The schema is closed: an unknown key, a value of the wrong type, a reserved
-attribute key or a file that is not valid TOML raises ``ProjectConfigError``
-rather than being dropped, since a silently ignored default mislabels every
-document ingested under it (GH #26).
+``[fields]`` sets any registered field, built-in (``mpn``, ``manufacturer``,
+``doc_type``) or user-registered (GH #120).
+
+The schema is closed: an unknown key, a value of the wrong type or a file
+that is not valid TOML raises ``ProjectConfigError`` rather than being
+dropped, since a silently ignored default mislabels every document ingested
+under it (GH #26).
 """
 
 from __future__ import annotations
@@ -50,12 +53,12 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from datasheet_rag.store.metadata import RESERVED_ATTRIBUTES
+from datasheet_rag.store.fields import BUILTIN_FIELDS, FieldValue
 
 CONFIG_FILENAME = ".rag.toml"
 
-_SCALAR_KEYS = ("project_id", "group", "mpn", "manufacturer", "subsystem", "doc_type")
-_KNOWN_KEYS = frozenset({*_SCALAR_KEYS, "tags", "attributes"})
+_SCALAR_KEYS = ("project_id", "group", "subsystem")
+_KNOWN_KEYS = frozenset({*_SCALAR_KEYS, "tags", "fields"})
 
 
 class ProjectConfigError(ValueError):
@@ -69,36 +72,43 @@ class ProjectConfig:
     path: Path
     project_id: str | None = None
     group: str | None = None
-    mpn: str | None = None
-    manufacturer: str | None = None
     subsystem: str | None = None
-    doc_type: str | None = None
     tags: list[str] | None = None
-    attributes: dict[str, str] | None = None
+    #: Registered-field values. Whether each field is registered is checked
+    #: when the values are written, not here: loading a config must not need
+    #: the store.
+    fields: dict[str, FieldValue] | None = None
 
 
-def _check_attributes(candidate: Path, raw: Any) -> dict[str, str]:
+#: Shapes of the built-in fields, known without a store. A user field's shape
+#: is only known to the store, so its value is checked when it is written.
+_BUILTIN_SHAPES = {f.name: f.shape for f in BUILTIN_FIELDS}
+
+
+def _check_field_value(candidate: Path, name: str, value: Any) -> FieldValue:
+    if isinstance(value, str):
+        return value
+    if _BUILTIN_SHAPES.get(name) == "single":
+        raise ProjectConfigError(
+            f"{candidate}: field {name!r} must be a string, got {type(value).__name__}"
+        )
+    if isinstance(value, list) and all(isinstance(v, str) for v in value):
+        return list(value)
+    raise ProjectConfigError(
+        f"{candidate}: field {name!r} must be a string or a list of strings, "
+        f"got {type(value).__name__}"
+    )
+
+
+def _check_fields(candidate: Path, raw: Any) -> dict[str, FieldValue]:
     if not isinstance(raw, dict):
-        raise ProjectConfigError(f"{candidate}: 'attributes' must be a table, e.g. [attributes]")
-    for key, value in raw.items():
-        if not key:
-            raise ProjectConfigError(f"{candidate}: [attributes] has an empty key")
-        if key in RESERVED_ATTRIBUTES:
-            raise ProjectConfigError(
-                f"{candidate}: attribute {key!r} is reserved — the pipeline sets it "
-                f"itself (reserved: {', '.join(sorted(RESERVED_ATTRIBUTES))})"
-            )
-        if not isinstance(value, str):
-            # Only a plain number or bool can simply be quoted; spell a bool
-            # the TOML way, not as Python's True/False.
-            hint = ""
-            if isinstance(value, (bool, int, float)):
-                shown = str(value).lower() if isinstance(value, bool) else value
-                hint = f' — quote it, e.g. {key} = "{shown}"'
-            raise ProjectConfigError(
-                f"{candidate}: attribute {key!r} must be a string, got {type(value).__name__}{hint}"
-            )
-    return dict(raw)
+        raise ProjectConfigError(f"{candidate}: 'fields' must be a table, e.g. [fields]")
+    out: dict[str, FieldValue] = {}
+    for name, value in raw.items():
+        if not name:
+            raise ProjectConfigError(f"{candidate}: [fields] has an empty name")
+        out[name] = _check_field_value(candidate, name, value)
+    return out
 
 
 def _load_config(candidate: Path) -> ProjectConfig:
@@ -114,7 +124,7 @@ def _load_config(candidate: Path) -> ProjectConfig:
     if unknown:
         raise ProjectConfigError(
             f"{candidate}: unknown key(s) {', '.join(unknown)} (known: "
-            f"{', '.join(sorted(_KNOWN_KEYS))}; arbitrary keys go under [attributes])"
+            f"{', '.join(sorted(_KNOWN_KEYS))}; arbitrary values go under [fields])"
         )
     for key in _SCALAR_KEYS:
         if key in data and not isinstance(data[key], str):
@@ -124,18 +134,15 @@ def _load_config(candidate: Path) -> ProjectConfig:
     tags = data.get("tags")
     if tags is not None and not (isinstance(tags, list) and all(isinstance(t, str) for t in tags)):
         raise ProjectConfigError(f"{candidate}: 'tags' must be a list of strings")
-    attributes = data.get("attributes")
+    fields = _check_fields(candidate, data["fields"]) if "fields" in data else None
 
     return ProjectConfig(
         path=candidate,
         project_id=data.get("project_id"),
         group=data.get("group"),
-        mpn=data.get("mpn"),
-        manufacturer=data.get("manufacturer"),
         subsystem=data.get("subsystem"),
-        doc_type=data.get("doc_type"),
         tags=tags,
-        attributes=_check_attributes(candidate, attributes) if attributes is not None else None,
+        fields=fields or None,
     )
 
 
@@ -159,21 +166,22 @@ def find_project_configs(start: Path) -> list[ProjectConfig]:
 def merge_project_configs(configs: Sequence[ProjectConfig]) -> ProjectConfig | None:
     """Merge a most-specific-first chain of configs into one effective config.
 
-    Scalar fields (``project_id``, ``mpn``, ``subsystem``, …) use the nearest
+    Scalar settings (``project_id``, ``group``, ``subsystem``) use the nearest
     value that's set — a deeper ``.rag.toml`` overrides its ancestors, the
     same way directory-local config overrides project-wide config elsewhere.
     ``tags`` are unioned across every level instead, since tags are additive
     labels rather than a single value to override (de-duplicated, nearest first).
-    ``attributes`` merge key by key, the nearest file winning per key.
-    The merged ``path`` is the nearest file's, since that's the config a user
-    editing files in this directory would reach for first.
+    ``[fields]`` merge name by name, the nearest file winning per name (a list
+    value is replaced, not unioned). The merged ``path`` is the nearest file's,
+    since that's the config a user editing files in this directory would reach
+    for first.
     """
     if not configs:
         return None
 
-    def _first(field: str) -> str | None:
+    def _first(name: str) -> str | None:
         for cfg in configs:
-            value: str | None = getattr(cfg, field)
+            value: str | None = getattr(cfg, name)
             if value:
                 return value
         return None
@@ -184,20 +192,17 @@ def merge_project_configs(configs: Sequence[ProjectConfig]) -> ProjectConfig | N
             if tag not in tags:
                 tags.append(tag)
 
-    attributes: dict[str, str] = {}
+    fields: dict[str, FieldValue] = {}
     for cfg in reversed(configs):
-        attributes.update(cfg.attributes or {})
+        fields.update(cfg.fields or {})
 
     return ProjectConfig(
         path=configs[0].path,
         project_id=_first("project_id"),
         group=_first("group"),
-        mpn=_first("mpn"),
-        manufacturer=_first("manufacturer"),
         subsystem=_first("subsystem"),
-        doc_type=_first("doc_type"),
         tags=tags or None,
-        attributes=attributes or None,
+        fields=fields or None,
     )
 
 

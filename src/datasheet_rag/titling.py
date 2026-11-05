@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from rich.console import Console
@@ -136,8 +136,8 @@ def infer_and_backfill_title(
     """Infer a title for `doc_id` from its first page and persist it.
 
     Persists the inferred title onto every `chunks` row for the document
-    and records `title_source: inferred` in the `doc_metadata` sidecar
-    attributes. Returns the inferred title, or None if no title could be
+    and records `title_source: inferred` in the `doc_metadata` sidecar.
+    Returns the inferred title, or None if no title could be
     inferred (in which case nothing is written).
 
     Refuses to overwrite a title a human set by hand, returning None
@@ -145,7 +145,7 @@ def infer_and_backfill_title(
     :mod:`datasheet_rag.store.metadata`). Pass `force=True` to overrule
     that, which is what `rag repair titles --force` does.
 
-    Two extra hints captured at ingest time (`doc_metadata.attributes`,
+    Two extra hints captured at ingest time (`doc_metadata` columns,
     see `ingest --infer-title`/the Docling path) are passed alongside the
     first-page text when present, since cover pages are often mostly
     imagery and leave the model with very little to go on:
@@ -166,7 +166,10 @@ def infer_and_backfill_title(
     meta = get_metadata(conn, doc_id)
     text = build_title_prompt(
         first_page_text(conn, doc_id),
-        meta.attributes if meta else {},
+        {
+            "running_header": meta.running_header if meta else None,
+            "pdf_meta_title": meta.pdf_meta_title if meta else None,
+        },
     )
     if not text:
         return None
@@ -182,8 +185,10 @@ def infer_and_backfill_title(
     return title
 
 
-def build_title_prompt(first_page_text: str, attributes: dict[str, Any] | None) -> str:
-    """Prefix the first page's text with whatever hints the sidecar carries.
+def build_title_prompt(first_page_text: str, hints: Mapping[str, str | None] | None) -> str:
+    """Prefix the first page's text with the ingest-time title hints, if any.
+
+    ``hints`` may carry ``running_header`` and ``pdf_meta_title``.
 
     Returns "" when there is no first-page text to work with, which callers
     read as "nothing to infer from" — the hints alone are too thin to spend a
@@ -191,15 +196,15 @@ def build_title_prompt(first_page_text: str, attributes: dict[str, Any] | None) 
     """
     if not first_page_text:
         return ""
-    hints = []
-    attributes = attributes or {}
-    if attributes.get("running_header"):
-        hints.append(f"Running page header (appears on every page): {attributes['running_header']}")
-    if attributes.get("pdf_meta_title"):
-        hints.append(f"PDF embedded title metadata: {attributes['pdf_meta_title']}")
-    if not hints:
+    hints = hints or {}
+    lines = []
+    if hints.get("running_header"):
+        lines.append(f"Running page header (appears on every page): {hints['running_header']}")
+    if hints.get("pdf_meta_title"):
+        lines.append(f"PDF embedded title metadata: {hints['pdf_meta_title']}")
+    if not lines:
         return first_page_text
-    return "\n".join(hints) + "\n\n" + first_page_text
+    return "\n".join(lines) + "\n\n" + first_page_text
 
 
 def first_page_text_from_chunks(chunks: Iterable[Chunk]) -> str:
@@ -266,7 +271,10 @@ def infer_title_via_backend(
     context = backend.get_title_context(doc_id)
     if not force and title_rank("inferred") < title_rank(context.title_source):
         return None
-    text = build_title_prompt(context.first_page_text, context.attributes)
+    text = build_title_prompt(
+        context.first_page_text,
+        {"running_header": context.running_header, "pdf_meta_title": context.pdf_meta_title},
+    )
     if not text:
         return None
     title = (inferer or TitleInferer()).infer(text)

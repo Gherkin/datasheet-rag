@@ -54,7 +54,8 @@ if TYPE_CHECKING:
     import httpx
 
     from datasheet_rag.ingest_pipeline import ProgressCallback
-from datasheet_rag.store import DocMetadata, SearchFilters, SearchResult, TitleSource
+from datasheet_rag.store import DocMetadata, FieldSpec, SearchFilters, SearchResult, TitleSource
+from datasheet_rag.store.fields import FieldShape
 
 _EXCLUDE_VECS = {"content_embedding", "context_embedding"}
 
@@ -338,16 +339,14 @@ class RemoteBackend(RagBackend):
         *,
         project_id: str | None = None,
         group_name: str | None = None,
-        mpn: str | None = None,
-        manufacturer: str | None = None,
+        fields: dict[str, str] | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> DocPage:
         params = _drop_none(
             project_id=project_id,
             group_name=group_name,
-            mpn=mpn,
-            manufacturer=manufacturer,
+            field=_field_params(fields),
             limit=limit,
             offset=offset or None,
         )
@@ -411,14 +410,43 @@ class RemoteBackend(RagBackend):
         *,
         project_id: str | None = None,
         group_name: str | None = None,
-        mpn: str | None = None,
+        fields: dict[str, str] | None = None,
     ) -> list[DocMetadata]:
-        params = _drop_none(project_id=project_id, group_name=group_name, mpn=mpn)
+        params = _drop_none(
+            project_id=project_id, group_name=group_name, field=_field_params(fields)
+        )
         data = self._json("GET", "/metadata", params=params)
         return [DocMetadata.model_validate(d) for d in data["documents"]]
 
+    def set_needs_reembed(self, doc_id: str, value: bool) -> None:
+        self._json("PUT", f"/documents/{doc_id}/needs-reembed", json={"value": value})
+
     def apply_metadata_to_chunks(self, doc_id: str) -> int:
         return int(self._json("POST", f"/documents/{doc_id}/apply-metadata")["updated"])
+
+    # -- metadata fields -----------------------------------------------
+    def list_fields(self) -> list[FieldSpec]:
+        data = self._json("GET", "/metadata/fields")
+        return [FieldSpec.model_validate(f) for f in data["fields"]]
+
+    def register_field(
+        self,
+        name: str,
+        *,
+        shape: FieldShape = "single",
+        description: str = "",
+        roles: Sequence[str] = (),
+    ) -> FieldSpec:
+        data = self._json(
+            "POST",
+            "/metadata/fields",
+            json={"name": name, "shape": shape, "description": description, "roles": list(roles)},
+        )
+        return FieldSpec.model_validate(data["field"])
+
+    def remove_field(self, name: str, *, clear: bool = False) -> int:
+        params = {"clear": "true"} if clear else None
+        return int(self._json("DELETE", f"/metadata/fields/{name}", params=params)["held"])
 
     # -- stats ---------------------------------------------------------
     def stats(self, *, project_id: str | None = None, doc_id: str | None = None) -> StatsResult:
@@ -596,7 +624,20 @@ class RemoteBackend(RagBackend):
                     # only infers for a document that has no usable title, and
                     # the answer would be discarded on arrival otherwise.
                     if not self._has_usable_title(graph):
-                        inferred_title = infer_title_from_graph(graph, title_hints=title_hints)
+                        hints = title_hints
+                        if hints is None:
+                            # No parse computed hints, so the server keeps its
+                            # stored ones; infer from those, as it would.
+                            ctx = self.get_title_context(graph.doc_id)
+                            hints = {
+                                k: v
+                                for k, v in (
+                                    ("running_header", ctx.running_header),
+                                    ("pdf_meta_title", ctx.pdf_meta_title),
+                                )
+                                if v
+                            }
+                        inferred_title = infer_title_from_graph(graph, title_hints=hints)
                 # Cleared even when the caller handed us a title: leaving it set
                 # would have the server run its own inference on top of the one
                 # we are already sending, which is the server-side model call
@@ -739,7 +780,7 @@ class RemoteBackend(RagBackend):
                 embed=True,
                 describe_figures=not skip_figures and not skip_describe,
                 infer_title=infer_title,
-                title_hints=parsed.title_hints or None,
+                title_hints=parsed.title_hints,
                 # Parsed here, so the server has never seen the file. One
                 # argument rather than a call of our own: the CLI reaches
                 # ingest_chunk_graph directly for --local-parse and for
@@ -851,6 +892,17 @@ def _drop_none(**kw: Any) -> dict[str, Any]:
     return {k: v for k, v in kw.items() if v is not None}
 
 
+def _field_params(fields: Mapping[str, str] | None) -> list[str] | None:
+    """Encode field filters as repeated ``field=name:value`` query params.
+
+    Field names cannot contain ``:`` (``store.fields`` restricts them), so
+    the server splits on the first one and the value may hold anything.
+    """
+    if not fields:
+        return None
+    return [f"{name}:{value}" for name, value in fields.items()]
+
+
 def _page_rows(
     data: dict[str, Any], key: str, limit: int | None, offset: int
 ) -> tuple[list[Any], int]:
@@ -868,5 +920,9 @@ def _page_rows(
 
 
 def _chunk_excludes(graph: ChunkGraph) -> dict[str, Any]:
-    """Exclude embedding vectors from each chunk in the serialized graph."""
+    """Exclude embedding vectors from each chunk in the serialized graph.
+
+    The graph keeps its ``title_hints``. The payload's own ``title_hints``
+    field is still the one the server reads.
+    """
     return {"chunks": {cid: _EXCLUDE_VECS for cid in graph.chunks}}

@@ -33,7 +33,8 @@ from datasheet_rag.backend.models import (
 )
 from datasheet_rag.ingest_pipeline import ProgressCallback
 from datasheet_rag.models.chunk import Chunk, ChunkGraph
-from datasheet_rag.store import DocMetadata, SearchFilters, SearchResult, TitleSource
+from datasheet_rag.store import DocMetadata, FieldSpec, SearchFilters, SearchResult, TitleSource
+from datasheet_rag.store.fields import FieldShape
 
 SearchMode = Literal["hybrid", "vector", "keyword"]
 
@@ -99,14 +100,15 @@ class RagBackend(ABC):
         *,
         project_id: str | None = None,
         group_name: str | None = None,
-        mpn: str | None = None,
-        manufacturer: str | None = None,
+        fields: dict[str, str] | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> DocPage:
         """One page of the matching documents, in ``doc_id`` order.
 
-        ``limit=None`` returns every match from ``offset`` on.
+        ``fields`` filters on registered fields (AND-ed; a list field matches if any
+        value is equal, case-insensitive). ``limit=None`` returns every match
+        from ``offset`` on.
         """
 
     @abstractmethod
@@ -151,11 +153,42 @@ class RagBackend(ABC):
         *,
         project_id: str | None = None,
         group_name: str | None = None,
-        mpn: str | None = None,
+        fields: dict[str, str] | None = None,
     ) -> list[DocMetadata]: ...
 
     @abstractmethod
+    def set_needs_reembed(self, doc_id: str, value: bool) -> None:
+        """Mark (or unmark) a document as needing its chunks re-embedded.
+
+        Pipeline bookkeeping, kept apart from :meth:`set_metadata`: a
+        metadata patch cannot set it.
+        """
+
+    @abstractmethod
     def apply_metadata_to_chunks(self, doc_id: str) -> int: ...
+
+    # ---- metadata fields (GH #120) ----
+    @abstractmethod
+    def list_fields(self) -> list[FieldSpec]:
+        """Every registered metadata field, built-ins first."""
+
+    @abstractmethod
+    def register_field(
+        self,
+        name: str,
+        *,
+        shape: FieldShape = "single",
+        description: str = "",
+        roles: Sequence[str] = (),
+    ) -> FieldSpec:
+        """Register a field and return it."""
+
+    @abstractmethod
+    def remove_field(self, name: str, *, clear: bool = False) -> int:
+        """Unregister a field; returns how many documents held a value.
+
+        Refuses while documents hold values, unless ``clear`` deletes them.
+        """
 
     # ---- stats ----
     @abstractmethod
@@ -250,6 +283,11 @@ class RagBackend(ABC):
         so the store never has to load an embedding model. ``inferred_title``
         does the same for the title LLM: the caller supplies the answer and the
         store just records it, provenance checks included.
+
+        ``title_hints`` are the hints the parse found. A dict, even an empty
+        one, replaces the stored hints whole. ``None`` means no parse computed
+        them (a cached chunk graph saved without hints, a Textract parse,
+        `rag repair embeddings`), and the stored hints are kept.
 
         ``source_pdf`` is the file the graph was parsed from, for a caller that
         parsed it somewhere other than where the store lives. A store that

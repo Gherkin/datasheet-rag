@@ -12,6 +12,8 @@ server it starts, to confirm the primed PDF bytes are actually served.
 
 from __future__ import annotations
 
+import threading
+import time
 import urllib.request
 from pathlib import Path
 
@@ -163,13 +165,29 @@ def test_get_doc_document_alias(tmp_path, db_path, monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _interrupt_serve_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the command's `while True: time.sleep(...)` serve loop raise
+    KeyboardInterrupt, so it returns once the server is up instead of hanging.
+
+    ``_local_ips`` is stubbed: on Python 3.11 its ``subprocess.run(...,
+    timeout=...)`` polls with ``time.sleep``, which is the only other sleep the
+    command makes. With it gone, any sleep on the main thread is the serve loop.
+    Sleeps on other threads (the viewer server) pass through.
+    """
+    real_sleep = time.sleep
+
+    def fake_sleep(seconds: float) -> None:
+        if threading.current_thread() is threading.main_thread():
+            raise KeyboardInterrupt
+        real_sleep(seconds)
+
+    monkeypatch.setattr("datasheet_rag.cli._local_ips", lambda: ["192.0.2.1"])
+    monkeypatch.setattr("time.sleep", fake_sleep)
+
+
 def test_get_doc_host_serves_pdf_bytes(tmp_path, db_path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
-
-    # The command's serve loop is `while True: time.sleep(3600)` until
-    # Ctrl+C; make the first sleep raise KeyboardInterrupt so the command
-    # returns immediately once the server is up, instead of hanging.
-    monkeypatch.setattr("time.sleep", lambda *_a, **_kw: (_ for _ in ()).throw(KeyboardInterrupt()))
+    _interrupt_serve_loop(monkeypatch)
     opened_urls: list[str] = []
     monkeypatch.setattr("webbrowser.open", lambda url: opened_urls.append(url))
 
@@ -191,7 +209,7 @@ def test_get_doc_host_serves_pdf_bytes(tmp_path, db_path, monkeypatch) -> None:
 
 def test_get_doc_host_no_launch_skips_browser(tmp_path, db_path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr("time.sleep", lambda *_a, **_kw: (_ for _ in ()).throw(KeyboardInterrupt()))
+    _interrupt_serve_loop(monkeypatch)
     opened_urls: list[str] = []
     monkeypatch.setattr("webbrowser.open", lambda url: opened_urls.append(url))
 
@@ -205,7 +223,7 @@ def test_get_doc_host_no_launch_skips_browser(tmp_path, db_path, monkeypatch) ->
 
 def test_get_doc_host_custom_page_in_urls(tmp_path, db_path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr("time.sleep", lambda *_a, **_kw: (_ for _ in ()).throw(KeyboardInterrupt()))
+    _interrupt_serve_loop(monkeypatch)
     monkeypatch.setattr("webbrowser.open", lambda url: None)
 
     result = CliRunner().invoke(

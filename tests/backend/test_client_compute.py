@@ -297,6 +297,9 @@ def test_client_compute_infers_the_title_from_the_graph(monkeypatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/documents/titles":
             return httpx.Response(200, json={"titles": {}})
+        if request.url.path.endswith("/title-context"):
+            # No hints sent, so the client infers from the stored ones.
+            return httpx.Response(200, json={"doc_id": did, "first_page_text": ""})
         raw = request.content
         sent.update(json.loads(raw[raw.index(b"{") : raw.rindex(b"}") + 1]))
         return httpx.Response(200, json={"doc_id": did, "inserted": 1, "title": "TPS62840"})
@@ -485,7 +488,7 @@ def test_server_records_a_client_inferred_title(server, conn) -> None:
     assert titles[did] == "TPS62840 Datasheet"
     # Recorded as inferred, so a later manual title still outranks it.
     md = server.get(f"/documents/{did}/metadata").json()
-    assert md["attributes"]["title_source"] == "inferred"
+    assert md["title_source"] == "inferred"
 
 
 def test_title_context_route_serves_the_prompt_inputs(server) -> None:

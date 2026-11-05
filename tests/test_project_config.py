@@ -14,7 +14,6 @@ from datasheet_rag.project_config import (
     merge_project_configs,
     resolve_cli_project_id,
 )
-from datasheet_rag.store.metadata import RESERVED_ATTRIBUTES
 
 # ---------------------------------------------------------------------------
 # find_project_configs
@@ -49,13 +48,15 @@ def test_find_project_configs_walks_up_to_parent(tmp_path: Path) -> None:
 
 
 def test_find_project_configs_collects_whole_chain_nearest_first(tmp_path: Path) -> None:
-    (tmp_path / ".rag.toml").write_text('project_id = "proj-a"\nmanufacturer = "STMicro"\n')
+    (tmp_path / ".rag.toml").write_text(
+        'project_id = "proj-a"\n[fields]\nmanufacturer = "STMicro"\n'
+    )
     subsystem = tmp_path / "power"
     subsystem.mkdir()
     (subsystem / ".rag.toml").write_text('subsystem = "power"\ngroup = "psu"\n')
     mpn_dir = subsystem / "STM32H743"
     mpn_dir.mkdir()
-    (mpn_dir / ".rag.toml").write_text('mpn = "STM32H743VIT6"\n')
+    (mpn_dir / ".rag.toml").write_text('[fields]\nmpn = "STM32H743VIT6"\n')
 
     configs = find_project_configs(mpn_dir)
 
@@ -88,35 +89,52 @@ def test_find_project_configs_rejects_malformed_even_with_valid_ancestors(tmp_pa
 
 
 # ---------------------------------------------------------------------------
-# Schema: doc_type, [attributes], and what is rejected (GH #26)
+# Schema: [fields], and what is rejected (GH #26)
 # ---------------------------------------------------------------------------
 
 
-def test_loads_doc_type_and_attributes(tmp_path: Path) -> None:
+def test_loads_fields_table_and_list_mpn(tmp_path: Path) -> None:
     (tmp_path / ".rag.toml").write_text(
-        'doc_type = "technical-manual"\n[attributes]\nrevision = "B"\n'
+        '[fields]\nmpn = ["STM32H743VIT6", "STM32H743ZIT6"]\n'
+        'doc_type = "technical-manual"\nacme-id = "D-0172"\nacme-pn = ["P1", "P2"]\n'
     )
 
     (cfg,) = find_project_configs(tmp_path)
 
-    assert cfg.doc_type == "technical-manual"
-    assert cfg.attributes == {"revision": "B"}
+    assert cfg.fields == {
+        "mpn": ["STM32H743VIT6", "STM32H743ZIT6"],
+        "doc_type": "technical-manual",
+        "acme-id": "D-0172",
+        "acme-pn": ["P1", "P2"],
+    }
+
+
+def test_comma_mpn_string_is_one_value(tmp_path: Path) -> None:
+    (tmp_path / ".rag.toml").write_text('[fields]\nmpn = "A,B"\n')
+
+    (cfg,) = find_project_configs(tmp_path)
+
+    assert cfg.fields == {"mpn": "A,B"}
 
 
 @pytest.mark.parametrize(
     ("body", "message"),
     [
-        ('colour = "red"\n', "unknown key"),
-        ("mpn = 226\n", "'mpn' must be a string"),
-        ('doc_type = ["a"]\n', "'doc_type' must be a string"),
+        ('colour = "red"\n', "unknown key.*arbitrary values go under \\[fields\\]"),
+        # The old forms are unknown keys like any other.
+        ('mpn = "A"\n', "unknown key\\(s\\) mpn"),
+        ('manufacturer = "TI"\n', "unknown key\\(s\\) manufacturer"),
+        ('doc_type = "errata"\n', "unknown key\\(s\\) doc_type"),
+        ('[attributes]\nrevision = "B"\n', "unknown key\\(s\\) attributes"),
+        ('[keys]\nacme-id = "D-1"\n', "unknown key\\(s\\) keys"),
+        ("[fields]\nmpn = 226\n", "'mpn' must be a string or a list of strings"),
+        ('[fields]\ndoc_type = ["a"]\n', "'doc_type' must be a string"),
+        ('[fields]\nmanufacturer = ["a"]\n', "'manufacturer' must be a string"),
+        ("[fields]\nacme-id = 3\n", "'acme-id' must be a string or a list of strings"),
+        ('fields = "x"\n', "'fields' must be a table"),
+        ('[fields]\n"" = "v"\n', "empty name"),
         ('tags = "mcu"\n', "'tags' must be a list of strings"),
         ("tags = [1, 2]\n", "'tags' must be a list of strings"),
-        ('attributes = "x"\n', "must be a table"),
-        ("[attributes]\nrevision = 2\n", "'revision' must be a string, got int — quote it"),
-        ("[attributes]\nreviewed = true\n", 'reviewed = "true"'),
-        ('[attributes]\nlist = ["a"]\n', "'list' must be a string, got list$"),
-        ('[attributes.nested]\nkey = "v"\n', "'nested' must be a string, got dict$"),
-        ('[attributes]\n"" = "v"\n', "empty key"),
     ],
 )
 def test_rejects_schema_violations(tmp_path: Path, body: str, message: str) -> None:
@@ -124,23 +142,6 @@ def test_rejects_schema_violations(tmp_path: Path, body: str, message: str) -> N
 
     with pytest.raises(ProjectConfigError, match=message):
         find_project_configs(tmp_path)
-
-
-@pytest.mark.parametrize("key", sorted(RESERVED_ATTRIBUTES))
-def test_rejects_reserved_attribute_keys(tmp_path: Path, key: str) -> None:
-    (tmp_path / ".rag.toml").write_text(f'[attributes]\n{key} = "x"\n')
-
-    with pytest.raises(ProjectConfigError, match="reserved"):
-        find_project_configs(tmp_path)
-
-
-def test_reserved_attributes_cover_every_key_the_pipeline_writes() -> None:
-    from datasheet_rag.cli import _STALE_ATTR
-
-    assert _STALE_ATTR in RESERVED_ATTRIBUTES
-    # store.metadata.set_title_source and ingest_pipeline's title hints.
-    assert {"title_source", "title_inferred"} <= RESERVED_ATTRIBUTES
-    assert {"running_header", "pdf_meta_title"} <= RESERVED_ATTRIBUTES
 
 
 # ---------------------------------------------------------------------------
@@ -154,13 +155,16 @@ def test_merge_project_configs_returns_none_for_empty_chain() -> None:
 
 def test_merge_project_configs_nearest_scalar_wins(tmp_path: Path) -> None:
     nearest = ProjectConfig(
-        path=tmp_path / "mpn" / ".rag.toml", mpn="STM32H743VIT6", subsystem="mcu"
+        path=tmp_path / "mpn" / ".rag.toml", fields={"mpn": "STM32H743VIT6"}, subsystem="mcu"
     )
     middle = ProjectConfig(
         path=tmp_path / "subsystem" / ".rag.toml", subsystem="power", group="psu"
     )
     root = ProjectConfig(
-        path=tmp_path / ".rag.toml", project_id="proj-a", manufacturer="STMicro", subsystem="root"
+        path=tmp_path / ".rag.toml",
+        project_id="proj-a",
+        fields={"manufacturer": "STMicro"},
+        subsystem="root",
     )
 
     merged = merge_project_configs([nearest, middle, root])
@@ -168,11 +172,25 @@ def test_merge_project_configs_nearest_scalar_wins(tmp_path: Path) -> None:
     assert merged is not None
     assert merged.path == nearest.path
     assert merged.project_id == "proj-a"
-    assert merged.manufacturer == "STMicro"
+    assert merged.fields == {"mpn": "STM32H743VIT6", "manufacturer": "STMicro"}
     assert merged.group == "psu"
-    assert merged.mpn == "STM32H743VIT6"
     # nearest sets subsystem explicitly, so it wins over middle/root
     assert merged.subsystem == "mcu"
+
+
+def test_merge_project_configs_merges_fields_by_name_nearest_wins(tmp_path: Path) -> None:
+    nearest = ProjectConfig(path=tmp_path / "mpn" / ".rag.toml", fields={"revision": "B"})
+    middle = ProjectConfig(path=tmp_path / "sub" / ".rag.toml", fields={"doc_type": "errata"})
+    root = ProjectConfig(
+        path=tmp_path / ".rag.toml",
+        fields={"doc_type": "datasheet", "mpn": ["A", "B"], "revision": "A"},
+    )
+
+    merged = merge_project_configs([nearest, middle, root])
+
+    assert merged is not None
+    # Per name, nearest wins; a list is replaced, not unioned.
+    assert merged.fields == {"doc_type": "errata", "mpn": ["A", "B"], "revision": "B"}
 
 
 def test_merge_project_configs_unions_tags_nearest_first_deduped(tmp_path: Path) -> None:
@@ -183,22 +201,6 @@ def test_merge_project_configs_unions_tags_nearest_first_deduped(tmp_path: Path)
 
     assert merged is not None
     assert merged.tags == ["errata", "datasheet", "reference-manual"]
-
-
-def test_merge_project_configs_merges_attributes_key_by_key_nearest_wins(tmp_path: Path) -> None:
-    nearest = ProjectConfig(path=tmp_path / "mpn" / ".rag.toml", attributes={"revision": "B"})
-    middle = ProjectConfig(path=tmp_path / "sub" / ".rag.toml", doc_type="errata")
-    root = ProjectConfig(
-        path=tmp_path / ".rag.toml",
-        doc_type="datasheet",
-        attributes={"revision": "A", "owner": "hw"},
-    )
-
-    merged = merge_project_configs([nearest, middle, root])
-
-    assert merged is not None
-    assert merged.attributes == {"revision": "B", "owner": "hw"}
-    assert merged.doc_type == "errata"
 
 
 def test_merge_project_configs_single_config_passthrough(tmp_path: Path) -> None:
@@ -223,7 +225,7 @@ def test_get_project_config_for_merges_chain_from_given_directory(
     (subsystem / ".rag.toml").write_text('subsystem = "eth_phy"\ngroup = "ethernet"\n')
     mpn_dir = subsystem / "LAN8720"
     mpn_dir.mkdir()
-    (mpn_dir / ".rag.toml").write_text('mpn = "LAN8720A"\nmanufacturer = "Microchip"\n')
+    (mpn_dir / ".rag.toml").write_text('[fields]\nmpn = "LAN8720A"\nmanufacturer = "Microchip"\n')
 
     # cwd is the project root — get_project_config_for should still resolve
     # from the PDF's own directory, not the cwd.
@@ -235,8 +237,7 @@ def test_get_project_config_for_merges_chain_from_given_directory(
     assert cfg.project_id == "netdaq"
     assert cfg.subsystem == "eth_phy"
     assert cfg.group == "ethernet"
-    assert cfg.mpn == "LAN8720A"
-    assert cfg.manufacturer == "Microchip"
+    assert cfg.fields == {"mpn": "LAN8720A", "manufacturer": "Microchip"}
     assert cfg.tags == ["netdaq"]
 
 

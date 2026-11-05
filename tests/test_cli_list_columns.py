@@ -1,10 +1,9 @@
 """CLI-level tests for `rag list --columns` (GH #38, "rag list should take a
 display format").
 
-The two built-in views show a fixed set of columns, so a document's free-form
-`attributes` — the keys `rag metadata --attr` writes — had no way of reaching
-the terminal. `--columns` names the columns to print, falling back to an
-attribute lookup for any name that isn't a built-in column.
+The two built-in views show a fixed set of columns. `--columns` names the
+columns to print: built-in columns and registered fields (GH #120), each
+field a column of its own.
 
 Driven end-to-end through Click's ``CliRunner`` against a real on-disk store,
 mirroring ``test_cli_metadata.py``.
@@ -21,6 +20,7 @@ from datasheet_rag.cli import cli
 from datasheet_rag.config import get_settings
 from datasheet_rag.models.chunk import Chunk, ChunkLevel, ChunkMetadata, LayoutType
 from datasheet_rag.project_config import get_project_config
+from datasheet_rag.store.metadata import set_needs_reembed
 from datasheet_rag.store.schema import connect
 from datasheet_rag.store.sqlite import insert_chunks
 
@@ -51,7 +51,7 @@ def _chunk(doc_id: str) -> Chunk:
 
 @pytest.fixture()
 def db_path(tmp_path: Path) -> Path:
-    """Two documents with sidecar rows: A carries attributes, B carries one."""
+    """Two documents with sidecar rows: A carries two user fields, B one."""
     path = tmp_path / "store" / "rag.sqlite"
     conn = connect(path, embedding_dim=get_settings().embedding_dimensions)
     insert_chunks(conn, [_chunk(DOC_A)], project_id="proj-a")
@@ -60,8 +60,10 @@ def db_path(tmp_path: Path) -> Path:
     conn.close()
 
     _meta(path, DOC_A, "--project-id", "proj-a", "--mpn", "STM32H743VIT6", "--tag", "mcu")
-    _meta(path, DOC_A, "--attr", "revision=B", "--attr", "reviewed_by=hector")
-    _meta(path, DOC_B, "--mpn", "TLV6722", "--attr", "revision=C")
+    for name in ("revision", "reviewed_by"):
+        CliRunner().invoke(cli, ["fields", "add", name, "--db", str(path)])
+    _meta(path, DOC_A, "--field", "revision=B", "--field", "reviewed_by=hector")
+    _meta(path, DOC_B, "--mpn", "TLV6722", "--field", "revision=C")
     return path
 
 
@@ -98,7 +100,15 @@ def _row(output: str, doc_id: str) -> str:
     return next(line for line in output.splitlines() if doc_id[:10] in line)
 
 
-def test_columns_shows_arbitrary_attribute(db_path: Path) -> None:
+def _mark_stale(db_path: Path, doc_id: str) -> None:
+    conn = connect(db_path, embedding_dim=get_settings().embedding_dimensions)
+    try:
+        set_needs_reembed(conn, doc_id, True)
+    finally:
+        conn.close()
+
+
+def test_columns_shows_user_fields(db_path: Path) -> None:
     result = _list(db_path, "--columns", "mpn,revision,reviewed_by")
     assert result.exit_code == 0, result.output
     assert "revision" in _header(result.output)
@@ -151,37 +161,20 @@ def test_built_in_columns_are_selectable(db_path: Path) -> None:
 
 
 def test_model_field_names_are_accepted_as_aliases(db_path: Path) -> None:
-    """`project_id` is what `rag metadata` prints; it must not read as an attr."""
+    """`project_id` is what `rag metadata` prints; it must not read as a field."""
     result = _list(db_path, "--columns", "project_id")
     assert result.exit_code == 0, result.output
     assert "proj-a" in _row(result.output, DOC_A)
 
 
-def test_attr_prefix_forces_the_attribute_reading(db_path: Path) -> None:
-    _meta(db_path, DOC_A, "--attr", "tags=from-attributes")
-    result = _list(db_path, "--columns", "tags,attr:tags")
-    assert result.exit_code == 0, result.output
-    row = _row(result.output, DOC_A)
-    # The built-in column shows the tag list, the prefixed one the attribute.
-    assert "mcu" in row
-    assert "from-attributes" in row
-
-
-def test_unknown_attribute_column_warns_instead_of_printing_blanks(db_path: Path) -> None:
-    result = _list(db_path, "--columns", "revsion")
-    assert result.exit_code == 0, result.output
-    assert "No listed document has the attribute" in result.output
-    assert "revsion" in result.output
-
-
-def test_known_attribute_column_does_not_warn(db_path: Path) -> None:
-    result = _list(db_path, "--columns", "revision")
-    assert result.exit_code == 0, result.output
-    assert "No listed document has the attribute" not in result.output
+def test_unknown_column_is_rejected_instead_of_printing_blanks(db_path: Path) -> None:
+    result = _list(db_path, "--columns", "mpn,revsion")
+    assert result.exit_code != 0
+    assert "unknown column(s) revsion" in result.output
 
 
 def test_stale_marker_still_shown_with_custom_columns(db_path: Path) -> None:
-    _meta(db_path, DOC_A, "--attr", "needs_reembed=1")
+    _mark_stale(db_path, DOC_A)
     result = _list(db_path, "--columns", "mpn")
     assert result.exit_code == 0, result.output
     assert "stale" in _header(result.output)
@@ -189,7 +182,7 @@ def test_stale_marker_still_shown_with_custom_columns(db_path: Path) -> None:
 
 
 def test_stale_column_not_duplicated_when_asked_for(db_path: Path) -> None:
-    _meta(db_path, DOC_A, "--attr", "needs_reembed=1")
+    _mark_stale(db_path, DOC_A)
     result = _list(db_path, "--columns", "stale,mpn")
     assert result.exit_code == 0, result.output
     assert _header(result.output).count("stale") == 1
@@ -213,9 +206,10 @@ def test_empty_columns_value_is_rejected(db_path: Path) -> None:
     assert "at least one column" in result.output
 
 
-def test_help_documents_attribute_columns() -> None:
+def test_help_documents_field_columns() -> None:
     runner = CliRunner()
     result = runner.invoke(cli, ["list", "--help"])
     assert result.exit_code == 0, result.output
     assert "--columns" in result.output
-    assert "attribute" in result.output
+    assert "registered field" in result.output
+    assert "attr" not in result.output

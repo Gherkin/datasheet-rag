@@ -13,7 +13,7 @@ import base64
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from datasheet_rag.models.chunk import Chunk
 
@@ -24,11 +24,10 @@ class DocSummary(BaseModel):
     doc_id: str
     project_id: str | None = None
     group_name: str | None = None
-    mpn: str | None = None
-    manufacturer: str | None = None
     subsystem: str | None = None
-    doc_type: str | None = None
     tags: list[str] = Field(default_factory=list)
+    #: Registered-field values, e.g. ``{"mpn": ["INA226"], "acme-id": "D-17"}``.
+    fields: dict[str, str | list[str]] = Field(default_factory=dict)
     doc_title: str | None = None
     page_count: int | None = None
 
@@ -142,16 +141,19 @@ class MetadataPatch(BaseModel):
 
     ``None`` means "leave the existing value alone" (matching the store's
     merge semantics). Pass an empty string / ``[]`` to clear a field.
+    In ``fields`` each named field is replaced; a ``None`` value removes it.
+    The pipeline's bookkeeping (title provenance, title hints, the re-embed
+    marker) is not part of a patch. Unknown names are rejected, not ignored,
+    so a value sent under a name the patch does not have is never dropped.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     project_id: str | None = None
     group_name: str | None = None
-    mpn: str | None = None
-    manufacturer: str | None = None
     subsystem: str | None = None
-    doc_type: str | None = None
     tags: list[str] | None = None
-    attributes: dict[str, Any] | None = None
+    fields: dict[str, str | list[str] | None] | None = None
 
     def kwargs(self) -> dict[str, Any]:
         """Return only the set (non-None) fields as set_metadata kwargs."""
@@ -184,8 +186,9 @@ class TitleContext(BaseModel):
 
     doc_id: str
     first_page_text: str = ""
-    attributes: dict[str, Any] = Field(default_factory=dict)
     title_source: str = ""
+    running_header: str | None = None
+    pdf_meta_title: str | None = None
 
 
 class ChunkVectors(BaseModel):

@@ -40,6 +40,7 @@ from datasheet_rag.config import get_settings
 from datasheet_rag.models.chunk import IMAGE_LAYOUT_TYPES, Chunk, ChunkGraph, ChunkLevel
 from datasheet_rag.store import (
     DocMetadata,
+    FieldSpec,
     SearchFilters,
     SearchResult,
     TitleSource,
@@ -58,7 +59,10 @@ from datasheet_rag.store import (
     insert_chunk_graph,
     keyword_search,
     list_docs,
+    list_fields,
     list_figure_chunks,
+    register_field,
+    remove_field,
     resolve_doc_id,
     resolve_figure_path,
     set_doc_title,
@@ -68,6 +72,8 @@ from datasheet_rag.store import (
     update_figure_description,
     vector_search,
 )
+from datasheet_rag.store.fields import FieldShape, check_filter_fields
+from datasheet_rag.store.metadata import check_patch, set_needs_reembed, set_title_hints
 
 if TYPE_CHECKING:
     from datasheet_rag.ingest_pipeline import ProgressCallback
@@ -144,6 +150,8 @@ class LocalBackend(RagBackend):
     ) -> list[SearchResult]:
         if not query or not query.strip():
             raise ValueError("query must not be empty")
+        if filters is not None and filters.fields:
+            check_filter_fields((f.name for f in self.list_fields()), filters.fields)
         ranked = self._rank(query, mode=mode, filters=filters, query_vector=query_vector)
         return ranked[offset : offset + k]
 
@@ -237,8 +245,7 @@ class LocalBackend(RagBackend):
         *,
         project_id: str | None = None,
         group_name: str | None = None,
-        mpn: str | None = None,
-        manufacturer: str | None = None,
+        fields: dict[str, str] | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> DocPage:
@@ -246,10 +253,8 @@ class LocalBackend(RagBackend):
             self._get_conn(),
             project_id=project_id,
             group_name=group_name,
-            mpn=mpn,
+            fields=fields,
         )
-        if manufacturer is not None:
-            docs = [d for d in docs if d.manufacturer == manufacturer]
         matched: dict[str, DocMetadata | None] = {d.doc_id: d for d in docs}
 
         # The sidecar row is optional: it is written by the metadata-tagging
@@ -257,10 +262,10 @@ class LocalBackend(RagBackend):
         # is still chunked, searchable and reachable by every other read path,
         # so list it too — with the sidecar fields left null — rather than
         # reporting an empty catalogue for a store that plainly has documents
-        # in it. Filters on group, mpn or manufacturer suppress the fallback:
-        # those fields live nowhere but the sidecar, so a document without one
-        # cannot match them.
-        if group_name is None and mpn is None and manufacturer is None:
+        # in it. Filters on group or a field suppress the fallback: those
+        # live nowhere but the sidecar, so a document without one cannot
+        # match them.
+        if group_name is None and not fields:
             for row in get_ingested_docs(self._get_conn(), project_id=project_id):
                 matched.setdefault(row["doc_id"], None)
 
@@ -291,11 +296,9 @@ class LocalBackend(RagBackend):
             doc_id=d.doc_id,
             project_id=d.project_id,
             group_name=d.group_name,
-            mpn=d.mpn,
-            manufacturer=d.manufacturer,
             subsystem=d.subsystem,
-            doc_type=d.doc_type,
             tags=d.tags,
+            fields=d.fields,
             doc_title=title,
             page_count=page_count,
         )
@@ -332,13 +335,40 @@ class LocalBackend(RagBackend):
         *,
         project_id: str | None = None,
         group_name: str | None = None,
-        mpn: str | None = None,
+        fields: dict[str, str] | None = None,
     ) -> list[DocMetadata]:
-        return list_docs(self._get_conn(), project_id=project_id, group_name=group_name, mpn=mpn)
+        return list_docs(
+            self._get_conn(), project_id=project_id, group_name=group_name, fields=fields
+        )
+
+    def set_needs_reembed(self, doc_id: str, value: bool) -> None:
+        with self._write_lock:
+            set_needs_reembed(self._get_conn(), doc_id, value)
 
     def apply_metadata_to_chunks(self, doc_id: str) -> int:
         with self._write_lock:
             return apply_metadata_to_chunks(self._get_conn(), doc_id)
+
+    # -- metadata fields -----------------------------------------------
+    def list_fields(self) -> list[FieldSpec]:
+        return list_fields(self._get_conn())
+
+    def register_field(
+        self,
+        name: str,
+        *,
+        shape: FieldShape = "single",
+        description: str = "",
+        roles: Sequence[str] = (),
+    ) -> FieldSpec:
+        with self._write_lock:
+            return register_field(
+                self._get_conn(), name, shape=shape, description=description, roles=roles
+            )
+
+    def remove_field(self, name: str, *, clear: bool = False) -> int:
+        with self._write_lock:
+            return remove_field(self._get_conn(), name, clear=clear)
 
     # -- stats ---------------------------------------------------------
     def stats(self, *, project_id: str | None = None, doc_id: str | None = None) -> StatsResult:
@@ -486,16 +516,16 @@ class LocalBackend(RagBackend):
         return descriptions, describer.stats()
 
     def get_title_context(self, doc_id: str) -> TitleContext:
-        from datasheet_rag.store.metadata import get_title_source
         from datasheet_rag.titling import first_page_text
 
         conn = self._get_conn()
-        md = get_metadata(conn, doc_id)
+        md = get_metadata(conn, doc_id) or DocMetadata(doc_id=doc_id)
         return TitleContext(
             doc_id=doc_id,
             first_page_text=first_page_text(conn, doc_id),
-            attributes=dict(md.attributes) if md is not None else {},
-            title_source=get_title_source(conn, doc_id),
+            title_source=md.title_source,
+            running_header=md.running_header,
+            pdf_meta_title=md.pdf_meta_title,
         )
 
     def infer_title(
@@ -622,6 +652,10 @@ class LocalBackend(RagBackend):
 
         with self._write_lock:
             conn = self._get_conn()
+            # Reject an unregistered or mis-shaped field before any chunk is
+            # written, not after the whole ingest has run (GH #120).
+            if metadata is not None:
+                check_patch(conn, fields=metadata.fields)
             described = 0
             # The provisional insert below prunes too, so the final insert
             # finds nothing left to drop — count both or the describe path
@@ -698,9 +732,15 @@ class LocalBackend(RagBackend):
                 set_metadata(conn, did, **patch.kwargs())
                 apply_metadata_to_chunks(conn, did)
                 conn.commit()
-            if title_hints:
-                set_metadata(conn, did, attributes=dict(title_hints))
-                conn.commit()
+            # A dict (even {}) is what the parse found and replaces the stored
+            # hints whole. None means no parse computed them: keep the stored.
+            if title_hints is not None:
+                set_title_hints(
+                    conn,
+                    did,
+                    pdf_meta_title=title_hints.get("pdf_meta_title"),
+                    running_header=title_hints.get("running_header"),
+                )
 
         # 5. Title. Either the caller already inferred one (client-side
         #    compute) and we only record it, or we infer it here.
@@ -772,7 +812,7 @@ class LocalBackend(RagBackend):
             embed=True,
             describe_figures=do_describe,
             infer_title=infer_title,
-            title_hints=parsed.title_hints or None,
+            title_hints=parsed.title_hints,
         )
 
     def delete_doc(self, doc_id: str) -> int:
