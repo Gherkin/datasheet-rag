@@ -138,7 +138,8 @@ def _load_config(candidate: Path) -> ProjectConfig:
 
     return ProjectConfig(
         path=candidate,
-        project_id=data.get("project_id"),
+        # Stored project names are stripped (GH #121); a blank one is unset.
+        project_id=(data.get("project_id") or "").strip() or None,
         group=data.get("group"),
         subsystem=data.get("subsystem"),
         tags=tags,

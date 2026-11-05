@@ -9,7 +9,7 @@ Tables created by :func:`init_schema`:
                        over ``context_text`` and ``text``. Content-linked
                        to ``chunks`` via triggers.
 * ``doc_metadata``   – sidecar table for document-level metadata
-                       (project, group, subsystem, tags) and the
+                       (group, subsystem, tags) and the
                        pipeline's bookkeeping (title provenance, title
                        hints, the re-embed marker).
                        Independent of ``chunks`` so metadata can be
@@ -17,6 +17,8 @@ Tables created by :func:`init_schema`:
 * ``metadata_fields`` – registry of typed, filterable fields (GH #120),
   ``doc_field_values`` and their per-document values — see
                        :mod:`datasheet_rag.store.fields`.
+* ``doc_projects``   – project membership, one row per (document, project)
+                       (GH #121) — see :mod:`datasheet_rag.store.projects`.
 * ``schema_version`` – single-row table recording the schema version and
                        the embedding dimension the DB was created with.
 """
@@ -35,7 +37,7 @@ from datasheet_rag.config import get_settings
 
 console = Console()
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # Columns added in each schema version, used for in-place migration of
 # databases created at an older version. Each entry is (column_name, DDL
@@ -177,9 +179,73 @@ def _migrate_to_v3(conn: sqlite3.Connection) -> None:
         raise
 
 
+def _migrate_to_v4(conn: sqlite3.Connection) -> None:
+    """Move project membership into ``doc_projects`` (GH #121).
+
+    A document used to belong to one project, held in ``doc_metadata.project_id``
+    and copied onto every chunk row as ``chunks.project_id``. Both values are
+    carried into ``doc_projects`` — a document whose chunks and sidecar
+    disagree keeps both projects, so no scoping is lost — and both columns
+    and their indexes are dropped. A document that gains a membership row
+    gets an (empty) ``doc_metadata`` row too, so its projects show wherever
+    its metadata does.
+
+    One transaction: a failure leaves the v3 store as it was.
+    """
+    from datasheet_rag.store.projects import ensure_projects_table
+
+    if conn.in_transaction:
+        conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        row = conn.execute("SELECT version FROM schema_version WHERE id = 1").fetchone()
+        if row is not None and int(row["version"]) >= 4:
+            conn.commit()
+            return
+        # "projects" becomes a built-in column name; a v3 user field by that
+        # name would be hidden behind it. Fail rather than guess a new name.
+        has_fields = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'metadata_fields'"
+        ).fetchone()
+        if (
+            has_fields
+            and conn.execute("SELECT 1 FROM metadata_fields WHERE name = 'projects'").fetchone()
+        ):
+            raise MigrationError(
+                "cannot upgrade the store to v4: a registered field is named "
+                "'projects', which is now reserved. With the previous version, "
+                "copy out any values the field holds, then remove it with "
+                "`rag fields remove projects --clear` (--clear deletes those "
+                "values)."
+            )
+        ensure_projects_table(conn)
+        for table, index in (
+            ("chunks", "ix_chunks_project_id"),
+            ("doc_metadata", "ix_doc_metadata_project"),
+        ):
+            cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+            if "project_id" not in cols:
+                continue
+            conn.execute(
+                "INSERT OR IGNORE INTO doc_projects (doc_id, project_id) "
+                f"SELECT DISTINCT doc_id, TRIM(project_id) FROM {table} "
+                "WHERE TRIM(COALESCE(project_id, '')) <> ''"
+            )
+            conn.execute(f"DROP INDEX IF EXISTS {index}")
+            conn.execute(f"ALTER TABLE {table} DROP COLUMN project_id")
+        conn.execute(
+            "INSERT OR IGNORE INTO doc_metadata (doc_id) SELECT DISTINCT doc_id FROM doc_projects"
+        )
+        conn.execute("UPDATE schema_version SET version = 4 WHERE id = 1")
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+
+
 #: Data migrations run when an older store is opened, keyed by the version
 #: they bring it to. Run after that version's chunk columns are added.
-_MIGRATIONS_BY_VERSION = {3: _migrate_to_v3}
+_MIGRATIONS_BY_VERSION = {3: _migrate_to_v3, 4: _migrate_to_v4}
 
 
 def connect(
@@ -582,7 +648,6 @@ def init_schema(conn: sqlite3.Connection, *, embedding_dim: int) -> None:
         CREATE TABLE IF NOT EXISTS chunks (
             id              TEXT PRIMARY KEY,
             doc_id          TEXT NOT NULL,
-            project_id      TEXT,
             group_name      TEXT,
             level           INTEGER NOT NULL,
             text            TEXT NOT NULL,
@@ -607,7 +672,6 @@ def init_schema(conn: sqlite3.Connection, *, embedding_dim: int) -> None:
         """
     )
     cur.execute("CREATE INDEX IF NOT EXISTS ix_chunks_doc_id ON chunks(doc_id)")
-    cur.execute("CREATE INDEX IF NOT EXISTS ix_chunks_project_id ON chunks(project_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS ix_chunks_group_name ON chunks(group_name)")
     cur.execute("CREATE INDEX IF NOT EXISTS ix_chunks_level ON chunks(level)")
 
@@ -634,7 +698,6 @@ def init_schema(conn: sqlite3.Connection, *, embedding_dim: int) -> None:
         """
         CREATE TABLE IF NOT EXISTS doc_metadata (
             doc_id       TEXT PRIMARY KEY,
-            project_id   TEXT,
             group_name   TEXT,
             subsystem    TEXT,
             tags         TEXT,             -- JSON array of strings
@@ -646,8 +709,13 @@ def init_schema(conn: sqlite3.Connection, *, embedding_dim: int) -> None:
         )
         """
     )
-    cur.execute("CREATE INDEX IF NOT EXISTS ix_doc_metadata_project ON doc_metadata(project_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS ix_doc_metadata_group ON doc_metadata(group_name)")
+
+    # ---- doc_projects ----------------------------------------------------
+    # Project membership, many projects per document (GH #121).
+    from datasheet_rag.store.projects import ensure_projects_table
+
+    ensure_projects_table(conn)
 
     # ---- metadata_fields / doc_field_values ------------------------------
     # Registered fields and their per-document values (GH #120). mpn,

@@ -18,6 +18,7 @@ from datasheet_rag.cli import SHORT_DOC_ID_LEN, cli
 from datasheet_rag.config import get_settings
 from datasheet_rag.models.chunk import Chunk, ChunkLevel, ChunkMetadata, LayoutType
 from datasheet_rag.project_config import get_project_config
+from datasheet_rag.store.metadata import set_metadata
 from datasheet_rag.store.schema import connect
 from datasheet_rag.store.sqlite import insert_chunks
 
@@ -95,7 +96,9 @@ def db_path(tmp_path: Path, figure_path: Path) -> Path:
         layout_type=LayoutType.FIGURE,
     )
 
-    insert_chunks(conn, [fig, text_chunk, orphan_fig], project_id="proj-a")
+    insert_chunks(conn, [fig, text_chunk, orphan_fig])
+    for doc in {fig.doc_id, text_chunk.doc_id, orphan_fig.doc_id}:
+        set_metadata(conn, doc, add_projects=["proj-a"])
     conn.commit()
     conn.close()
     return path

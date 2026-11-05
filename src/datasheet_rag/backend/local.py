@@ -73,7 +73,13 @@ from datasheet_rag.store import (
     vector_search,
 )
 from datasheet_rag.store.fields import FieldShape, check_filter_fields
-from datasheet_rag.store.metadata import check_patch, set_needs_reembed, set_title_hints
+from datasheet_rag.store.metadata import (
+    check_patch,
+    join_projects,
+    set_needs_reembed,
+    set_title_hints,
+)
+from datasheet_rag.store.projects import project_scope_sql
 
 if TYPE_CHECKING:
     from datasheet_rag.ingest_pipeline import ProgressCallback
@@ -294,7 +300,7 @@ class LocalBackend(RagBackend):
             return DocSummary(doc_id=doc_id, doc_title=title, page_count=page_count)
         return DocSummary(
             doc_id=d.doc_id,
-            project_id=d.project_id,
+            projects=d.projects,
             group_name=d.group_name,
             subsystem=d.subsystem,
             tags=d.tags,
@@ -380,8 +386,9 @@ class LocalBackend(RagBackend):
             where.append("doc_id = ?")
             params.append(doc_id)
         if project_id:
-            where.append("project_id = ?")
-            params.append(project_id)
+            clause, clause_params = project_scope_sql(project_id, doc_id_column="doc_id")
+            where.append(clause)
+            params.extend(clause_params)
         where_sql = (" WHERE " + " AND ".join(where)) if where else ""
         by_level: dict[str, int] = {}
         for row in conn.execute(
@@ -656,6 +663,18 @@ class LocalBackend(RagBackend):
             # written, not after the whole ingest has run (GH #120).
             if metadata is not None:
                 check_patch(conn, fields=metadata.fields)
+            # Build the sidecar patch now: a project both added and removed
+            # raises here, before any chunk is written. Ingest only ever adds
+            # a project (GH #121): a document already in others stays in them.
+            patch = (metadata or MetadataPatch()).model_copy(deep=True)
+            patch.add_project(project_id)
+            if group_name is not None:
+                patch.group_name = patch.group_name or group_name
+            # The projects are joined right before each chunk insert, which
+            # commits them with the chunks: no stored state has chunks without
+            # their projects (a stopped describe) or projects without chunks
+            # (a failed embed).
+            join = patch.add_projects or []
             described = 0
             # The provisional insert below prunes too, so the final insert
             # finds nothing left to drop — count both or the describe path
@@ -675,18 +694,17 @@ class LocalBackend(RagBackend):
                 vectors_tmp = (
                     embed_chunk_graph(graph, embedder=self._get_embedder()) if embed else vectors
                 )
+                join_projects(conn, did, join)
                 pruned += insert_chunk_graph(
                     conn,
                     graph,
                     vectors=vectors_tmp,
-                    project_id=project_id,
                     group_name=group_name,
                 ).pruned
                 conn.commit()
                 descriptions = describe_figures_in_store(
                     conn,
                     doc_id=did,
-                    project_id=project_id,
                     missing_only=True,
                     describer=FigureDescriber(verbose=False),
                     dry_run=False,
@@ -712,22 +730,17 @@ class LocalBackend(RagBackend):
             # graph does not carry (descriptions, a curated title, a relinked
             # figure path) for every id that survives, which is why this is not
             # a delete-then-insert.
+            join_projects(conn, did, join)
             stats = insert_chunk_graph(
                 conn,
                 graph,
                 vectors=vectors,
-                project_id=project_id,
                 group_name=group_name,
             )
             pruned += stats.pruned
             conn.commit()
 
-            # 4. Metadata sidecar.
-            patch = metadata or MetadataPatch()
-            if project_id is not None:
-                patch.project_id = patch.project_id or project_id
-            if group_name is not None:
-                patch.group_name = patch.group_name or group_name
+            # 4. Metadata sidecar (the patch built above).
             if not patch.is_empty():
                 set_metadata(conn, did, **patch.kwargs())
                 apply_metadata_to_chunks(conn, did)

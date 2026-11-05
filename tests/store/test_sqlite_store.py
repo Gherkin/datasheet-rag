@@ -271,7 +271,9 @@ def test_insert_chunks_and_round_trip(conn: sqlite3.Connection) -> None:
     chunks = _seed_chunks()
     vectors = _seed_vectors(chunks)
 
-    n = insert_chunks(conn, chunks, vectors=vectors, project_id="proj-A")
+    n = insert_chunks(conn, chunks, vectors=vectors)
+    for doc in ("doc1", "doc2"):
+        set_metadata(conn, doc, add_projects=["proj-A"])
     assert n == len(chunks)
     assert count_chunks(conn) == len(chunks)
     assert count_chunks(conn, doc_id="doc1") == 5
@@ -544,11 +546,12 @@ def test_hybrid_search_promotes_dual_match(conn: sqlite3.Connection) -> None:
 def test_filters_restrict_searches(conn: sqlite3.Connection) -> None:
     chunks = _seed_chunks()
     vectors = _seed_vectors(chunks)
-    # Insert with project_id baked onto rows so we can filter by it.
     doc1_chunks = [c for c in chunks if c.doc_id == "doc1"]
     doc2_chunks = [c for c in chunks if c.doc_id == "doc2"]
-    insert_chunks(conn, doc1_chunks, vectors=vectors, project_id="alpha")
-    insert_chunks(conn, doc2_chunks, vectors=vectors, project_id="beta")
+    insert_chunks(conn, doc1_chunks, vectors=vectors)
+    insert_chunks(conn, doc2_chunks, vectors=vectors)
+    set_metadata(conn, "doc1", add_projects=["alpha"])
+    set_metadata(conn, "doc2", add_projects=["beta"])
 
     # Vector filter — only doc1 / alpha may appear.
     target = doc1_chunks[1]
@@ -596,7 +599,7 @@ def test_filters_restrict_searches(conn: sqlite3.Connection) -> None:
 
 
 def test_metadata_set_get_update_and_apply(conn: sqlite3.Connection) -> None:
-    # Insert chunks for doc1 first WITHOUT a project_id.
+    # Insert chunks for doc1 first, in no project.
     chunks = _seed_chunks()
     doc1_chunks = [c for c in chunks if c.doc_id == "doc1"]
     insert_chunks(conn, doc1_chunks, vectors=_seed_vectors(chunks))
@@ -606,12 +609,14 @@ def test_metadata_set_get_update_and_apply(conn: sqlite3.Connection) -> None:
     md = set_metadata(
         conn,
         "doc1",
-        project_id="proj-1",
+        add_projects=["proj-1"],
         group_name="grp-1",
         fields={"mpn": "MPN-123", "manufacturer": "Acme"},
         tags=["analog", "ldo"],
     )
-    assert md.project_id == "proj-1"
+    assert md.projects == ["proj-1"]
+    # Membership scopes the chunks at once; no back-fill needed.
+    assert count_chunks(conn, project_id="proj-1") == len(doc1_chunks)
     assert md.tags == ["analog", "ldo"]
     assert md.updated_at is not None
 
@@ -625,8 +630,8 @@ def test_metadata_set_get_update_and_apply(conn: sqlite3.Connection) -> None:
     assert updated.fields["mpn"] == ["MPN-456"]
     # Manufacturer was not passed -> preserved.
     assert updated.fields["manufacturer"] == "Acme"
-    # Project / group preserved.
-    assert updated.project_id == "proj-1"
+    # Projects / group preserved.
+    assert updated.projects == ["proj-1"]
     assert updated.tags == ["analog", "ldo"]
 
     # A None field value removes the field.
@@ -638,12 +643,14 @@ def test_metadata_set_get_update_and_apply(conn: sqlite3.Connection) -> None:
     assert [m.doc_id for m in listed] == ["doc1"]
     assert list_docs(conn, project_id="non-existent") == []
 
-    # apply_metadata_to_chunks back-fills the rows.
+    # apply_metadata_to_chunks back-fills the group.
     n_updated = apply_metadata_to_chunks(conn, "doc1")
     assert n_updated == len(doc1_chunks)
-    assert count_chunks(conn, project_id="proj-1") == len(doc1_chunks)
+    assert {r[0] for r in conn.execute("SELECT group_name FROM chunks WHERE doc_id = 'doc1'")} == {
+        "grp-1"
+    }
 
-    # And searches now respect the back-filled project.
+    # And searches respect the project.
     target = doc1_chunks[0]
     vectors = _seed_vectors(chunks)
     hits = vector_search(
@@ -654,6 +661,43 @@ def test_metadata_set_get_update_and_apply(conn: sqlite3.Connection) -> None:
     )
     assert hits
     assert all(r.chunk.doc_id == "doc1" for r in hits)
+
+
+def test_a_document_can_belong_to_several_projects(conn: sqlite3.Connection) -> None:
+    chunks = _seed_chunks()
+    vectors = _seed_vectors(chunks)
+    insert_chunks(conn, chunks, vectors=vectors)
+    set_metadata(conn, "doc1", add_projects=["board-a", "board-b"])
+    set_metadata(conn, "doc2", add_projects=["board-b"])
+    n1 = count_chunks(conn, doc_id="doc1")
+
+    assert count_chunks(conn, project_id="board-a") == n1
+    assert count_chunks(conn, project_id="board-b") == len(chunks)
+    assert [m.doc_id for m in list_docs(conn, project_id="board-a")] == ["doc1"]
+    assert [m.doc_id for m in list_docs(conn, project_id="board-b")] == ["doc1", "doc2"]
+    hits = keyword_search(conn, "frequency", k=10, filters=SearchFilters(project_id="board-a"))
+    assert all(r.chunk.doc_id == "doc1" for r in hits)
+
+    # Adding again is a no-op; removing one keeps the other.
+    md = set_metadata(conn, "doc1", add_projects=["board-a"], remove_projects=["board-b"])
+    assert md.projects == ["board-a"]
+    assert count_chunks(conn, project_id="board-b") == len(chunks) - n1
+
+
+def test_project_change_is_validated_before_writing(conn: sqlite3.Connection) -> None:
+    with pytest.raises(ValueError, match="both to add and to remove"):
+        set_metadata(conn, "doc1", add_projects=["x"], remove_projects=["x"], subsystem="s")
+    with pytest.raises(ValueError, match="cannot be empty"):
+        set_metadata(conn, "doc1", add_projects=[" "], subsystem="s")
+    assert get_metadata(conn, "doc1") is None
+    # Names are stripped.
+    assert set_metadata(conn, "doc1", add_projects=[" p "]).projects == ["p"]
+
+
+def test_delete_metadata_drops_project_memberships(conn: sqlite3.Connection) -> None:
+    set_metadata(conn, "doc1", add_projects=["p"])
+    delete_metadata(conn, "doc1")
+    assert conn.execute("SELECT COUNT(*) FROM doc_projects").fetchone()[0] == 0
 
 
 def test_mpn_list_keeps_order_and_drops_duplicates(conn: sqlite3.Connection) -> None:

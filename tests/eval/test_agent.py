@@ -227,6 +227,7 @@ def test_rag_tools_expose_the_server_and_scope_to_the_project() -> None:
     from datasheet_rag.mcp.server import build_server
     from datasheet_rag.models.chunk import Chunk, ChunkLevel, ChunkMetadata
     from datasheet_rag.store import connect, insert_chunks
+    from datasheet_rag.store.metadata import set_metadata
 
     conn = connect(":memory:", embedding_dim=8)
     for doc, project in (("docA", "p1"), ("docB", "p2")):
@@ -238,7 +239,8 @@ def test_rag_tools_expose_the_server_and_scope_to_the_project() -> None:
             context_text="t",
             metadata=ChunkMetadata(doc_id=doc, page_numbers=[1]),
         )
-        insert_chunks(conn, [chunk], project_id=project)
+        insert_chunks(conn, [chunk])
+        set_metadata(conn, doc, add_projects=[project])
 
     tools = RagTools(build_server(LocalBackend(conn=conn), local_client=False), "p1")
     names = {s["toolSpec"]["name"] for s in tools.specs()}

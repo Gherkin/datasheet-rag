@@ -99,6 +99,93 @@ def test_local_ingest_no_figures_trusts_existing_paths(backend: LocalBackend) ->
     assert hits and hits[0].chunk_id == f"{did}:L2:0"
 
 
+def test_reingest_under_another_project_adds_it(backend: LocalBackend) -> None:
+    """Ingest only adds a project; the document stays in the ones it had (GH #121)."""
+    did = "d" * 64
+    backend.ingest_chunk_graph(_plain_graph(did), project_id="board-a", embed=False)
+    backend.ingest_chunk_graph(
+        _plain_graph(did),
+        project_id="board-b",
+        metadata=MetadataPatch(add_projects=["board-c"]),
+        embed=False,
+    )
+    md = backend.get_metadata(did)
+    assert md is not None and md.projects == ["board-a", "board-b", "board-c"]
+    for project in ("board-a", "board-b", "board-c"):
+        assert backend.stats(project_id=project).total_chunks == 1
+        assert [d.doc_id for d in backend.list_documents(project_id=project).documents] == [did]
+
+    backend.set_metadata(did, MetadataPatch(remove_projects=["board-a"]))
+    assert backend.stats(project_id="board-a").total_chunks == 0
+    assert backend.get_document(did).projects == ["board-b", "board-c"]
+
+
+def test_ingest_rejects_a_bad_project_patch_before_writing_chunks(
+    backend: LocalBackend,
+) -> None:
+    did = "e" * 64
+    with pytest.raises(ValueError, match="both to add and to remove"):
+        backend.ingest_chunk_graph(
+            _plain_graph(did),
+            project_id="p1",
+            metadata=MetadataPatch(remove_projects=["p1"]),
+            embed=False,
+        )
+    assert backend.get_document(did) is None
+
+
+def _doc_projects(backend: LocalBackend, did: str) -> list[str]:
+    from datasheet_rag.store.projects import get_projects_for_docs
+
+    return get_projects_for_docs(backend._get_conn(), [did]).get(did, [])
+
+
+def test_ingest_joins_the_project_with_the_chunks(
+    backend: LocalBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failure after the first chunk write must not leave the doc outside its project."""
+    import datasheet_rag.description as description_mod
+
+    def boom(*_a: Any, **_k: Any) -> Any:
+        raise RuntimeError("stopped")
+
+    monkeypatch.setattr(description_mod, "FigureDescriber", lambda **_k: None)
+    monkeypatch.setattr(description_mod, "describe_figures_in_store", boom)
+    did = "f" * 64
+    with pytest.raises(RuntimeError, match="stopped"):
+        backend.ingest_chunk_graph(
+            _plain_graph(did), project_id="p1", embed=False, describe_figures=True
+        )
+    assert _doc_projects(backend, did) == ["p1"]
+    md = backend.get_metadata(did)
+    assert md is not None and md.projects == ["p1"]
+    assert [d.doc_id for d in backend.list_docs(project_id="p1")] == [did]
+
+
+def test_failed_ingest_before_any_chunk_leaves_no_project_row(
+    backend: LocalBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No document is listed in a project while it has no chunks."""
+    import datasheet_rag.store.sqlite as sqlite_mod
+
+    def boom(*_a: Any, **_k: Any) -> Any:
+        raise RuntimeError("stopped")
+
+    # Fail inside the insert transaction, after the project join was sent.
+    monkeypatch.setattr(sqlite_mod, "_chunk_row", boom)
+    did = "f" * 64
+    with pytest.raises(RuntimeError, match="stopped"):
+        backend.ingest_chunk_graph(_plain_graph(did), project_id="p1", embed=False)
+    assert _doc_projects(backend, did) == []
+    assert backend.get_metadata(did) is None
+
+
+def test_metadata_patch_rejects_a_project_both_added_and_removed() -> None:
+    with pytest.raises(ValueError, match="both to add and to remove"):
+        MetadataPatch(add_projects=["x"], remove_projects=[" x"])
+    assert MetadataPatch(add_projects=[" a ", "a"]).add_projects == ["a"]
+
+
 def test_local_reingest_title_hints_none_keeps_dict_replaces(backend: LocalBackend) -> None:
     did = "b" * 64
     g = _graph_with_figure(did)

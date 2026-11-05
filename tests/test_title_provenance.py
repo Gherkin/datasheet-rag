@@ -52,7 +52,7 @@ def _title(conn) -> str:
 
 def _ingest(conn, title: str, **kw) -> None:
     """Simulate an ingest: chunks arrive carrying a parser-derived title."""
-    insert_chunks(conn, [_chunk(title)], project_id="p", **kw)
+    insert_chunks(conn, [_chunk(title)], **kw)
 
 
 # -- the case #32 is about: a wrong-but-present auto title ------------------
@@ -163,7 +163,7 @@ def test_reembed_keeps_inferred_title(conn) -> None:
 def test_title_source_defaults_to_auto(conn) -> None:
     assert get_title_source(conn, DOC) == "auto"
     _ingest(conn, "Contents")
-    set_metadata(conn, DOC, project_id="p")
+    set_metadata(conn, DOC, add_projects=["p"])
     assert get_title_source(conn, DOC) == "auto"
 
 

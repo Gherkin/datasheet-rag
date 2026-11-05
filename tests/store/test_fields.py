@@ -91,9 +91,9 @@ def test_register_rejects_unknown_shape_and_role(conn: sqlite3.Connection) -> No
 def test_set_metadata_validates_fields_before_writing(conn: sqlite3.Connection) -> None:
     register_field(conn, "acme-id")
     with pytest.raises(MetadataFieldError, match="unregistered field"):
-        set_metadata(conn, "doc", project_id="p", fields={"nope": "x"})
+        set_metadata(conn, "doc", add_projects=["p"], fields={"nope": "x"})
     with pytest.raises(MetadataFieldError, match="expected a string"):
-        set_metadata(conn, "doc", project_id="p", fields={"acme-id": ["a", "b"]})
+        set_metadata(conn, "doc", add_projects=["p"], fields={"acme-id": ["a", "b"]})
     # Nothing was written by either refused call.
     assert get_metadata(conn, "doc") is None
 
@@ -128,14 +128,14 @@ def test_remove_field_without_values_needs_no_clear(conn: sqlite3.Connection) ->
 
 
 def test_bookkeeping_is_separate_from_the_metadata_patch(conn: sqlite3.Connection) -> None:
-    set_metadata(conn, "d1", project_id="p")
+    set_metadata(conn, "d1", add_projects=["p"])
     set_title_hints(conn, "d1", pdf_meta_title="Guide", running_header=None)
     set_needs_reembed(conn, "d1", True)
     # A later metadata write leaves the bookkeeping alone.
     set_metadata(conn, "d1", subsystem="power")
     d1 = get_metadata(conn, "d1")
     assert d1 is not None
-    assert (d1.project_id, d1.subsystem) == ("p", "power")
+    assert (d1.projects, d1.subsystem) == (["p"], "power")
     assert d1.pdf_meta_title == "Guide" and d1.running_header is None
     assert d1.needs_reembed is True
     assert d1.title_source == "auto"
@@ -147,7 +147,7 @@ def test_bookkeeping_is_separate_from_the_metadata_patch(conn: sqlite3.Connectio
 def test_bookkeeping_creates_the_row_when_missing(conn: sqlite3.Connection) -> None:
     set_needs_reembed(conn, "fresh", True)
     md = get_metadata(conn, "fresh")
-    assert md is not None and md.needs_reembed and md.project_id is None
+    assert md is not None and md.needs_reembed and md.projects == []
 
 
 def test_title_hints_are_replaced_whole(conn: sqlite3.Connection) -> None:

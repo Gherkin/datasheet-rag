@@ -56,7 +56,8 @@ _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 #: ambiguous in every listing and filter.
 RESERVED_NAMES = frozenset(
     {
-        *("doc_id", "title", "project_id", "group_name", "subsystem", "tags", "updated_at"),
+        *("doc_id", "title", "project_id", "projects", "group_name", "subsystem", "tags"),
+        "updated_at",
         *("title_source", "needs_reembed", "pdf_meta_title", "running_header"),
         *("fields", "version"),
         *("project", "group", "updated", "stale", "chunks", "pages", "ingested"),

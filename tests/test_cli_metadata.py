@@ -52,8 +52,8 @@ def db_path(tmp_path: Path) -> Path:
     """Two bare documents (no metadata sidecar row yet), one chunk each."""
     path = tmp_path / "store" / "rag.sqlite"
     conn = connect(path, embedding_dim=get_settings().embedding_dimensions)
-    insert_chunks(conn, [_chunk(DOC_A)], project_id="proj-a")
-    insert_chunks(conn, [_chunk(DOC_B)], project_id="proj-a")
+    insert_chunks(conn, [_chunk(DOC_A)])
+    insert_chunks(conn, [_chunk(DOC_B)])
     conn.commit()
     conn.close()
     return path
@@ -181,7 +181,6 @@ def test_list_filter_by_tag_requires_all_given_tags(db_path: Path) -> None:
 # worked before #37, so only the alone form guards the read-vs-write gate.
 
 _SCALAR_FIELDS = [
-    ("--project-id", "project_id"),
     ("--group", "group_name"),
     ("--mpn", "mpn"),
     ("--manufacturer", "manufacturer"),
@@ -290,6 +289,103 @@ def test_bad_project_config_fails_scoped_read_commands(
     result = _list(db_path)
     assert result.exit_code == 1
     assert "unknown key(s) colour" in result.output
+
+
+# --- projects (GH #121) ------------------------------------------------------
+
+
+def test_add_and_remove_project_keep_the_other_projects(db_path: Path) -> None:
+    result = _meta(db_path, DOC_A, "--add-project", "board-a", "--add-project", "board-b")
+    assert result.exit_code == 0, result.output
+    assert _get_json(db_path, DOC_A)["projects"] == ["board-a", "board-b"]
+
+    result = _meta(db_path, DOC_A, "--add-project", "board-c", "--remove-project", "board-a")
+    assert result.exit_code == 0, result.output
+    assert _get_json(db_path, DOC_A)["projects"] == ["board-b", "board-c"]
+
+
+def test_remove_project_alone_is_a_write(db_path: Path) -> None:
+    _meta(db_path, DOC_A, "--add-project", "board-a")
+    result = _meta(db_path, DOC_A, "--remove-project", "board-a")
+    assert result.exit_code == 0, result.output
+    assert "Saved metadata" in result.output
+    assert _get_json(db_path, DOC_A)["projects"] == []
+
+
+def test_project_both_added_and_removed_is_rejected(db_path: Path) -> None:
+    result = _meta(db_path, DOC_A, "--add-project", "x", "--remove-project", "x")
+    assert result.exit_code == 1
+    assert "both to add and to remove" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_blank_project_name_is_rejected(db_path: Path) -> None:
+    result = _meta(db_path, DOC_A, "--add-project", " ")
+    assert result.exit_code == 1
+    assert "cannot be empty" in result.output
+
+
+def test_project_id_option_is_gone(db_path: Path) -> None:
+    result = _meta(db_path, DOC_A, "--project-id", "x")
+    assert result.exit_code == 2 and "No such option" in result.output
+
+
+def test_project_config_adds_its_project_on_a_write(
+    db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _meta(db_path, DOC_A, "--add-project", "board-a")
+    (tmp_path / ".rag.toml").write_text('project_id = "board-b"\n')
+    monkeypatch.chdir(tmp_path)
+    get_project_config.cache_clear()  # the call above cached "no .rag.toml"
+    result = _meta(db_path, DOC_A, "--tag", "x")
+    assert result.exit_code == 0, result.output
+    assert _get_json(db_path, DOC_A)["projects"] == ["board-a", "board-b"]
+
+
+def test_project_config_does_not_undo_a_remove(
+    db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _meta(db_path, DOC_A, "--add-project", "board-a", "--add-project", "board-b")
+    (tmp_path / ".rag.toml").write_text('project_id = "board-b"\n')
+    monkeypatch.chdir(tmp_path)
+    get_project_config.cache_clear()
+    result = _meta(db_path, DOC_A, "--remove-project", "board-b")
+    assert result.exit_code == 0, result.output
+    assert _get_json(db_path, DOC_A)["projects"] == ["board-a"]
+
+
+def test_blank_project_config_project_is_ignored_on_a_write(
+    db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".rag.toml").write_text('project_id = " "\n')
+    monkeypatch.chdir(tmp_path)
+    get_project_config.cache_clear()
+    result = _meta(db_path, DOC_A, "--tag", "x")
+    assert result.exit_code == 0, result.output
+    assert _get_json(db_path, DOC_A)["projects"] == []
+
+
+def test_shared_project_skips_documents_missing_from_the_store(db_path: Path) -> None:
+    from types import SimpleNamespace
+
+    from datasheet_rag.backend import LocalBackend
+    from datasheet_rag.cli import _shared_project
+
+    _meta(db_path, DOC_A, "--add-project", "board-a", "--add-project", "board-b")
+    _meta(db_path, DOC_B, "--add-project", "board-b")
+    be = LocalBackend(conn=connect(db_path))
+    needs = [SimpleNamespace(doc_id=d) for d in (DOC_A, DOC_B, "not-in-store")]
+    assert _shared_project(be, needs) == "board-b"
+
+
+def test_list_scopes_to_every_project_a_document_is_in(db_path: Path) -> None:
+    _meta(db_path, DOC_A, "--add-project", "board-a", "--add-project", "board-b")
+    _meta(db_path, DOC_B, "--add-project", "board-b")
+    in_a = _list(db_path, "--project-id", "board-a")
+    assert in_a.exit_code == 0, in_a.output
+    assert DOC_A[:10] in in_a.output and DOC_B[:10] not in in_a.output
+    in_b = _list(db_path, "--project-id", "board-b")
+    assert DOC_A[:10] in in_b.output and DOC_B[:10] in in_b.output
 
 
 def test_no_flags_is_still_a_read(db_path: Path) -> None:

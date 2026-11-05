@@ -23,6 +23,7 @@ from datasheet_rag.cli import SHORT_DOC_ID_LEN, cli
 from datasheet_rag.config import get_settings
 from datasheet_rag.models.chunk import Chunk, ChunkLevel, ChunkMetadata, LayoutType
 from datasheet_rag.project_config import get_project_config
+from datasheet_rag.store.metadata import set_metadata
 from datasheet_rag.store.schema import connect
 from datasheet_rag.store.sqlite import insert_chunks
 
@@ -74,8 +75,10 @@ def db_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
     path = tmp_path / "store" / "rag.sqlite"
     conn = connect(path, embedding_dim=get_settings().embedding_dimensions)
-    insert_chunks(conn, [_chunk(DOC_ID)], project_id="proj-a")
-    insert_chunks(conn, [_chunk(DOC_NO_PDF)], project_id="proj-a")
+    insert_chunks(conn, [_chunk(DOC_ID)])
+    insert_chunks(conn, [_chunk(DOC_NO_PDF)])
+    set_metadata(conn, DOC_ID, add_projects=["proj-a"])
+    set_metadata(conn, DOC_NO_PDF, add_projects=["proj-a"])
     conn.commit()
     conn.close()
     return path

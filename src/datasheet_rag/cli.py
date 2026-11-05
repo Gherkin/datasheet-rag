@@ -696,7 +696,7 @@ _DOC_COLUMNS: dict[str, Callable[[IngestedDoc], Any]] = {
 }
 
 _META_COLUMNS: dict[str, Callable[[DocMetadata], Any]] = {
-    "project": lambda m: m.project_id,
+    "projects": lambda m: m.projects,
     "group": lambda m: m.group_name,
     "subsystem": lambda m: m.subsystem,
     "tags": lambda m: m.tags,
@@ -713,7 +713,8 @@ _LIST_COLUMN_ALIASES = {
     "chunk_count": "chunks",
     "page_count": "pages",
     "ingested_at": "ingested",
-    "project_id": "project",
+    "project": "projects",
+    "project_id": "projects",
     "group_name": "group",
     "updated_at": "updated",
 }
@@ -725,7 +726,7 @@ _LIST_RIGHT_ALIGNED = {"chunks", "pages"}
 # rather than appending them. Showing all eleven at once is unreadable on an
 # 80-column terminal, where Rich squeezes every cell down to nothing.
 _LIST_DEFAULT_COLUMNS = ("title", "chunks", "pages", "ingested")
-_LIST_WIDE_COLUMNS = ("project", "group", "mpn", "manufacturer", "subsystem", "tags")
+_LIST_WIDE_COLUMNS = ("projects", "group", "mpn", "manufacturer", "subsystem", "tags")
 
 
 def _parse_list_columns(columns: tuple[str, ...]) -> list[str]:
@@ -802,7 +803,7 @@ def _fmt_list_cell(value: Any) -> str:
     multiple=True,
     metavar="COL,COL,...",
     help="Choose the columns to show (comma-separated, repeatable). "
-    "Built-ins: title, chunks, pages, ingested, project, group, mpn, "
+    "Built-ins: title, chunks, pages, ingested, projects, group, mpn, "
     "manufacturer, subsystem, doc_type, tags, updated, stale, and any "
     "registered field (`rag fields list`). doc_id is always shown.",
 )
@@ -810,7 +811,7 @@ def _fmt_list_cell(value: Any) -> str:
     "--wide",
     "-w",
     is_flag=True,
-    help="Show the sidecar columns (project, group, mpn, manufacturer, "
+    help="Show the sidecar columns (projects, group, mpn, manufacturer, "
     "subsystem, tags, then each user-registered field) in place of the "
     "chunk/page/ingest columns. Implied whenever a filter is given.",
 )
@@ -836,7 +837,7 @@ def list_docs(
 
     Shows the store's own view — title, chunk and page counts, ingest time.
     Pass --wide, or any sidecar filter, to swap those for the metadata columns
-    (project, group, mpn, manufacturer, subsystem, tags) instead; filters
+    (projects, group, mpn, manufacturer, subsystem, tags) instead; filters
     narrow the listing to documents whose sidecar row matches.
 
     --columns replaces both views with exactly the columns you name. Each
@@ -1718,7 +1719,11 @@ def chunk_cmd(
 @repair_group.command("embeddings", short_help="Re-embed a document into the store.")
 @click.argument("doc_id", type=str)
 @_db_option
-@click.option("--project-id", default=None, help="Project ID to attach to every chunk.")
+@click.option(
+    "--project-id",
+    default=None,
+    help="Add the document to this project. Projects it is already in are kept.",
+)
 @click.option("--group", "group_name", default=None, help="Group name to attach to every chunk.")
 @click.option("--verbose/--quiet", default=True, help="Print per-batch progress.")
 def embed(
@@ -2240,7 +2245,7 @@ def describe_figures_cmd(
 
     \b
         rag repair figures --doc-id <doc>
-        rag repair embeddings <doc> --project-id <p>
+        rag repair embeddings <doc>
     """
     be = _backend_for(db_path)
     if doc_id:
@@ -2578,7 +2583,13 @@ def _print_cost_table(cost: CostEstimate, heading: str = "Estimated AWS cost") -
 @cli.command(short_help="Ingest a PDF end to end.")
 @click.argument("pdf_path", type=click.Path(exists=True, path_type=Path))
 @click.option("--doc-id", default=None, help="Explicit document ID (default: content hash).")
-@click.option("--project-id", default=None, help="Project ID attached to all chunks.")
+@click.option(
+    "--project-id",
+    default=None,
+    help="Add the document to this project (default: from .rag.toml). "
+    "Projects it is already in are kept; leave one with "
+    "`rag metadata <doc> --remove-project`.",
+)
 @click.option("--group", "group_name", default=None, help="Group name attached to all chunks.")
 @click.option(
     "--mpn",
@@ -3704,7 +3715,20 @@ def repair_tables_cmd(
     help="Override doc_title on every chunk row. Recorded as a manual "
     "title, so re-ingesting the document won't overwrite it.",
 )
-@click.option("--project-id", default=None, help="Set the document's project ID.")
+@click.option(
+    "--add-project",
+    "add_projects",
+    multiple=True,
+    metavar="PROJECT",
+    help="Add the document to this project (repeatable). Its other projects are kept.",
+)
+@click.option(
+    "--remove-project",
+    "remove_projects",
+    multiple=True,
+    metavar="PROJECT",
+    help="Remove the document from this project (repeatable).",
+)
 @click.option("--group", "group_name", default=None, help="Set the document's group name.")
 @click.option(
     "--mpn",
@@ -3758,12 +3782,13 @@ def repair_tables_cmd(
 @click.option(
     "--apply-to-chunks/--no-apply-to-chunks",
     default=True,
-    help="Propagate project_id and group_name into the chunks table.",
+    help="Propagate group_name into the chunks table.",
 )
 def metadata_cmd(
     doc_id: str,
     doc_title: str | None,
-    project_id: str | None,
+    add_projects: tuple[str, ...],
+    remove_projects: tuple[str, ...],
     group_name: str | None,
     mpn: tuple[str, ...],
     mpn_aliases: tuple[str, ...],
@@ -3794,6 +3819,14 @@ def metadata_cmd(
     Filtering with --mpn on `rag list` or via the MCP tools matches any
     entry in the list. --mpn, --manufacturer and --doc-type are shortcuts
     for --field on the built-in fields; `rag fields list` shows every field.
+
+    A document can belong to several projects. --add-project and
+    --remove-project change one membership each and keep the rest:
+
+        rag metadata <doc_id> --add-project board-b --remove-project board-a
+
+    In a folder with a .rag.toml, a write with neither option adds the
+    document to the .rag.toml project.
     """
     from datasheet_rag.backend import MetadataPatch
     from datasheet_rag.project_config import get_project_config
@@ -3803,9 +3836,18 @@ def metadata_cmd(
     # would silently turn every `rag metadata <doc>` into a write. The scalar
     # options are tested against None, not truthiness: `--title ''` is an
     # explicit request to clear the field, not an absent option.
-    scalars = (doc_title, project_id, group_name, manufacturer, subsystem, doc_type)
+    scalars = (doc_title, group_name, manufacturer, subsystem, doc_type)
     is_read = all(v is None for v in scalars) and not any(
-        (mpn, mpn_aliases, tags, clear_tags, field_items, unset_fields)
+        (
+            add_projects,
+            remove_projects,
+            mpn,
+            mpn_aliases,
+            tags,
+            clear_tags,
+            field_items,
+            unset_fields,
+        )
     )
     if is_read:
         be = _backend_for(db_path)
@@ -3827,10 +3869,12 @@ def metadata_cmd(
         fields[name] = None
 
     # .rag.toml fills only what the user did not pass; an explicit blank
-    # beats a config default.
+    # beats a config default. Its project is added only when the user named
+    # no project change: `--remove-project <toml project>` must not be undone.
     proj_cfg = get_project_config()
     if proj_cfg is not None:
-        project_id = proj_cfg.project_id if project_id is None else project_id
+        if proj_cfg.project_id and not (add_projects or remove_projects):
+            add_projects = (proj_cfg.project_id,)
         group_name = proj_cfg.group if group_name is None else group_name
         subsystem = proj_cfg.subsystem if subsystem is None else subsystem
         if not tags and proj_cfg.tags:
@@ -3869,7 +3913,8 @@ def metadata_cmd(
         meta = be.set_metadata(
             doc_id,
             MetadataPatch(
-                project_id=project_id,
+                add_projects=list(add_projects) or None,
+                remove_projects=list(remove_projects) or None,
                 group_name=group_name,
                 subsystem=subsystem,
                 tags=new_tags,
@@ -4779,6 +4824,27 @@ def eval_answer(
         console.print(f"[green]Report JSON →[/] {json_out}")
 
 
+def _shared_project(backend: Any, needs: list[Any]) -> str:
+    """The one project every needed document belongs to.
+
+    A document can be in several projects (GH #121), so this is the
+    intersection of their projects. It must hold exactly one project, or the
+    eval cannot tell which project's catalogue to hand the agent. A needed
+    document missing from the store is skipped.
+    """
+    found = (backend.get_document(i) for i in sorted({n.doc_id for n in needs if n.doc_id}))
+    project_lists: list[list[str]] = [d.projects for d in found if d is not None]
+    shared: set[str] = set(project_lists[0]) if project_lists else set()
+    for projects in project_lists[1:]:
+        shared &= set(projects)
+    if len(shared) != 1:
+        raise click.ClickException(
+            "the needs' documents should share exactly one project, found "
+            f"{sorted(shared) or 'none'}"
+        )
+    return shared.pop()
+
+
 def _select_needs(
     needs_path: Path, need_ids: tuple[str, ...], need_list: Path | None, limit: int | None
 ) -> list[Any]:
@@ -4859,22 +4925,11 @@ def _run_answer_eval(
 
     db = _require_local_db(db_path)
     conn = connect(db)
-    doc_ids = sorted({n.doc_id for n in needs if n.doc_id})
-    marks = ",".join("?" * len(doc_ids))
-    projects = [
-        r[0]
-        for r in conn.execute(
-            f"SELECT DISTINCT project_id FROM chunks WHERE doc_id IN ({marks})", doc_ids
-        ).fetchall()
-    ]
-    if len(projects) != 1:
-        raise click.ClickException(
-            f"the needs' documents should sit in one project, found {projects or 'none'}"
-        )
-    project = projects[0]
+    local = LocalBackend(conn=conn)
+    project = _shared_project(local, needs)
     from datasheet_rag.store.fields import display_value
 
-    listing = LocalBackend(conn=conn).list_documents(project_id=project).documents
+    listing = local.list_documents(project_id=project).documents
     docs = [
         {
             "doc_id": d.doc_id,
@@ -5157,16 +5212,7 @@ def eval_claude_code(
         from datasheet_rag.backend import get_backend
 
         backend = get_backend()
-        projects = {
-            d.project_id
-            for d in (backend.get_document(i) for i in {n.doc_id for n in needs if n.doc_id})
-            if d is not None
-        }
-        if len(projects) != 1 or None in projects:
-            raise click.ClickException(
-                f"the needs' documents should sit in one project, found {projects or 'none'}"
-            )
-        project = str(projects.pop())
+        project = _shared_project(backend, needs)
         from datasheet_rag.store.fields import display_value
 
         listing = backend.list_documents(project_id=project).documents

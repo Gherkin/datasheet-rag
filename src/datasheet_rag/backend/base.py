@@ -106,9 +106,11 @@ class RagBackend(ABC):
     ) -> DocPage:
         """One page of the matching documents, in ``doc_id`` order.
 
-        ``fields`` filters on registered fields (AND-ed; a list field matches if any
-        value is equal, case-insensitive). ``limit=None`` returns every match
-        from ``offset`` on.
+        ``project_id`` keeps documents that belong to that project, among
+        any others they belong to. ``fields`` filters on registered fields
+        (AND-ed; a list field matches if any value is equal,
+        case-insensitive). ``limit=None`` returns every match from
+        ``offset`` on.
         """
 
     @abstractmethod
@@ -277,6 +279,10 @@ class RagBackend(ABC):
         source_pdf: Path | None = None,
     ) -> IngestResult:
         """Store a parsed graph, embedding / describing / titling as asked.
+
+        ``project_id`` adds the document to that project; projects it is
+        already in are kept (GH #121). Leaving a project is a metadata
+        patch's ``remove_projects``.
 
         ``vectors`` supplies embeddings the caller already computed, which
         makes ``embed`` a no-op — the client-side compute path (GH #43) uses it

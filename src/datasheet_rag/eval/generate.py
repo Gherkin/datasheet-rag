@@ -24,6 +24,7 @@ from rich.console import Console
 from datasheet_rag.config import get_settings
 from datasheet_rag.eval.dataset import CATEGORIES, Category, EvalSet, GoldenItem
 from datasheet_rag.models.chunk import Chunk
+from datasheet_rag.store.projects import project_scope_sql
 from datasheet_rag.store.sqlite import _row_to_chunk
 
 console = Console()
@@ -126,8 +127,9 @@ def _sample_chunks(
         clauses.append("doc_id = ?")
         params.append(doc_id)
     if project_id:
-        clauses.append("project_id = ?")
-        params.append(project_id)
+        clause, clause_params = project_scope_sql(project_id, doc_id_column="doc_id")
+        clauses.append(clause)
+        params.extend(clause_params)
     # Over-fetch a pool then sample in Python for a stable seed.
     sql = (
         f"SELECT * FROM chunks WHERE {' AND '.join(clauses)} "

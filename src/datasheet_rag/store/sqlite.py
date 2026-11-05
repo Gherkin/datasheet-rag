@@ -35,6 +35,7 @@ from datasheet_rag.store.metadata import (
     title_rank,
     validate_title_source,
 )
+from datasheet_rag.store.projects import project_scope_sql
 
 logger = logging.getLogger(__name__)
 
@@ -98,14 +99,14 @@ def figure_source_available(figure_image_path: str | None, figure_s3_key: str | 
 # tuple aligned is the single source of truth for the row shape.
 _INSERT_SQL = """
 INSERT INTO chunks (
-    id, doc_id, project_id, group_name, level,
+    id, doc_id, group_name, level,
     text, context_text, token_count, layout_type, page_numbers,
     chapter_title, section_title, doc_title,
     parent_id, prev_id, next_id, chapter_root_id,
     figure_s3_key, figure_caption, figure_image_path, figure_description,
     metadata_json
 ) VALUES (
-    ?, ?, ?, ?, ?,
+    ?, ?, ?, ?,
     ?, ?, ?, ?, ?,
     ?, ?, ?,
     ?, ?, ?, ?,
@@ -114,7 +115,6 @@ INSERT INTO chunks (
 )
 ON CONFLICT(id) DO UPDATE SET
     doc_id            = excluded.doc_id,
-    project_id        = excluded.project_id,
     group_name        = excluded.group_name,
     level             = excluded.level,
     text              = excluded.text,
@@ -176,16 +176,13 @@ def _vector_to_bytes(vector: Sequence[float]) -> bytes:
 def _chunk_row(
     chunk: Chunk,
     *,
-    project_id: str | None,
     group_name: str | None,
     keep_title: bool = True,
 ) -> tuple[object, ...]:
     """Flatten a :class:`Chunk` into the parameter tuple for :data:`_INSERT_SQL`.
 
-    ``project_id`` and ``group_name`` override whatever was on the chunk's
-    metadata when supplied (non-None); otherwise we fall back to the
-    chunk's own values (currently always None on the model — callers wire
-    this in at insert time).
+    ``group_name`` is wired in at insert time; the chunk model has none.
+    Chunks carry no project: membership is per document (``doc_projects``).
 
     ``keep_title=False`` blanks the outgoing ``doc_title`` so the upsert's
     ``NULLIF`` defers to the stored one — how :func:`insert_chunks` drops a
@@ -198,7 +195,6 @@ def _chunk_row(
     return (
         chunk.id,
         chunk.doc_id,
-        project_id,
         group_name,
         int(chunk.level),
         chunk.text,
@@ -273,7 +269,6 @@ def insert_chunks_stats(
     chunks: Iterable[Chunk],
     vectors: Mapping[str, Sequence[float]] | None = None,
     *,
-    project_id: str | None = None,
     group_name: str | None = None,
     title_source: str = "auto",
     force_title: bool = False,
@@ -291,8 +286,9 @@ def insert_chunks_stats(
         Optional ``chunk_id -> embedding`` mapping. Only the chunks that
         have a vector here get a row in ``chunk_vecs``; the rest are
         text-only (useful for partial re-ingest).
-    project_id, group_name:
-        If provided, override the column for every inserted row.
+    group_name:
+        Written to the column of every inserted row. Project membership is
+        not set here — see ``store.metadata.set_metadata``.
     title_source:
         Provenance of the ``doc_title`` these chunks carry. Ingest parses
         the title out of page 1, so it defaults to ``"auto"`` — the
@@ -335,7 +331,6 @@ def insert_chunks_stats(
 
             row = _chunk_row(
                 chunk,
-                project_id=project_id,
                 group_name=group_name,
                 keep_title=keep,
             )
@@ -377,7 +372,6 @@ def insert_chunks(
     chunks: Iterable[Chunk],
     vectors: Mapping[str, Sequence[float]] | None = None,
     *,
-    project_id: str | None = None,
     group_name: str | None = None,
     title_source: str = "auto",
     force_title: bool = False,
@@ -388,7 +382,6 @@ def insert_chunks(
         conn,
         chunks,
         vectors=vectors,
-        project_id=project_id,
         group_name=group_name,
         title_source=title_source,
         force_title=force_title,
@@ -401,7 +394,6 @@ def insert_chunk_graph(
     graph: ChunkGraph,
     vectors: Mapping[str, Sequence[float]] | None = None,
     *,
-    project_id: str | None = None,
     group_name: str | None = None,
     title_source: str = "auto",
     force_title: bool = False,
@@ -422,7 +414,6 @@ def insert_chunk_graph(
         conn,
         graph.chunks.values(),
         vectors=vectors,
-        project_id=project_id,
         group_name=group_name,
         title_source=title_source,
         force_title=force_title,
@@ -548,8 +539,9 @@ def list_figure_chunks(
         sql += " AND doc_id = ?"
         params.append(doc_id)
     if project_id:
-        sql += " AND project_id = ?"
-        params.append(project_id)
+        clause, clause_params = project_scope_sql(project_id, doc_id_column="doc_id")
+        sql += f" AND {clause}"
+        params.extend(clause_params)
     if only_with_image:
         sql += " AND (COALESCE(figure_image_path, '') <> '' OR COALESCE(figure_s3_key, '') <> '')"
     sql += " ORDER BY doc_id, rowid"
@@ -714,8 +706,8 @@ def get_ingested_docs(
 
     A document only appears here once it has actually been chunked and
     embedded into the store — unlike S3, which lists every upload regardless
-    of ingestion status. Pass ``project_id`` to scope the listing to chunks
-    tagged with that project.
+    of ingestion status. Pass ``project_id`` to scope the listing to the
+    documents that belong to that project.
     """
     sql = """
         SELECT doc_id,
@@ -725,8 +717,9 @@ def get_ingested_docs(
         """
     params: list[Any] = []
     if project_id:
-        sql += " WHERE project_id = ?"
-        params.append(project_id)
+        clause, clause_params = project_scope_sql(project_id, doc_id_column="doc_id")
+        sql += f" WHERE {clause}"
+        params.extend(clause_params)
     sql += " GROUP BY doc_id ORDER BY doc_id"
     rows = conn.execute(sql, params).fetchall()
 
@@ -777,8 +770,9 @@ def count_chunks(
         clauses.append("doc_id = ?")
         params.append(doc_id)
     if project_id is not None:
-        clauses.append("project_id = ?")
-        params.append(project_id)
+        clause, clause_params = project_scope_sql(project_id, doc_id_column="doc_id")
+        clauses.append(clause)
+        params.extend(clause_params)
 
     where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
     row = conn.execute(
