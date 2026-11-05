@@ -635,6 +635,12 @@ def build_app() -> FastAPI:
             if data.get("vectors")
             else None
         )
+        # null keeps the stored hints; a dict of strings replaces them whole.
+        title_hints = data.get("title_hints")
+        if title_hints is not None and not (
+            isinstance(title_hints, dict) and all(isinstance(v, str) for v in title_hints.values())
+        ):
+            raise HTTPException(422, "title_hints must be null or an object of strings")
         try:
             result = be.ingest_chunk_graph(
                 graph,
@@ -645,7 +651,7 @@ def build_app() -> FastAPI:
                 embed=data.get("embed", True),
                 describe_figures=data.get("describe_figures", False),
                 infer_title=data.get("infer_title", False),
-                title_hints=data.get("title_hints"),
+                title_hints=title_hints,
                 vectors=vectors,
                 inferred_title=data.get("inferred_title"),
             )

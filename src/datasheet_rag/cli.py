@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import glob
 import json
 import os
 import random
@@ -108,7 +109,8 @@ def _resolve_cached_doc_id(doc_id: str, suffix: str = "_outline.json") -> str:
     if full is not None and (settings.output_dir / f"{full}{suffix}").is_file():
         return full
 
-    matches = sorted(settings.output_dir.glob(f"{doc_id}*{suffix}"))
+    # The prefix is user input: `*`, `?` and `[` must not act as wildcards.
+    matches = sorted(settings.output_dir.glob(f"{glob.escape(doc_id)}*{suffix}"))
     if not matches:
         raise click.ClickException(
             f"No cached {suffix.lstrip('_')} matching doc_id {doc_id!r} in "
@@ -132,8 +134,9 @@ def _require_docling_outline(doc_id: str) -> str:
     that reads like the document was never ingested.
     """
     settings = get_settings()
-    if not sorted(settings.output_dir.glob(f"{doc_id}*_outline.json")):
-        if sorted(settings.output_dir.glob(f"{doc_id}*_blocks.json")):
+    prefix = glob.escape(doc_id)
+    if not sorted(settings.output_dir.glob(f"{prefix}*_outline.json")):
+        if sorted(settings.output_dir.glob(f"{prefix}*_blocks.json")):
             raise click.ClickException(
                 f"Document {doc_id!r} was ingested with the Textract backend, and "
                 "the table commands are Docling-only — they read Docling's "
@@ -1429,7 +1432,7 @@ def _resolve_layout_input(arg: str) -> tuple[str, str, Path]:
                 return full, backend, path
 
     for suffix, backend in artifacts:
-        if sorted(settings.output_dir.glob(f"{arg}*{suffix}")):
+        if sorted(settings.output_dir.glob(f"{glob.escape(arg)}*{suffix}")):
             doc_id = _resolve_cached_doc_id(arg, suffix)
             return doc_id, backend, _cache_path(doc_id, suffix)
 

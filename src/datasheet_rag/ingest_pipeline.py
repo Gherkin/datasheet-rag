@@ -147,6 +147,12 @@ def check_backend_prerequisites(
     )
 
 
+def _title_hints(running_header: str, pdf_meta_title: str) -> dict[str, str]:
+    """The title hints a Docling outline found, without the empty ones."""
+    hints = {"running_header": running_header, "pdf_meta_title": pdf_meta_title}
+    return {k: v for k, v in hints.items() if v}
+
+
 def parse_pdf_to_graph(
     pdf_path: Path,
     *,
@@ -211,9 +217,9 @@ def parse_pdf_to_graph(
         if progress:
             progress(ProgressEvent(kind="detail", text=text, step=step_n))
 
-    hints_known = False  # set once a Docling outline is read
-    running_header = ""
-    pdf_meta_title = ""
+    # None until a Docling outline is read: no parse computed hints, so the
+    # store keeps the ones it has. A dict (even {}) replaces them.
+    title_hints: dict[str, str] | None = None
     figure_count = 0
 
     # ── 1. Detect backend ────────────────────────────────────────────────
@@ -282,9 +288,7 @@ def parse_pdf_to_graph(
                     )
                 _detail(f"Layout analysis cached → [cyan]{outline_path}[/]")
 
-            hints_known = True
-            running_header = outline.running_header
-            pdf_meta_title = outline.pdf_meta_title
+            title_hints = _title_hints(outline.running_header, outline.pdf_meta_title)
             summary = outline.summary()
             _detail(
                 f"{summary['top_level_sections']} chapters, "
@@ -423,14 +427,6 @@ def parse_pdf_to_graph(
 
     if figure_count == 0:
         figure_count = sum(1 for c in graph.chunks.values() if c.figure_image_path)
-
-    title_hints: dict[str, str] | None = None
-    if hints_known:
-        title_hints = {}
-        if running_header:
-            title_hints["running_header"] = running_header
-        if pdf_meta_title:
-            title_hints["pdf_meta_title"] = pdf_meta_title
 
     return ParseResult(
         graph=graph,

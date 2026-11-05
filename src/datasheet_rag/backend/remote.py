@@ -624,7 +624,20 @@ class RemoteBackend(RagBackend):
                     # only infers for a document that has no usable title, and
                     # the answer would be discarded on arrival otherwise.
                     if not self._has_usable_title(graph):
-                        inferred_title = infer_title_from_graph(graph, title_hints=title_hints)
+                        hints = title_hints
+                        if hints is None:
+                            # No parse computed hints, so the server keeps its
+                            # stored ones; infer from those, as it would.
+                            ctx = self.get_title_context(graph.doc_id)
+                            hints = {
+                                k: v
+                                for k, v in (
+                                    ("running_header", ctx.running_header),
+                                    ("pdf_meta_title", ctx.pdf_meta_title),
+                                )
+                                if v
+                            }
+                        inferred_title = infer_title_from_graph(graph, title_hints=hints)
                 # Cleared even when the caller handed us a title: leaving it set
                 # would have the server run its own inference on top of the one
                 # we are already sending, which is the server-side model call

@@ -684,12 +684,14 @@ def resolve_doc_id(conn: sqlite3.Connection, doc_id: str) -> str:
 
     Raises ``ValueError`` if the prefix matches zero or more than one document.
     """
-    # Escape LIKE's wildcards: the prefix is user input, and `_` or `%` must
-    # not match any character.
-    pattern = doc_id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    # A full id wins over longer ids that start with it (`lm317` vs `lm317a`).
+    if conn.execute("SELECT 1 FROM chunks WHERE doc_id = ? LIMIT 1", (doc_id,)).fetchone():
+        return doc_id
+    # A byte range, not LIKE: it is case-sensitive, has no wildcards to escape,
+    # and can use ix_chunks_doc_id. U+10FFFF sorts after every other character.
     rows = conn.execute(
-        "SELECT DISTINCT doc_id FROM chunks WHERE doc_id LIKE ? || '%' ESCAPE '\\'",
-        (pattern,),
+        "SELECT DISTINCT doc_id FROM chunks WHERE doc_id >= ? AND doc_id < ?",
+        (doc_id, doc_id + "\U0010ffff"),
     ).fetchall()
     matches: list[str] = [row["doc_id"] for row in rows]
 

@@ -127,6 +127,32 @@ def test_resolve_doc_id_treats_like_wildcards_literally(backend: LocalBackend) -
             backend.resolve_doc_id(wildcard)
 
 
+def _plain_graph(did: str) -> ChunkGraph:
+    g = ChunkGraph(doc_id=did)
+    g.add(
+        Chunk(
+            id=f"{did}:L2:0",
+            doc_id=did,
+            level=ChunkLevel.MICRO,
+            text="text",
+            metadata=ChunkMetadata(doc_id=did, page_numbers=[1]),
+        )
+    )
+    return g
+
+
+def test_resolve_doc_id_exact_wins_and_is_case_sensitive(backend: LocalBackend) -> None:
+    for did in ("lm317", "lm317a", "ABC"):
+        backend.ingest_chunk_graph(_plain_graph(did), embed=False)
+    assert backend.resolve_doc_id("lm317") == "lm317"
+    assert backend.resolve_doc_id("lm317a") == "lm317a"
+    with pytest.raises(ValueError, match="ambiguous"):
+        backend.resolve_doc_id("lm3")
+    assert backend.resolve_doc_id("AB") == "ABC"
+    with pytest.raises(ValueError, match="No ingested document"):
+        backend.resolve_doc_id("ab")
+
+
 def test_local_reingest_prunes_and_reports_stale_chunks(
     backend: LocalBackend,
 ) -> None:
@@ -823,6 +849,56 @@ def test_server_answers_one_document_summary(client, conn: sqlite3.Connection) -
     assert r.status_code == 200
     assert r.json()["doc_id"] == "d2"
     assert client.get("/documents/nope/summary").status_code == 204
+
+
+def test_remote_title_hints_none_keeps_and_empty_clears(client) -> None:
+    """null vs {} must survive RemoteBackend → JSON → /ingest: keep vs clear."""
+    from datasheet_rag.backend.remote import RemoteBackend
+
+    be = RemoteBackend.__new__(RemoteBackend)
+    be._client = client
+    be._compute = "server"
+    did = "e" * 64
+    g = _plain_graph(did)
+    be.ingest_chunk_graph(g, title_hints={"running_header": "LM317"}, embed=False)
+    be.ingest_chunk_graph(g, title_hints=None, embed=False)
+    assert client.get(f"/documents/{did}/metadata").json()["running_header"] == "LM317"
+    be.ingest_chunk_graph(g, title_hints={}, embed=False)
+    assert client.get(f"/documents/{did}/metadata").json()["running_header"] is None
+
+
+def test_remote_client_inference_uses_stored_hints_when_none_sent(client, monkeypatch) -> None:
+    from datasheet_rag.backend.remote import RemoteBackend
+
+    seen: list[dict[str, str] | None] = []
+
+    def fake_infer(graph: ChunkGraph, *, title_hints: dict[str, str] | None = None) -> None:
+        seen.append(title_hints)
+
+    monkeypatch.setattr("datasheet_rag.titling.infer_title_from_graph", fake_infer)
+    be = RemoteBackend.__new__(RemoteBackend)
+    be._client = client
+    be._compute = "client"
+    did = "f" * 64
+    g = _plain_graph(did)
+    be.ingest_chunk_graph(g, title_hints={"pdf_meta_title": "Guide"}, embed=False)
+    be.ingest_chunk_graph(g, title_hints=None, embed=False, infer_title=True)
+    assert seen == [{"pdf_meta_title": "Guide"}]
+
+
+def test_server_ingest_rejects_malformed_title_hints(client) -> None:
+    did = "e" * 64
+    for bad in ([], {"running_header": 5}, "LM317"):
+        payload = {
+            "graph": _plain_graph(did).model_dump(mode="json"),
+            "embed": False,
+            "title_hints": bad,
+        }
+        r = client.post(
+            "/ingest",
+            files=[("payload", ("payload.json", json.dumps(payload).encode(), "application/json"))],
+        )
+        assert r.status_code == 422, r.text
 
 
 def test_remote_get_document_reads_the_summary_route(client, conn: sqlite3.Connection) -> None:

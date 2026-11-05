@@ -297,6 +297,9 @@ def test_client_compute_infers_the_title_from_the_graph(monkeypatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/documents/titles":
             return httpx.Response(200, json={"titles": {}})
+        if request.url.path.endswith("/title-context"):
+            # No hints sent, so the client infers from the stored ones.
+            return httpx.Response(200, json={"doc_id": did, "first_page_text": ""})
         raw = request.content
         sent.update(json.loads(raw[raw.index(b"{") : raw.rindex(b"}") + 1]))
         return httpx.Response(200, json={"doc_id": did, "inserted": 1, "title": "TPS62840"})

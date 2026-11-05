@@ -12,6 +12,7 @@ server it starts, to confirm the primed PDF bytes are actually served.
 
 from __future__ import annotations
 
+import threading
 import time
 import urllib.request
 from pathlib import Path
@@ -165,20 +166,22 @@ def test_get_doc_document_alias(tmp_path, db_path, monkeypatch) -> None:
 
 
 def _interrupt_serve_loop(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Make the command's `while True: time.sleep(3600)` serve loop raise
+    """Make the command's `while True: time.sleep(...)` serve loop raise
     KeyboardInterrupt, so it returns once the server is up instead of hanging.
 
-    Only the long sleep raises. Short sleeps pass through: on Python 3.11,
-    ``subprocess.run(..., timeout=...)`` in ``_local_ips`` polls for the child
-    with ``time.sleep``, and raising there aborts the command before it serves.
+    ``_local_ips`` is stubbed: on Python 3.11 its ``subprocess.run(...,
+    timeout=...)`` polls with ``time.sleep``, which is the only other sleep the
+    command makes. With it gone, any sleep on the main thread is the serve loop.
+    Sleeps on other threads (the viewer server) pass through.
     """
     real_sleep = time.sleep
 
     def fake_sleep(seconds: float) -> None:
-        if seconds >= 3600:
+        if threading.current_thread() is threading.main_thread():
             raise KeyboardInterrupt
         real_sleep(seconds)
 
+    monkeypatch.setattr("datasheet_rag.cli._local_ips", lambda: ["192.0.2.1"])
     monkeypatch.setattr("time.sleep", fake_sleep)
 
 
