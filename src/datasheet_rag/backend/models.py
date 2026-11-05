@@ -13,16 +13,18 @@ import base64
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from datasheet_rag.models.chunk import Chunk
+from datasheet_rag.store.projects import check_project_change
 
 
 class DocSummary(BaseModel):
     """A document listing row: sidecar metadata + a couple derived fields."""
 
     doc_id: str
-    project_id: str | None = None
+    #: Every project the document belongs to, sorted.
+    projects: list[str] = Field(default_factory=list)
     group_name: str | None = None
     subsystem: str | None = None
     tags: list[str] = Field(default_factory=list)
@@ -141,6 +143,9 @@ class MetadataPatch(BaseModel):
 
     ``None`` means "leave the existing value alone" (matching the store's
     merge semantics). Pass an empty string / ``[]`` to clear a field.
+    ``add_projects`` / ``remove_projects`` join / leave the named projects
+    and leave the document's other projects alone; a project in both, or an
+    empty name, is rejected here.
     In ``fields`` each named field is replaced; a ``None`` value removes it.
     The pipeline's bookkeeping (title provenance, title hints, the re-embed
     marker) is not part of a patch. Unknown names are rejected, not ignored,
@@ -149,11 +154,29 @@ class MetadataPatch(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    project_id: str | None = None
+    add_projects: list[str] | None = None
+    remove_projects: list[str] | None = None
     group_name: str | None = None
     subsystem: str | None = None
     tags: list[str] | None = None
     fields: dict[str, str | list[str] | None] | None = None
+
+    @model_validator(mode="after")
+    def _check_projects(self) -> MetadataPatch:
+        add, remove = check_project_change(self.add_projects, self.remove_projects)
+        self.add_projects = add or None
+        self.remove_projects = remove or None
+        return self
+
+    def add_project(self, project_id: str | None) -> None:
+        """Add ``project_id`` to ``add_projects`` (no-op for ``None``/blank)."""
+        if not project_id or not project_id.strip():
+            return
+        add, remove = check_project_change(
+            [*(self.add_projects or []), project_id], self.remove_projects
+        )
+        self.add_projects = add or None
+        self.remove_projects = remove or None
 
     def kwargs(self) -> dict[str, Any]:
         """Return only the set (non-None) fields as set_metadata kwargs."""

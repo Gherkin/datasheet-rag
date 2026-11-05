@@ -359,6 +359,8 @@ doc_type     = "reference-manual"
 acme-id      = "D-0172"          # a field registered with `rag fields add`
 ```
 
+A document can belong to several projects. `project_id` adds the document to that project when it is ingested; the projects it was already in are kept. The same datasheet ingested from two project folders ends up in both projects. To leave a project, run `rag metadata <doc> --remove-project <project>` (`--add-project` adds one by hand).
+
 `tags` are combined across every `.rag.toml` on the path. `[fields]` are merged name by name, and the file closest to the pdf wins for a given name. `--field name=value` (and the `--mpn`, `--manufacturer` and `--doc-type` shortcuts) on the command line win over both.
 
 The schema is closed. Any of the following makes the command fail with an error that names the file:

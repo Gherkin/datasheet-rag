@@ -22,6 +22,7 @@ from pydantic import BaseModel, ConfigDict
 
 from datasheet_rag.models.chunk import Chunk, ChunkLevel, LayoutType
 from datasheet_rag.store.fields import field_filter_sql
+from datasheet_rag.store.projects import project_scope_sql
 from datasheet_rag.store.sqlite import get_chunk
 
 
@@ -35,6 +36,7 @@ class SearchFilters(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     doc_ids: list[str] | None = None
+    #: Keep chunks of documents that belong to this project (among others).
     project_id: str | None = None
     group_name: str | None = None
     #: Registered-field filters, AND-ed: ``{"mpn": "INA226"}`` keeps chunks
@@ -65,8 +67,9 @@ class SearchFilters(BaseModel):
             params.extend(self.doc_ids)
 
         if self.project_id is not None:
-            clauses.append("c.project_id = ?")
-            params.append(self.project_id)
+            clause, clause_params = project_scope_sql(self.project_id, doc_id_column="c.doc_id")
+            clauses.append(clause)
+            params.extend(clause_params)
 
         if self.group_name is not None:
             clauses.append("c.group_name = ?")

@@ -67,7 +67,7 @@ def conn() -> Iterator[sqlite3.Connection]:
     ]
     chunks = [s[0] for s in specs]
     vectors = {s[0].id: s[1] for s in specs}
-    insert_chunks(c, chunks, vectors=vectors, project_id="p1")
+    insert_chunks(c, chunks, vectors=vectors)
     try:
         yield c
     finally:

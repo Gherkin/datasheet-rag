@@ -625,7 +625,7 @@ def _list_documents_impl(
     items = [
         {
             "doc_id": d.doc_id,
-            "project_id": d.project_id,
+            "projects": d.projects,
             "group_name": d.group_name,
             "subsystem": d.subsystem,
             "fields": d.fields,

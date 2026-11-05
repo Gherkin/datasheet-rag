@@ -29,6 +29,7 @@ from datasheet_rag.mcp.server import (
 from datasheet_rag.models.chunk import Chunk, ChunkLevel, ChunkMetadata, LayoutType
 from datasheet_rag.store import (
     connect,
+    delete_metadata,
     insert_chunks,
     register_field,
     set_metadata,
@@ -165,20 +166,19 @@ def conn() -> Any:
         "c4": _vec(6),  # dropout
     }
 
-    # docA gets project p1; docB gets p2 (insert in two calls so project
-    # is correctly attached per doc).
+    # docA is in project p1; docB in p2.
     insert_chunks(
         c,
         [ch for ch in chunks if ch.doc_id == "docA"],
         vectors={k: v for k, v in vectors.items() if k != "c4"},
-        project_id="p1",
     )
     insert_chunks(
         c,
         [ch for ch in chunks if ch.doc_id == "docB"],
         vectors={"c4": vectors["c4"]},
-        project_id="p2",
     )
+    set_metadata(c, "docA", add_projects=["p1"])
+    set_metadata(c, "docB", add_projects=["p2"])
     return c
 
 
@@ -329,7 +329,7 @@ def test_table_chunk_without_warning_is_marked_unverified(conn: Any) -> None:
         page=53,
         layout_type=LayoutType.TABLE,
     )
-    insert_chunks(conn, [chunk], vectors={"t1": _vec(7)}, project_id="p1")
+    insert_chunks(conn, [chunk], vectors={"t1": _vec(7)})
 
     out = _get_chunk_impl("t1", conn=conn)
     assert out is not None
@@ -348,7 +348,7 @@ def test_table_chunk_with_warning_flags_it(conn: Any) -> None:
         layout_type=LayoutType.TABLE,
         table_structure_warning="garbled header",
     )
-    insert_chunks(conn, [chunk], vectors={"t2": _vec(8)}, project_id="p1")
+    insert_chunks(conn, [chunk], vectors={"t2": _vec(8)})
 
     out = _get_chunk_impl("t2", conn=conn)
     assert out is not None
@@ -421,14 +421,14 @@ def test_list_documents_filters_by_project(conn: Any) -> None:
     set_metadata(
         conn,
         "docA",
-        project_id="p1",
+        add_projects=["p1"],
         subsystem="mcu",
         fields={"mpn": "STM32H743", "manufacturer": "ST"},
     )
     set_metadata(
         conn,
         "docB",
-        project_id="p2",
+        add_projects=["p2"],
         subsystem="power",
         fields={"mpn": "LM317", "manufacturer": "TI"},
     )
@@ -439,8 +439,8 @@ def test_list_documents_filters_by_project(conn: Any) -> None:
 
 
 def test_list_documents_manufacturer_filter(conn: Any) -> None:
-    set_metadata(conn, "docA", project_id="p1", fields={"manufacturer": "ST"})
-    set_metadata(conn, "docB", project_id="p2", fields={"manufacturer": "TI"})
+    set_metadata(conn, "docA", add_projects=["p1"], fields={"manufacturer": "ST"})
+    set_metadata(conn, "docB", add_projects=["p2"], fields={"manufacturer": "TI"})
     out = _list_documents_impl(manufacturer="TI", conn=conn)["items"]
     assert [d["doc_id"] for d in out] == ["docB"]
 
@@ -491,20 +491,23 @@ def test_get_document_metadata_missing_returns_none(conn: Any) -> None:
 
 def test_list_documents_includes_docs_without_a_sidecar_row(conn: Any) -> None:
     # docB is ingested but never tagged; docA is tagged. Both are documents.
+    delete_metadata(conn, "docB")
     set_metadata(conn, "docA", fields={"mpn": "STM32H743"})
 
     out = _list_documents_impl(conn=conn)["items"]
 
     assert [d["doc_id"] for d in out] == ["docA", "docB"]
+    assert out[0]["projects"] == ["p1"]
     untagged = out[1]
     assert untagged["fields"] == {}
-    assert untagged["project_id"] is None
+    assert untagged["projects"] == []
     assert untagged["tags"] == []
 
 
 def test_list_documents_sidecar_filter_excludes_untagged_docs(conn: Any) -> None:
     set_metadata(conn, "docA", fields={"manufacturer": "ST"})
     # docB has no sidecar row, so it cannot match a manufacturer filter.
+    delete_metadata(conn, "docB")
     out = _list_documents_impl(manufacturer="ST", conn=conn)["items"]
     assert [d["doc_id"] for d in out] == ["docA"]
 
@@ -586,7 +589,7 @@ def _seed_figure_chunk(
         figure_caption="Figure 3-2: SPI4 timing",
         figure_description=description,
     )
-    insert_chunks(c, [chunk], project_id="p1")
+    insert_chunks(c, [chunk])
 
 
 def test_search_results_flag_figure_chunks_with_uri(
@@ -1051,7 +1054,7 @@ def test_table_result_carries_no_directives(conn: Any, warning: str | None) -> N
         layout_type=LayoutType.TABLE,
         table_structure_warning=warning,
     )
-    insert_chunks(conn, [chunk], vectors={"t3": _vec(9)}, project_id="p1")
+    insert_chunks(conn, [chunk], vectors={"t3": _vec(9)})
 
     out = _get_chunk_impl("t3", conn=conn)
     assert out is not None
@@ -1132,7 +1135,7 @@ def test_warned_table_without_pages_still_reports_its_structure(conn: Any) -> No
         layout_type=LayoutType.TABLE,
         table_structure_warning="garbled header",
     )
-    insert_chunks(conn, [chunk], vectors={"t:nopage": _vec(11)}, project_id="p1")
+    insert_chunks(conn, [chunk], vectors={"t:nopage": _vec(11)})
 
     out = _get_chunk_impl("t:nopage", conn=conn)
     assert out is not None
@@ -1157,7 +1160,7 @@ def test_datasheet_prose_is_not_a_directive_regression(conn: Any) -> None:
         section="Absolute Maximum Ratings",
         layout_type=LayoutType.TABLE,
     )
-    insert_chunks(conn, [chunk], vectors={"t:prose": _vec(12)}, project_id="p1")
+    insert_chunks(conn, [chunk], vectors={"t:prose": _vec(12)})
 
     out = _get_chunk_impl("t:prose", conn=conn)
     assert out is not None
@@ -1221,7 +1224,8 @@ def test_search_pages_continue_the_same_ranking() -> None:
     chunks = [
         _make_chunk(f"x{i:03d}", text="alpha filler " + "beta " * (i // 20)) for i in range(200)
     ]
-    insert_chunks(c, chunks, project_id="p1")
+    insert_chunks(c, chunks)
+    set_metadata(c, "docA", add_projects=["p1"])
 
     paged: list[dict[str, Any]] = []
     offset: int | None = 0
@@ -1301,7 +1305,7 @@ def test_the_widest_zoom_in_stays_under_the_mcp_result_limit() -> None:
         _make_chunk(f"k{i}", text=f"row {i} | " + "7.5 mA | " * 700, parent_id="p")
         for i in range(313)
     ]
-    insert_chunks(c, [_make_chunk("p", level=ChunkLevel.MESO), *children], project_id="p1")
+    insert_chunks(c, [_make_chunk("p", level=ChunkLevel.MESO), *children])
 
     server = mcp_server.build_server(LocalBackend(conn=c))
     result = asyncio.run(server.call_tool("zoom_in", {"chunk_id": "p", "limit": 1000}))

@@ -99,6 +99,33 @@ def test_local_ingest_no_figures_trusts_existing_paths(backend: LocalBackend) ->
     assert hits and hits[0].chunk_id == f"{did}:L2:0"
 
 
+def test_reingest_under_another_project_adds_it(backend: LocalBackend) -> None:
+    """Ingest only adds a project; the document stays in the ones it had (GH #121)."""
+    did = "d" * 64
+    backend.ingest_chunk_graph(_plain_graph(did), project_id="board-a", embed=False)
+    backend.ingest_chunk_graph(
+        _plain_graph(did),
+        project_id="board-b",
+        metadata=MetadataPatch(add_projects=["board-c"]),
+        embed=False,
+    )
+    md = backend.get_metadata(did)
+    assert md is not None and md.projects == ["board-a", "board-b", "board-c"]
+    for project in ("board-a", "board-b", "board-c"):
+        assert backend.stats(project_id=project).total_chunks == 1
+        assert [d.doc_id for d in backend.list_documents(project_id=project).documents] == [did]
+
+    backend.set_metadata(did, MetadataPatch(remove_projects=["board-a"]))
+    assert backend.stats(project_id="board-a").total_chunks == 0
+    assert backend.get_document(did).projects == ["board-b", "board-c"]
+
+
+def test_metadata_patch_rejects_a_project_both_added_and_removed() -> None:
+    with pytest.raises(ValueError, match="both to add and to remove"):
+        MetadataPatch(add_projects=["x"], remove_projects=[" x"])
+    assert MetadataPatch(add_projects=[" a ", "a"]).add_projects == ["a"]
+
+
 def test_local_reingest_title_hints_none_keeps_dict_replaces(backend: LocalBackend) -> None:
     did = "b" * 64
     g = _graph_with_figure(did)

@@ -17,6 +17,7 @@ from datasheet_rag.cli import cli
 from datasheet_rag.config import get_settings
 from datasheet_rag.models.chunk import Chunk, ChunkLevel, ChunkMetadata, LayoutType
 from datasheet_rag.project_config import get_project_config
+from datasheet_rag.store.metadata import set_metadata
 from datasheet_rag.store.schema import connect
 from datasheet_rag.store.sqlite import insert_chunks
 
@@ -47,8 +48,10 @@ def db_path(tmp_path: Path) -> Path:
     """A real on-disk store with two docs tagged to different projects."""
     path = tmp_path / "store" / "rag.sqlite"
     conn = connect(path, embedding_dim=get_settings().embedding_dimensions)
-    insert_chunks(conn, [_chunk("doc-a:0", "doc-a")], project_id="proj-a")
-    insert_chunks(conn, [_chunk("doc-b:0", "doc-b")], project_id="proj-b")
+    insert_chunks(conn, [_chunk("doc-a:0", "doc-a")])
+    insert_chunks(conn, [_chunk("doc-b:0", "doc-b")])
+    set_metadata(conn, "doc-a", add_projects=["proj-a"])
+    set_metadata(conn, "doc-b", add_projects=["proj-b"])
     conn.commit()
     conn.close()
     return path

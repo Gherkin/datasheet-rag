@@ -78,11 +78,7 @@ def figures_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def db_path(tmp_path: Path) -> Path:
     path = tmp_path / "store" / "rag.sqlite"
     conn = connect(path, embedding_dim=get_settings().embedding_dimensions)
-    insert_chunks(
-        conn,
-        [_figure_chunk(0, 3), _figure_chunk(1, 3), _figure_chunk(2, 5)],
-        project_id="proj-a",
-    )
+    insert_chunks(conn, [_figure_chunk(0, 3), _figure_chunk(1, 3), _figure_chunk(2, 5)])
     conn.commit()
     conn.close()
     return path
@@ -126,7 +122,7 @@ def test_apply_relinks_crops_and_captions(db_path: Path, figures_dir: Path) -> N
 def test_a_page_whose_counts_disagree_is_left_alone(db_path: Path, figures_dir: Path) -> None:
     """Better an unrepaired page than a chunk pointing at the wrong picture."""
     conn = connect(db_path, embedding_dim=get_settings().embedding_dimensions)
-    insert_chunks(conn, [_figure_chunk(3, 3)], project_id="proj-a")  # 3 chunks, 2 crops
+    insert_chunks(conn, [_figure_chunk(3, 3)])  # 3 chunks, 2 crops
     conn.commit()
     conn.close()
 
@@ -147,7 +143,7 @@ def test_a_formula_chunk_is_relinked_to_its_formula_crop(db_path: Path, figures_
     formula = _figure_chunk(3, 5, text="[Formula]")
     formula.metadata.layout_type = LayoutType.FORMULA
     conn = connect(db_path, embedding_dim=get_settings().embedding_dimensions)
-    insert_chunks(conn, [formula], project_id="proj-a")
+    insert_chunks(conn, [formula])
     conn.commit()
     conn.close()
 
@@ -177,7 +173,7 @@ def test_documents_needing_only_a_rechunk_are_summarised(db_path: Path, figures_
     meso = _figure_chunk(0, 3)
     meso.id = f"{DOC}:L1:0"
     meso.level = ChunkLevel.MESO
-    insert_chunks(conn, [meso], project_id="proj-a")
+    insert_chunks(conn, [meso])
     conn.commit()
     conn.close()
 

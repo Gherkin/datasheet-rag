@@ -1,8 +1,10 @@
 """Document-level metadata sidecar.
 
-Sits next to ``chunks`` and stores per-document fields (project, group,
+Sits next to ``chunks`` and stores per-document fields (projects, group,
 tags, and the values of registered fields such as MPN and manufacturer —
-see ``store.fields``) that are independent of any single chunk. It also
+see ``store.fields``) that are independent of any single chunk. Project
+membership lives in its own table (``store.projects``); this module reads
+and writes it with the rest of the document's metadata. It also
 holds the pipeline's own bookkeeping for each document: title provenance,
 the ingest-time title hints and the re-embed marker. Those are typed
 columns the pipeline writes; a metadata patch cannot set them.
@@ -10,11 +12,11 @@ columns the pipeline writes; a metadata patch cannot set them.
 Two properties of this sidecar matter:
 
 * It can be written **before** ingestion completes — useful for the CLI
-  to register a PDF up front so chunks land with the right
-  ``project_id`` once they're produced.
-* :func:`apply_metadata_to_chunks` back-fills ``chunks.project_id`` and
-  ``chunks.group_name`` from the sidecar after chunks have been
-  inserted, so existing rows pick up changes without a full re-ingest.
+  to register a PDF up front so its chunks are in the right projects
+  once they're produced.
+* :func:`apply_metadata_to_chunks` back-fills ``chunks.group_name`` from
+  the sidecar after chunks have been inserted, so existing rows pick up
+  changes without a full re-ingest.
 """
 
 from __future__ import annotations
@@ -36,13 +38,21 @@ from datasheet_rag.store.fields import (
     normalize_field_patch_for,
     write_field_values,
 )
+from datasheet_rag.store.projects import (
+    change_projects,
+    check_project_change,
+    delete_doc_projects,
+    get_projects_for_docs,
+    project_scope_sql,
+)
 
 
 class DocMetadata(BaseModel):
     """Per-document metadata row (mirrors the ``doc_metadata`` table)."""
 
     doc_id: str
-    project_id: str | None = None
+    #: Every project the document belongs to, sorted (``doc_projects``).
+    projects: list[str] = Field(default_factory=list)
     group_name: str | None = None
     subsystem: str | None = None
     tags: list[str] = Field(default_factory=list)
@@ -175,13 +185,15 @@ def set_needs_reembed(conn: sqlite3.Connection, doc_id: str, value: bool) -> Non
 
 
 def _row_to_metadata(
-    row: sqlite3.Row, fields: dict[str, str | list[str]] | None = None
+    row: sqlite3.Row,
+    fields: dict[str, str | list[str]] | None = None,
+    projects: list[str] | None = None,
 ) -> DocMetadata:
     tags_raw = row["tags"]
     tags = json.loads(tags_raw) if tags_raw else []
     return DocMetadata(
         doc_id=row["doc_id"],
-        project_id=row["project_id"],
+        projects=list(projects or []),
         group_name=row["group_name"],
         subsystem=row["subsystem"],
         tags=tags,
@@ -203,7 +215,8 @@ def get_metadata(conn: sqlite3.Connection, doc_id: str) -> DocMetadata | None:
     if row is None:
         return None
     values = get_values_for_docs(conn, [doc_id])
-    return _row_to_metadata(row, values.get(doc_id))
+    projects = get_projects_for_docs(conn, [doc_id])
+    return _row_to_metadata(row, values.get(doc_id), projects.get(doc_id))
 
 
 def check_patch(
@@ -232,7 +245,8 @@ def set_metadata(
     conn: sqlite3.Connection,
     doc_id: str,
     *,
-    project_id: str | None = None,
+    add_projects: list[str] | None = None,
+    remove_projects: list[str] | None = None,
     group_name: str | None = None,
     subsystem: str | None = None,
     tags: list[str] | None = None,
@@ -246,6 +260,10 @@ def set_metadata(
 
     Merge rules
     -----------
+    * ``add_projects`` / ``remove_projects``: the document joins / leaves
+      each named project; its other projects are left alone. A project in
+      both lists, or an empty name, raises ``ValueError`` before anything
+      is written.
     * Scalar fields: overwrite with the new value when not ``None``.
     * ``tags``: replace wholesale (not merged).
     * ``fields``: per field — a field named in the patch has its value
@@ -257,13 +275,13 @@ def set_metadata(
     Returns the resulting :class:`DocMetadata` after the upsert.
     """
     field_patch = check_patch(conn, fields=fields)
+    add, remove = check_project_change(add_projects, remove_projects)
 
     existing = get_metadata(conn, doc_id)
     if existing is None:
         existing = DocMetadata(doc_id=doc_id)
     merged = existing.model_copy(
         update={
-            "project_id": project_id if project_id is not None else existing.project_id,
             "group_name": group_name if group_name is not None else existing.group_name,
             "subsystem": subsystem if subsystem is not None else existing.subsystem,
             "tags": list(tags) if tags is not None else existing.tags,
@@ -273,10 +291,9 @@ def set_metadata(
     conn.execute(
         """
         INSERT INTO doc_metadata (
-            doc_id, project_id, group_name, subsystem, tags, updated_at
-        ) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            doc_id, group_name, subsystem, tags, updated_at
+        ) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(doc_id) DO UPDATE SET
-            project_id   = excluded.project_id,
             group_name   = excluded.group_name,
             subsystem    = excluded.subsystem,
             tags         = excluded.tags,
@@ -284,12 +301,12 @@ def set_metadata(
         """,
         (
             merged.doc_id,
-            merged.project_id,
             merged.group_name,
             merged.subsystem,
             json.dumps(merged.tags),
         ),
     )
+    change_projects(conn, doc_id, add=add, remove=remove)
     write_field_values(conn, doc_id, field_patch)
     conn.commit()
 
@@ -300,7 +317,8 @@ def set_metadata(
 
 
 def delete_metadata(conn: sqlite3.Connection, doc_id: str) -> int:
-    """Delete the sidecar row for ``doc_id``, if any, and its field values.
+    """Delete the sidecar row for ``doc_id``, if any, its field values and
+    its project memberships.
 
     Not covered by the ``chunks`` cascade (`doc_metadata` is intentionally
     not FK'd to `chunks` — see module docstring), so callers that fully
@@ -312,6 +330,7 @@ def delete_metadata(conn: sqlite3.Connection, doc_id: str) -> int:
     cur.execute("DELETE FROM doc_metadata WHERE doc_id = ?", (doc_id,))
     deleted = cur.rowcount
     delete_doc_values(conn, doc_id)
+    delete_doc_projects(conn, doc_id)
     conn.commit()
     return int(deleted)
 
@@ -325,7 +344,8 @@ def list_docs(
 ) -> list[DocMetadata]:
     """Return all sidecar rows matching the optional filters.
 
-    ``fields`` filters on registered fields, AND-ed: ``{"mpn": "INA226"}``
+    ``project_id`` keeps documents that belong to that project (among any
+    others). ``fields`` filters on registered fields, AND-ed: ``{"mpn": "INA226"}``
     keeps documents whose mpn list contains INA226 (case-insensitive). Naming
     an unregistered field raises :class:`MetadataFieldError` rather than
     silently matching nothing.
@@ -333,8 +353,9 @@ def list_docs(
     clauses: list[str] = []
     params: list[object] = []
     if project_id is not None:
-        clauses.append("project_id = ?")
-        params.append(project_id)
+        clause, clause_params = project_scope_sql(project_id, doc_id_column="doc_id")
+        clauses.append(clause)
+        params.extend(clause_params)
     if group_name is not None:
         clauses.append("group_name = ?")
         params.append(group_name)
@@ -350,34 +371,29 @@ def list_docs(
         params,
     ).fetchall()
     # Unfiltered: read every value rather than binding one parameter per row.
-    values = get_values_for_docs(conn, [r["doc_id"] for r in rows] if clauses else None)
-    return [_row_to_metadata(r, values.get(r["doc_id"])) for r in rows]
+    wanted = [r["doc_id"] for r in rows] if clauses else None
+    values = get_values_for_docs(conn, wanted)
+    projects = get_projects_for_docs(conn, wanted)
+    return [_row_to_metadata(r, values.get(r["doc_id"]), projects.get(r["doc_id"])) for r in rows]
 
 
 def apply_metadata_to_chunks(conn: sqlite3.Connection, doc_id: str) -> int:
-    """Back-fill ``chunks.project_id`` / ``chunks.group_name`` from sidecar.
+    """Back-fill ``chunks.group_name`` from the sidecar.
 
-    No-ops (returns 0) if there is no sidecar row, or if both
-    ``project_id`` and ``group_name`` are unset on the sidecar. The
-    chunks' other columns are not touched.
+    No-ops (returns 0) if there is no sidecar row or its ``group_name`` is
+    unset. The chunks' other columns are not touched. Projects need no
+    back-fill: chunks are scoped through ``doc_projects``.
 
     Returns the number of chunk rows updated.
     """
     md = get_metadata(conn, doc_id)
-    if md is None:
-        return 0
-    if md.project_id is None and md.group_name is None:
+    if md is None or md.group_name is None:
         return 0
 
     cur = conn.cursor()
     cur.execute(
-        """
-        UPDATE chunks
-           SET project_id = ?,
-               group_name = ?
-         WHERE doc_id = ?
-        """,
-        (md.project_id, md.group_name, doc_id),
+        "UPDATE chunks SET group_name = ? WHERE doc_id = ?",
+        (md.group_name, doc_id),
     )
     updated = cur.rowcount
     conn.commit()

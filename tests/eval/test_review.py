@@ -42,7 +42,6 @@ def conn() -> Iterator[sqlite3.Connection]:
             _chunk("doc1:L1:0", level=ChunkLevel.MESO, page=14, text="Oscillation near threshold"),
             _chunk("doc1:L2:9", level=ChunkLevel.MICRO, page=99, text="Unrelated content"),
         ],
-        project_id="p1",
     )
     try:
         yield c

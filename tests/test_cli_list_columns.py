@@ -54,12 +54,23 @@ def db_path(tmp_path: Path) -> Path:
     """Two documents with sidecar rows: A carries two user fields, B one."""
     path = tmp_path / "store" / "rag.sqlite"
     conn = connect(path, embedding_dim=get_settings().embedding_dimensions)
-    insert_chunks(conn, [_chunk(DOC_A)], project_id="proj-a")
-    insert_chunks(conn, [_chunk(DOC_B)], project_id="proj-a")
+    insert_chunks(conn, [_chunk(DOC_A)])
+    insert_chunks(conn, [_chunk(DOC_B)])
     conn.commit()
     conn.close()
 
-    _meta(path, DOC_A, "--project-id", "proj-a", "--mpn", "STM32H743VIT6", "--tag", "mcu")
+    _meta(
+        path,
+        DOC_A,
+        "--add-project",
+        "proj-a",
+        "--add-project",
+        "proj-b",
+        "--mpn",
+        "STM32H743VIT6",
+        "--tag",
+        "mcu",
+    )
     for name in ("revision", "reviewed_by"):
         CliRunner().invoke(cli, ["fields", "add", name, "--db", str(path)])
     _meta(path, DOC_A, "--field", "revision=B", "--field", "reviewed_by=hector")
@@ -160,11 +171,11 @@ def test_built_in_columns_are_selectable(db_path: Path) -> None:
     assert "STM32H743VIT6" in _row(result.output, DOC_A)
 
 
-def test_model_field_names_are_accepted_as_aliases(db_path: Path) -> None:
-    """`project_id` is what `rag metadata` prints; it must not read as a field."""
-    result = _list(db_path, "--columns", "project_id")
-    assert result.exit_code == 0, result.output
-    assert "proj-a" in _row(result.output, DOC_A)
+def test_projects_column_lists_every_project(db_path: Path) -> None:
+    for spelling in ("projects", "project", "project_id"):
+        result = _list(db_path, "--columns", spelling)
+        assert result.exit_code == 0, result.output
+        assert "proj-a, proj-b" in _row(result.output, DOC_A)
 
 
 def test_unknown_column_is_rejected_instead_of_printing_blanks(db_path: Path) -> None:

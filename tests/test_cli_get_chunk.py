@@ -17,6 +17,7 @@ from datasheet_rag.cli import SHORT_DOC_ID_LEN, cli
 from datasheet_rag.config import get_settings
 from datasheet_rag.models.chunk import Chunk, ChunkLevel, ChunkMetadata, LayoutType
 from datasheet_rag.project_config import get_project_config
+from datasheet_rag.store.metadata import set_metadata
 from datasheet_rag.store.schema import connect
 from datasheet_rag.store.sqlite import insert_chunks
 
@@ -85,8 +86,10 @@ def db_path(tmp_path: Path) -> Path:
 
     other = _chunk(DOC_B, 0, "Unrelated capacitor derating notes.")
 
-    insert_chunks(conn, [parent, prev_c, mid, next_c], project_id="proj-a")
-    insert_chunks(conn, [other], project_id="proj-b")
+    insert_chunks(conn, [parent, prev_c, mid, next_c])
+    insert_chunks(conn, [other])
+    set_metadata(conn, DOC_A, add_projects=["proj-a"])
+    set_metadata(conn, DOC_B, add_projects=["proj-b"])
     conn.commit()
     conn.close()
     return path
@@ -175,7 +178,8 @@ def test_inspect_figures_chunk_id_round_trips_through_get_chunk(db_path: Path) -
         figure_image_path=str(image),
     )
     conn = connect(db_path, embedding_dim=get_settings().embedding_dimensions)
-    insert_chunks(conn, [fig], project_id="proj-a")
+    insert_chunks(conn, [fig])
+    set_metadata(conn, fig.doc_id, add_projects=["proj-a"])
     conn.commit()
     conn.close()
 
@@ -200,7 +204,8 @@ def test_inspect_figures_flags_chunks_whose_image_is_gone(db_path: Path) -> None
         figure_image_path=str(db_path.parent / "not-here.png"),
     )
     conn = connect(db_path, embedding_dim=get_settings().embedding_dimensions)
-    insert_chunks(conn, [fig], project_id="proj-a")
+    insert_chunks(conn, [fig])
+    set_metadata(conn, fig.doc_id, add_projects=["proj-a"])
     conn.commit()
     conn.close()
 

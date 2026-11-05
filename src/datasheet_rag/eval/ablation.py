@@ -31,6 +31,8 @@ from datasheet_rag.chunking.summarizer import AbstractiveSummarizer
 from datasheet_rag.eval.dataset import EvalSet
 from datasheet_rag.eval.harness import Embedder, RunConfig, RunReport, run_eval
 from datasheet_rag.models.chunk import Chunk, ChunkGraph, ChunkLevel, LayoutType
+from datasheet_rag.store.metadata import set_metadata
+from datasheet_rag.store.projects import get_projects_for_docs, project_scope_sql
 from datasheet_rag.store.schema import connect
 from datasheet_rag.store.sqlite import _row_to_chunk, insert_chunks
 
@@ -149,8 +151,9 @@ def build_variant_store(
         clauses.append("doc_id = ?")
         params.append(doc_id)
     if project_id:
-        clauses.append("project_id = ?")
-        params.append(project_id)
+        clause, clause_params = project_scope_sql(project_id, doc_id_column="doc_id")
+        clauses.append(clause)
+        params.extend(clause_params)
     where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
     sql = f"SELECT * FROM chunks{where} ORDER BY id"
     if limit is not None:
@@ -158,8 +161,7 @@ def build_variant_store(
 
     rows = src_conn.execute(sql, params).fetchall()
     chunks = [_row_to_chunk(r) for r in rows]
-    # Preserve project_id/group_name from the source row for parity.
-    project_by_id = {r["id"]: r["project_id"] for r in rows}
+    # Preserve group_name from the source row for parity.
     group_by_id = {r["id"]: r["group_name"] for r in rows}
 
     payloads: list[str] = []
@@ -182,17 +184,23 @@ def build_variant_store(
     vectors_list = embedder.embed_texts(payloads) if payloads else []
     vectors = {c.id: v for c, v in zip(embeddable, vectors_list, strict=True)}
 
-    # Insert chunks grouped by their original project/group so scoping
+    # Keep each chunk's group and each document's projects so scoping
     # filters behave identically to the source.
     for chunk in chunks:
         insert_chunks(
             dst,
             [chunk],
             vectors=vectors,
-            project_id=project_by_id.get(chunk.id),
             group_name=group_by_id.get(chunk.id),
         )
+    _copy_projects(src_conn, dst, sorted({c.doc_id for c in chunks}))
     return dst
+
+
+def _copy_projects(src: sqlite3.Connection, dst: sqlite3.Connection, doc_ids: list[str]) -> None:
+    """Give each document in ``dst`` the projects it has in ``src``."""
+    for doc_id, projects in get_projects_for_docs(src, doc_ids).items():
+        set_metadata(dst, doc_id, add_projects=projects)
 
 
 # ---------------------------------------------------------------------------
@@ -273,9 +281,8 @@ def build_macro_summarizer_variant_store(
     dst = connect(dst_path, embedding_dim=dim)
 
     rows = src_conn.execute(
-        "SELECT id, project_id, group_name FROM chunks WHERE doc_id = ?", (doc_id,)
+        "SELECT id, group_name FROM chunks WHERE doc_id = ?", (doc_id,)
     ).fetchall()
-    project_by_id = {r["id"]: r["project_id"] for r in rows}
     group_by_id = {r["id"]: r["group_name"] for r in rows}
 
     graph = _load_doc_graph_from_store(src_conn, doc_id)
@@ -321,7 +328,7 @@ def build_macro_summarizer_variant_store(
             dst,
             [chunk],
             vectors=vectors,
-            project_id=project_by_id.get(chunk.id),
             group_name=group_by_id.get(chunk.id),
         )
+    _copy_projects(src_conn, dst, [doc_id])
     return dst
