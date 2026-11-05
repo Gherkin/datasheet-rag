@@ -28,7 +28,7 @@ from pydantic import BaseModel, Field
 
 from datasheet_rag.store.fields import (
     FieldShape,
-    MetadataFieldError,
+    check_filter_fields,
     delete_doc_values,
     field_filter_sql,
     field_shapes,
@@ -146,10 +146,24 @@ def set_title_hints(
     pdf_meta_title: str | None,
     running_header: str | None,
 ) -> None:
-    """Record the ingest-time title hints (``None`` clears one)."""
-    _set_bookkeeping(
-        conn, doc_id, pdf_meta_title=pdf_meta_title or None, running_header=running_header or None
-    )
+    """Record the ingest-time title hints, replacing both (``None`` clears one).
+
+    With neither hint this only clears an existing row's hints; it does not
+    create a sidecar row for a document that has none.
+    """
+    if not pdf_meta_title and not running_header:
+        conn.execute(
+            "UPDATE doc_metadata SET pdf_meta_title = NULL, running_header = NULL "
+            "WHERE doc_id = ? AND (pdf_meta_title IS NOT NULL OR running_header IS NOT NULL)",
+            (doc_id,),
+        )
+    else:
+        _set_bookkeeping(
+            conn,
+            doc_id,
+            pdf_meta_title=pdf_meta_title or None,
+            running_header=running_header or None,
+        )
     conn.commit()
 
 
@@ -324,13 +338,7 @@ def list_docs(
         clauses.append("group_name = ?")
         params.append(group_name)
     if fields:
-        registered = field_shapes(conn)
-        unknown = sorted(f for f in fields if f not in registered)
-        if unknown:
-            raise MetadataFieldError(
-                f"cannot filter on unregistered field(s) {', '.join(unknown)} "
-                f"(registered: {', '.join(sorted(registered))})"
-            )
+        check_filter_fields(field_shapes(conn), fields)
         field_clauses, field_params = field_filter_sql(fields, doc_id_column="doc_id")
         clauses.extend(field_clauses)
         params.extend(field_params)

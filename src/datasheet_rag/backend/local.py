@@ -72,7 +72,7 @@ from datasheet_rag.store import (
     update_figure_description,
     vector_search,
 )
-from datasheet_rag.store.fields import FieldShape
+from datasheet_rag.store.fields import FieldShape, check_filter_fields
 from datasheet_rag.store.metadata import check_patch, set_needs_reembed, set_title_hints
 
 if TYPE_CHECKING:
@@ -150,6 +150,8 @@ class LocalBackend(RagBackend):
     ) -> list[SearchResult]:
         if not query or not query.strip():
             raise ValueError("query must not be empty")
+        if filters is not None and filters.fields:
+            check_filter_fields((f.name for f in self.list_fields()), filters.fields)
         ranked = self._rank(query, mode=mode, filters=filters, query_vector=query_vector)
         return ranked[offset : offset + k]
 
@@ -730,13 +732,14 @@ class LocalBackend(RagBackend):
                 set_metadata(conn, did, **patch.kwargs())
                 apply_metadata_to_chunks(conn, did)
                 conn.commit()
-            if title_hints:
-                set_title_hints(
-                    conn,
-                    did,
-                    pdf_meta_title=title_hints.get("pdf_meta_title"),
-                    running_header=title_hints.get("running_header"),
-                )
+            # Always: a re-ingest's hints replace the old ones, both or neither.
+            hints = title_hints or {}
+            set_title_hints(
+                conn,
+                did,
+                pdf_meta_title=hints.get("pdf_meta_title"),
+                running_header=hints.get("running_header"),
+            )
 
         # 5. Title. Either the caller already inferred one (client-side
         #    compute) and we only record it, or we infer it here.

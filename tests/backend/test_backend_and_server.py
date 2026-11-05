@@ -319,6 +319,12 @@ def test_server_metadata_fields_routes_and_field_filters(client) -> None:
         json={"query": "block diagram", "mode": "keyword", "filters": {"fields": {"acme-id": "x"}}},
     ).json()["results"]
     assert miss == []
+    # A misspelt field name is a 400, not an empty result.
+    typo = client.post(
+        "/search",
+        json={"query": "block", "mode": "keyword", "filters": {"fields": {"acme_id": "d:7"}}},
+    )
+    assert typo.status_code == 400 and "unregistered field" in typo.text
 
     # Remove: refused while held, then cleared with the field.
     assert client.delete("/metadata/fields/acme-id").status_code == 400
@@ -329,7 +335,16 @@ def test_server_metadata_fields_routes_and_field_filters(client) -> None:
 
 def test_server_needs_reembed_route(client) -> None:
     did = "e" * 64
+    # An id that is not in the store is a 400 and leaves no sidecar row.
     r = client.put(f"/documents/{did}/needs-reembed", json={"value": True})
+    assert r.status_code == 400
+    assert client.get(f"/documents/{did}/metadata").status_code == 204
+
+    payload = {"graph": _graph_with_figure(did).model_dump(mode="json"), "embed": False}
+    files = [("payload", ("payload.json", json.dumps(payload).encode(), "application/json"))]
+    assert client.post("/ingest", files=files).status_code == 200
+    # A short prefix resolves to the full id.
+    r = client.put(f"/documents/{did[:8]}/needs-reembed", json={"value": True})
     assert r.status_code == 200, r.text
     assert client.get(f"/documents/{did}/metadata").json()["needs_reembed"] is True
     client.put(f"/documents/{did}/needs-reembed", json={"value": False})

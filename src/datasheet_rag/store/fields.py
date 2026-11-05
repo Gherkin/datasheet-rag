@@ -60,6 +60,8 @@ RESERVED_NAMES = frozenset(
         *("title_source", "needs_reembed", "pdf_meta_title", "running_header"),
         *("fields", "version"),
         *("project", "group", "updated", "stale", "chunks", "pages", "ingested"),
+        # `rag list --columns` aliases (model attribute spellings).
+        *("id", "doc_title", "chunk_count", "page_count", "ingested_at"),
     }
 )
 
@@ -409,6 +411,21 @@ def get_values_for_docs(
 def delete_doc_values(conn: sqlite3.Connection, doc_id: str) -> None:
     """Drop every field value of ``doc_id``. Does not commit."""
     conn.execute("DELETE FROM doc_field_values WHERE doc_id = ?", (doc_id,))
+
+
+def check_filter_fields(registered: Iterable[str], fields: Iterable[str]) -> None:
+    """Raise :class:`MetadataFieldError` if a filter names an unregistered field.
+
+    A filter on a misspelt field would otherwise match nothing and look like
+    "the store has no such documents".
+    """
+    names = set(registered)
+    unknown = sorted(f for f in fields if f not in names)
+    if unknown:
+        raise MetadataFieldError(
+            f"cannot filter on unregistered field(s) {', '.join(unknown)} "
+            f"(registered: {', '.join(sorted(names))})"
+        )
 
 
 def field_filter_sql(

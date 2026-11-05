@@ -86,7 +86,8 @@ def _v3_bookkeeping(attrs: dict[str, object]) -> tuple[list[str], dict[str, obje
             if value:
                 out.setdefault("title_source", "inferred")
         elif name == "needs_reembed" and isinstance(value, bool):
-            out["needs_reembed"] = int(value)
+            if value:  # NULL means "no", as set_needs_reembed writes it
+                out["needs_reembed"] = 1
         elif name in ("pdf_meta_title", "running_header") and isinstance(value, str):
             out[name] = value
         else:
@@ -111,11 +112,17 @@ def _migrate_to_v3(conn: sqlite3.Connection) -> None:
     """
     from datasheet_rag.store.fields import _coerce, ensure_field_tables, write_field_values
 
-    cols = {r["name"] for r in conn.execute("PRAGMA table_info(doc_metadata)")}
     if conn.in_transaction:
         conn.commit()
-    conn.execute("BEGIN")
+    # IMMEDIATE takes the write lock before anything is read, so a second
+    # process opening the same v2 store waits, then sees v3 and does nothing.
+    conn.execute("BEGIN IMMEDIATE")
     try:
+        row = conn.execute("SELECT version FROM schema_version WHERE id = 1").fetchone()
+        if row is not None and int(row["version"]) >= 3:
+            conn.commit()
+            return
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(doc_metadata)")}
         ensure_field_tables(conn)
         for col, ddl in _V3_BOOKKEEPING_COLUMNS:
             if col not in cols:
@@ -151,14 +158,18 @@ def _migrate_to_v3(conn: sqlite3.Connection) -> None:
                 )
         if problems:
             raise MigrationError(
-                "cannot migrate the store to v3: these documents hold free-form "
-                "attributes, which v3 no longer has. Copy the values out and "
-                "remove them with the old version, then open the store again:\n  "
-                + "\n  ".join(problems)
+                "cannot migrate the store to v3: these documents hold attributes "
+                "v3 cannot carry forward — a free-form attribute (v3 has none), or "
+                "a title_source/title_inferred/needs_reembed/pdf_meta_title/"
+                "running_header value of the wrong type. With the old version, "
+                "copy out and remove a free-form attribute, or correct the value's "
+                "type; then open the store again:\n  " + "\n  ".join(problems)
             )
         conn.execute("DROP INDEX IF EXISTS ix_doc_metadata_mpn")
         for col in [*present, *(["attributes"] if has_attrs else [])]:
             conn.execute(f"ALTER TABLE doc_metadata DROP COLUMN {col}")
+        # In this transaction, so no other process sees the new layout at v2.
+        conn.execute("UPDATE schema_version SET version = 3 WHERE id = 1")
         conn.commit()
     except BaseException:
         conn.rollback()

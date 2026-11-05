@@ -407,7 +407,8 @@ def build_app() -> FastAPI:
     def document_set_needs_reembed(
         doc_id: str, body: NeedsReembedBody, be: LocalBackend = Depends(get_backend)
     ) -> dict[str, Any]:
-        be.set_needs_reembed(doc_id, body.value)
+        # Resolve first: a prefix or an unknown id must not create a sidecar row.
+        be.set_needs_reembed(be.resolve_doc_id(doc_id), body.value)
         return {"needs_reembed": body.value}
 
     @app.post("/documents/{doc_id}/apply-metadata", dependencies=ingest_dep)

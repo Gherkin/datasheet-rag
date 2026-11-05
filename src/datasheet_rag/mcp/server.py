@@ -80,6 +80,7 @@ from datasheet_rag.backend import (
 from datasheet_rag.config import get_settings
 from datasheet_rag.models.chunk import IMAGE_LAYOUT_TYPES, ChunkLevel, LayoutType
 from datasheet_rag.store import DocMetadata, SearchFilters, SearchResult
+from datasheet_rag.store.fields import MetadataFieldError, check_filter_fields
 
 # ---------------------------------------------------------------------------
 # Return annotations on the content-block tools
@@ -658,13 +659,10 @@ def _check_filter_fields(be: RagBackend, fields: dict[str, str]) -> None:
     A search filter on a misspelt field would otherwise match nothing and look
     like "the store has no such documents".
     """
-    registered = {f.name for f in be.list_fields()}
-    unknown = sorted(f for f in fields if f not in registered)
-    if unknown:
-        raise ValueError(
-            f"unregistered field(s) {', '.join(unknown)}; registered fields: "
-            f"{', '.join(sorted(registered))} (see list_metadata_fields)"
-        )
+    try:
+        check_filter_fields((f.name for f in be.list_fields()), fields)
+    except MetadataFieldError as e:
+        raise ValueError(f"{e} (see list_metadata_fields)") from None
 
 
 def _list_metadata_fields_impl(

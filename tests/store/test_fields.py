@@ -23,7 +23,7 @@ from datasheet_rag.store.metadata import (
     set_needs_reembed,
     set_title_hints,
 )
-from datasheet_rag.store.schema import SCHEMA_VERSION, MigrationError, connect
+from datasheet_rag.store.schema import SCHEMA_VERSION, MigrationError, _migrate_to_v3, connect
 
 EMBED_DIM = 4
 
@@ -58,6 +58,8 @@ def test_builtin_fields_ship_registered(conn: sqlite3.Connection) -> None:
         ("needs_reembed", "reserved"),
         ("pdf_meta_title", "reserved"),
         ("running_header", "reserved"),
+        ("id", "reserved"),  # `rag list --columns` alias of doc_id
+        ("chunk_count", "reserved"),
         ("mpn", "already registered"),
     ],
 )
@@ -148,6 +150,22 @@ def test_bookkeeping_creates_the_row_when_missing(conn: sqlite3.Connection) -> N
     assert md is not None and md.needs_reembed and md.project_id is None
 
 
+def test_title_hints_are_replaced_whole(conn: sqlite3.Connection) -> None:
+    set_title_hints(conn, "d1", pdf_meta_title="Guide", running_header="LM317")
+    # A re-ingest that finds no hints clears both, not neither.
+    set_title_hints(conn, "d1", pdf_meta_title=None, running_header=None)
+    d1 = get_metadata(conn, "d1")
+    assert d1 is not None and d1.pdf_meta_title is None and d1.running_header is None
+    # ...and creates no row for a document that has none.
+    set_title_hints(conn, "nohints", pdf_meta_title=None, running_header=None)
+    assert get_metadata(conn, "nohints") is None
+
+
+def test_list_docs_rejects_an_unregistered_filter_field(conn: sqlite3.Connection) -> None:
+    with pytest.raises(MetadataFieldError, match="unregistered field"):
+        list_docs(conn, fields={"acme_id": "D-17"})
+
+
 # ---------------------------------------------------------------------------
 # v2 → v3 migration
 # ---------------------------------------------------------------------------
@@ -199,6 +217,7 @@ _V2_ROWS: list[tuple[object, ...]] = [
     ("d3", None, None, None, None),
     ("d4", None, None, None, json.dumps({"title_inferred": True, "title_source": "manual"})),
     ("d5", None, None, None, json.dumps({"needs_reembed": True})),
+    ("d6", None, None, None, json.dumps({"needs_reembed": False})),
 ]
 
 
@@ -228,7 +247,16 @@ def test_v2_store_migrates_onto_fields_and_bookkeeping_columns(tmp_path: Path) -
         assert d4 is not None and d4.title_source == "manual"  # title_source beats the boolean
         d5 = get_metadata(c, "d5")
         assert d5 is not None and d5.needs_reembed is True
+        # One encoding of "not stale": NULL, as set_needs_reembed writes it.
+        stale = c.execute("SELECT needs_reembed FROM doc_metadata WHERE doc_id = 'd6'").fetchone()
+        assert stale[0] is None
         assert [m.doc_id for m in list_docs(c, fields={"mpn": "B"})] == ["d1"]
+
+        # A second process that read v2 before this one migrated re-checks
+        # under the write lock and does nothing.
+        _migrate_to_v3(c)
+        d1 = get_metadata(c, "d1")
+        assert d1 is not None and d1.fields["mpn"] == ["A", "B", "C"]
     finally:
         c.close()
 
