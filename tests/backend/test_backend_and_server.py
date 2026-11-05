@@ -99,6 +99,30 @@ def test_local_ingest_no_figures_trusts_existing_paths(backend: LocalBackend) ->
     assert hits and hits[0].chunk_id == f"{did}:L2:0"
 
 
+def test_local_reingest_without_hints_keeps_the_stored_ones(backend: LocalBackend) -> None:
+    did = "b" * 64
+    g = _graph_with_figure(did)
+    hints = {"pdf_meta_title": "Guide", "running_header": "LM317"}
+    backend.ingest_chunk_graph(g, title_hints=hints, embed=False)
+    # A cached-graph re-ingest or `rag repair embeddings` sends no hints.
+    backend.ingest_chunk_graph(g, embed=False)
+    md = backend.get_metadata(did)
+    assert md is not None and md.pdf_meta_title == "Guide" and md.running_header == "LM317"
+    # A partial set replaces both.
+    backend.ingest_chunk_graph(g, title_hints={"running_header": "LM317A"}, embed=False)
+    md = backend.get_metadata(did)
+    assert md is not None and md.pdf_meta_title is None and md.running_header == "LM317A"
+
+
+def test_resolve_doc_id_treats_like_wildcards_literally(backend: LocalBackend) -> None:
+    did = "c" * 64
+    backend.ingest_chunk_graph(_graph_with_figure(did), embed=False)
+    assert backend.resolve_doc_id("ccc") == did
+    for wildcard in ("_", "%", "c_c"):
+        with pytest.raises(ValueError, match="No ingested document"):
+            backend.resolve_doc_id(wildcard)
+
+
 def test_local_reingest_prunes_and_reports_stale_chunks(
     backend: LocalBackend,
 ) -> None:

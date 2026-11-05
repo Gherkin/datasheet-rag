@@ -732,14 +732,16 @@ class LocalBackend(RagBackend):
                 set_metadata(conn, did, **patch.kwargs())
                 apply_metadata_to_chunks(conn, did)
                 conn.commit()
-            # Always: a re-ingest's hints replace the old ones, both or neither.
-            hints = title_hints or {}
-            set_title_hints(
-                conn,
-                did,
-                pdf_meta_title=hints.get("pdf_meta_title"),
-                running_header=hints.get("running_header"),
-            )
+            # Hints sent replace the old ones whole. No hints means none were
+            # computed (a cached chunk graph, `rag repair embeddings`), not
+            # "the parse found none", so the stored ones are kept.
+            if title_hints:
+                set_title_hints(
+                    conn,
+                    did,
+                    pdf_meta_title=title_hints.get("pdf_meta_title"),
+                    running_header=title_hints.get("running_header"),
+                )
 
         # 5. Title. Either the caller already inferred one (client-side
         #    compute) and we only record it, or we infer it here.

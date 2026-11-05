@@ -684,9 +684,12 @@ def resolve_doc_id(conn: sqlite3.Connection, doc_id: str) -> str:
 
     Raises ``ValueError`` if the prefix matches zero or more than one document.
     """
+    # Escape LIKE's wildcards: the prefix is user input, and `_` or `%` must
+    # not match any character.
+    pattern = doc_id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     rows = conn.execute(
-        "SELECT DISTINCT doc_id FROM chunks WHERE doc_id LIKE ? || '%'",
-        (doc_id,),
+        "SELECT DISTINCT doc_id FROM chunks WHERE doc_id LIKE ? || '%' ESCAPE '\\'",
+        (pattern,),
     ).fetchall()
     matches: list[str] = [row["doc_id"] for row in rows]
 

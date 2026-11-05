@@ -161,6 +161,14 @@ def test_title_hints_are_replaced_whole(conn: sqlite3.Connection) -> None:
     assert get_metadata(conn, "nohints") is None
 
 
+def test_reserved_names_cover_every_rag_list_column() -> None:
+    from datasheet_rag.cli import _DOC_COLUMNS, _LIST_COLUMN_ALIASES, _META_COLUMNS
+    from datasheet_rag.store.fields import RESERVED_NAMES
+
+    columns = {*_DOC_COLUMNS, *_META_COLUMNS, *_LIST_COLUMN_ALIASES}
+    assert columns <= RESERVED_NAMES, sorted(columns - RESERVED_NAMES)
+
+
 def test_list_docs_rejects_an_unregistered_filter_field(conn: sqlite3.Connection) -> None:
     with pytest.raises(MetadataFieldError, match="unregistered field"):
         list_docs(conn, fields={"acme_id": "D-17"})
@@ -217,7 +225,7 @@ _V2_ROWS: list[tuple[object, ...]] = [
     ("d3", None, None, None, None),
     ("d4", None, None, None, json.dumps({"title_inferred": True, "title_source": "manual"})),
     ("d5", None, None, None, json.dumps({"needs_reembed": True})),
-    ("d6", None, None, None, json.dumps({"needs_reembed": False})),
+    ("d6", None, None, None, json.dumps({"needs_reembed": False, "pdf_meta_title": ""})),
 ]
 
 
@@ -248,8 +256,10 @@ def test_v2_store_migrates_onto_fields_and_bookkeeping_columns(tmp_path: Path) -
         d5 = get_metadata(c, "d5")
         assert d5 is not None and d5.needs_reembed is True
         # One encoding of "not stale": NULL, as set_needs_reembed writes it.
-        stale = c.execute("SELECT needs_reembed FROM doc_metadata WHERE doc_id = 'd6'").fetchone()
-        assert stale[0] is None
+        stale = c.execute(
+            "SELECT needs_reembed, pdf_meta_title FROM doc_metadata WHERE doc_id = 'd6'"
+        ).fetchone()
+        assert stale[0] is None and stale[1] is None  # "" becomes NULL too
         assert [m.doc_id for m in list_docs(c, fields={"mpn": "B"})] == ["d1"]
 
         # A second process that read v2 before this one migrated re-checks

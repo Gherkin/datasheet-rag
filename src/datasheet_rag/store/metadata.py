@@ -153,7 +153,8 @@ def set_title_hints(
     """
     if not pdf_meta_title and not running_header:
         conn.execute(
-            "UPDATE doc_metadata SET pdf_meta_title = NULL, running_header = NULL "
+            "UPDATE doc_metadata SET pdf_meta_title = NULL, running_header = NULL, "
+            "updated_at = CURRENT_TIMESTAMP "
             "WHERE doc_id = ? AND (pdf_meta_title IS NOT NULL OR running_header IS NOT NULL)",
             (doc_id,),
         )

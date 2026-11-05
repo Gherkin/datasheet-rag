@@ -89,7 +89,8 @@ def _v3_bookkeeping(attrs: dict[str, object]) -> tuple[list[str], dict[str, obje
             if value:  # NULL means "no", as set_needs_reembed writes it
                 out["needs_reembed"] = 1
         elif name in ("pdf_meta_title", "running_header") and isinstance(value, str):
-            out[name] = value
+            if value:  # NULL means "no hint", as set_title_hints writes it
+                out[name] = value
         else:
             bad.append(name)
     return bad, out
