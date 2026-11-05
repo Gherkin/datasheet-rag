@@ -767,7 +767,7 @@ def build_app() -> FastAPI:
                     embed=True,
                     describe_figures=not skip_figures and not skip_describe,
                     infer_title=bool(opts.get("infer_title", False)),
-                    title_hints=parsed.title_hints or None,
+                    title_hints=parsed.title_hints,
                 )
                 loop.call_soon_threadsafe(
                     queue.put_nowait, ("result", result.model_dump(mode="json"))

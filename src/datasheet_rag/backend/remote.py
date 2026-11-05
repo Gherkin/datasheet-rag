@@ -767,7 +767,7 @@ class RemoteBackend(RagBackend):
                 embed=True,
                 describe_figures=not skip_figures and not skip_describe,
                 infer_title=infer_title,
-                title_hints=parsed.title_hints or None,
+                title_hints=parsed.title_hints,
                 # Parsed here, so the server has never seen the file. One
                 # argument rather than a call of our own: the CLI reaches
                 # ingest_chunk_graph directly for --local-parse and for

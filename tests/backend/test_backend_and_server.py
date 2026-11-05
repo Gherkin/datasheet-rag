@@ -99,12 +99,12 @@ def test_local_ingest_no_figures_trusts_existing_paths(backend: LocalBackend) ->
     assert hits and hits[0].chunk_id == f"{did}:L2:0"
 
 
-def test_local_reingest_without_hints_keeps_the_stored_ones(backend: LocalBackend) -> None:
+def test_local_reingest_title_hints_none_keeps_dict_replaces(backend: LocalBackend) -> None:
     did = "b" * 64
     g = _graph_with_figure(did)
     hints = {"pdf_meta_title": "Guide", "running_header": "LM317"}
     backend.ingest_chunk_graph(g, title_hints=hints, embed=False)
-    # A cached-graph re-ingest or `rag repair embeddings` sends no hints.
+    # None: no parse computed hints (cached graph, `rag repair embeddings`).
     backend.ingest_chunk_graph(g, embed=False)
     md = backend.get_metadata(did)
     assert md is not None and md.pdf_meta_title == "Guide" and md.running_header == "LM317"
@@ -112,6 +112,10 @@ def test_local_reingest_without_hints_keeps_the_stored_ones(backend: LocalBacken
     backend.ingest_chunk_graph(g, title_hints={"running_header": "LM317A"}, embed=False)
     md = backend.get_metadata(did)
     assert md is not None and md.pdf_meta_title is None and md.running_header == "LM317A"
+    # {}: the parse ran and found none, so both are cleared.
+    backend.ingest_chunk_graph(g, title_hints={}, embed=False)
+    md = backend.get_metadata(did)
+    assert md is not None and md.pdf_meta_title is None and md.running_header is None
 
 
 def test_resolve_doc_id_treats_like_wildcards_literally(backend: LocalBackend) -> None:

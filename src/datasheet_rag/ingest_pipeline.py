@@ -22,7 +22,7 @@ from __future__ import annotations
 import dataclasses
 import json
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -61,7 +61,10 @@ class ParseResult:
     graph: ChunkGraph
     doc_id: str
     resolved_backend: str
-    title_hints: dict[str, str] = field(default_factory=dict)
+    #: What the Docling outline gave. ``None`` when no outline was read (a
+    #: cached chunk graph, or Textract, which has no hints), so the store
+    #: keeps the hints it has instead of clearing them.
+    title_hints: dict[str, str] | None = None
     figure_count: int = 0
 
 
@@ -208,6 +211,7 @@ def parse_pdf_to_graph(
         if progress:
             progress(ProgressEvent(kind="detail", text=text, step=step_n))
 
+    hints_known = False  # set once a Docling outline is read
     running_header = ""
     pdf_meta_title = ""
     figure_count = 0
@@ -278,6 +282,7 @@ def parse_pdf_to_graph(
                     )
                 _detail(f"Layout analysis cached → [cyan]{outline_path}[/]")
 
+            hints_known = True
             running_header = outline.running_header
             pdf_meta_title = outline.pdf_meta_title
             summary = outline.summary()
@@ -419,11 +424,13 @@ def parse_pdf_to_graph(
     if figure_count == 0:
         figure_count = sum(1 for c in graph.chunks.values() if c.figure_image_path)
 
-    title_hints: dict[str, str] = {}
-    if running_header:
-        title_hints["running_header"] = running_header
-    if pdf_meta_title:
-        title_hints["pdf_meta_title"] = pdf_meta_title
+    title_hints: dict[str, str] | None = None
+    if hints_known:
+        title_hints = {}
+        if running_header:
+            title_hints["running_header"] = running_header
+        if pdf_meta_title:
+            title_hints["pdf_meta_title"] = pdf_meta_title
 
     return ParseResult(
         graph=graph,

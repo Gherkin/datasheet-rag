@@ -284,6 +284,11 @@ class RagBackend(ABC):
         does the same for the title LLM: the caller supplies the answer and the
         store just records it, provenance checks included.
 
+        ``title_hints`` are the hints the parse found. A dict, even an empty
+        one, replaces the stored hints whole. ``None`` means no parse computed
+        them (a cached chunk graph, a Textract parse, `rag repair embeddings`),
+        and the stored hints are kept.
+
         ``source_pdf`` is the file the graph was parsed from, for a caller that
         parsed it somewhere other than where the store lives. A store that
         already holds the PDF ignores it; a remote one uploads it, so the

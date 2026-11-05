@@ -732,10 +732,9 @@ class LocalBackend(RagBackend):
                 set_metadata(conn, did, **patch.kwargs())
                 apply_metadata_to_chunks(conn, did)
                 conn.commit()
-            # Hints sent replace the old ones whole. No hints means none were
-            # computed (a cached chunk graph, `rag repair embeddings`), not
-            # "the parse found none", so the stored ones are kept.
-            if title_hints:
+            # A dict (even {}) is what the parse found and replaces the stored
+            # hints whole. None means no parse computed them: keep the stored.
+            if title_hints is not None:
                 set_title_hints(
                     conn,
                     did,
@@ -813,7 +812,7 @@ class LocalBackend(RagBackend):
             embed=True,
             describe_figures=do_describe,
             infer_title=infer_title,
-            title_hints=parsed.title_hints or None,
+            title_hints=parsed.title_hints,
         )
 
     def delete_doc(self, doc_id: str) -> int:

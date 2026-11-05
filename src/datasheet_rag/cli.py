@@ -3082,8 +3082,6 @@ def _ingest_one(
         tags=list(tags) if tags else None,
         fields=fields or None,
     )
-    title_hints = dict(parsed.title_hints)
-
     from datasheet_rag.backend import RagServerError
 
     try:
@@ -3096,7 +3094,7 @@ def _ingest_one(
             embed=True,
             describe_figures=do_describe,
             infer_title=infer_title,
-            title_hints=title_hints or None,
+            title_hints=parsed.title_hints,
             # This path parsed the PDF here — that is what --local-parse and
             # RAG_COMPUTE=client both mean. A remote backend has therefore
             # never seen the file and uploads it; a local one already has it
