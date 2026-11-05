@@ -442,6 +442,40 @@ def test_project_config_sets_subsystem_in_its_project(
     assert meta["project_fields"] == {"netdaq": {"subsystem": "power"}}
 
 
+_BOARD_A_TOML = 'project_id = "board-a"\n[fields]\nsubsystem = "power"\n'
+
+
+def test_project_config_subsystem_does_not_block_leaving_its_project(
+    db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".rag.toml").write_text(_BOARD_A_TOML)
+    monkeypatch.chdir(tmp_path)
+    assert _meta(db_path, DOC_A, "--tag", "x").exit_code == 0
+    result = _meta(db_path, DOC_A, "--remove-project", "board-a")
+    assert result.exit_code == 0, result.output
+    meta = _get_json(db_path, DOC_A)
+    assert meta["projects"] == [] and meta["project_fields"] == {}
+
+
+def test_project_config_subsystem_stays_in_its_project(
+    db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".rag.toml").write_text(_BOARD_A_TOML)
+    monkeypatch.chdir(tmp_path)
+    # Joining another board only: the doc is not in board-a, so the config's
+    # subsystem has nowhere to go and is left out.
+    result = _meta(db_path, DOC_A, "--add-project", "board-b", "--mpn", "X")
+    assert result.exit_code == 0, result.output
+    assert _get_json(db_path, DOC_A)["projects"] == ["board-b"]
+    # Writing in board-b: board-a's subsystem is not carried there (the
+    # config still adds its project, as for any write with no project change).
+    result = _meta(db_path, DOC_A, "--project", "board-b", "--mpn", "Y")
+    assert result.exit_code == 0, result.output
+    meta = _get_json(db_path, DOC_A)
+    assert meta["projects"] == ["board-a", "board-b"]
+    assert meta["project_fields"] == {}
+
+
 def test_project_alone_is_not_a_write(db_path: Path) -> None:
     result = _meta(db_path, DOC_A, "--project", "board-a")
     assert result.exit_code == 2 and "--project" in result.output

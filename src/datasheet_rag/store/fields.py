@@ -470,20 +470,21 @@ def write_field_values(
     doc_id: str,
     patch: Mapping[str, list[str]],
     *,
+    scopes: Mapping[str, FieldScope],
     project: str | None = None,
 ) -> None:
     """Apply a normalised patch (see :func:`normalize_field_patch`). Does not commit.
 
+    ``scopes`` is the registry's :func:`field_scopes`, read by the caller.
     Document-scoped fields are written on the document; project-scoped ones
-    on (``doc_id``, ``project``). A project-scoped field with no ``project``
-    raises :class:`MetadataFieldError` (see :func:`check_patch_project`).
+    on (``doc_id``, ``project``), which the caller has already checked and
+    stripped. A project-scoped field with no ``project`` raises
+    :class:`MetadataFieldError` (see :func:`check_patch_project`).
     """
-    scopes = field_scopes(conn)
     check_patch_project(scopes, patch, project)
     for field, values in patch.items():
-        if scopes.get(field) == "project":
-            assert project is not None
-            _write_project_values(conn, doc_id, project.strip(), field, values)
+        if scopes.get(field) == "project" and project is not None:
+            _write_project_values(conn, doc_id, project, field, values)
         else:
             _write_values(conn, doc_id, field, values)
 

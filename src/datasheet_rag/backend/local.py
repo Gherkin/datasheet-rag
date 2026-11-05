@@ -73,7 +73,7 @@ from datasheet_rag.store import (
 )
 from datasheet_rag.store.fields import FieldScope, FieldShape, check_filter_fields
 from datasheet_rag.store.metadata import (
-    check_patch,
+    check_write,
     join_projects,
     set_needs_reembed,
     set_title_hints,
@@ -659,9 +659,17 @@ class LocalBackend(RagBackend):
             if patch.project is None and project_id and project_id.strip():
                 patch.project = project_id.strip()
             # Reject an unregistered or mis-shaped field, or a project-scoped
-            # one with no project, before any chunk is written, not after the
-            # whole ingest has run (GH #120).
-            check_patch(conn, fields=patch.fields, project=patch.project)
+            # one with no project or in a project the document will not be
+            # in, before any chunk is written, not after the whole ingest has
+            # run (GH #120, #123).
+            check_write(
+                conn,
+                did,
+                add_projects=patch.add_projects,
+                remove_projects=patch.remove_projects,
+                fields=patch.fields,
+                project=patch.project,
+            )
             # The projects are joined right before each chunk insert, which
             # commits them with the chunks: no stored state has chunks without
             # their projects (a stopped describe) or projects without chunks

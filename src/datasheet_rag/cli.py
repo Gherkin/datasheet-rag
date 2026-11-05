@@ -8,7 +8,7 @@ import os
 import random
 import re
 import socket
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar
 
@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from datasheet_rag.ingest_pipeline import ProgressEvent
     from datasheet_rag.models.chunk import Chunk
     from datasheet_rag.project_config import ProjectConfig
-    from datasheet_rag.store.fields import FieldSpec
+    from datasheet_rag.store.fields import FieldScope, FieldSpec
     from datasheet_rag.store.metadata import DocMetadata
 
 console = Console()
@@ -424,15 +424,31 @@ class _FieldRegistry:
         return self._specs
 
 
-def _merge_config_fields(proj_cfg: ProjectConfig | None, fields: dict[str, Any]) -> dict[str, Any]:
+def _merge_config_fields(
+    proj_cfg: ProjectConfig | None,
+    fields: dict[str, Any],
+    *,
+    scopes: Mapping[str, FieldScope] | None = None,
+    in_config_project: bool = True,
+) -> dict[str, Any]:
     """Fill ``.rag.toml`` ``[fields]`` in under the user's options.
 
     ``fields`` is what the user typed, an unset as ``None``. A name the user
     gave, to set or to unset, is not filled from the config.
+
+    A project-scoped config field (``subsystem``) belongs to the config's
+    ``project_id``. It is filled in only when ``in_config_project``: the
+    write goes to that project and the document is in it after the write
+    (always true for a config with no ``project_id``).
+    ``scopes`` is the field registry's scopes; ``None`` (no registry read, as
+    on a dry run, which writes nothing) fills every field.
     """
     if proj_cfg is None or not proj_cfg.fields:
         return fields
-    return {**proj_cfg.fields, **fields}
+    cfg_fields = dict(proj_cfg.fields)
+    if scopes is not None and not in_config_project:
+        cfg_fields = {k: v for k, v in cfg_fields.items() if scopes.get(k) != "project"}
+    return {**cfg_fields, **fields}
 
 
 def _check_field_patch(
@@ -2960,9 +2976,18 @@ def _ingest_one(
     # A store write follows (store_backend is None on a dry run): read the
     # field registry now, so a bad field fails before the PDF is parsed, not
     # after. A patch with no fields has nothing to check. Project-scoped
-    # fields (subsystem) are written in the ingest project.
+    # fields (subsystem) are written in the ingest project; the config's
+    # only when that is the config's project.
     backend_obj = store_backend
-    fields = _merge_config_fields(proj_cfg, fields)
+    if proj_cfg is not None and proj_cfg.fields:
+        from datasheet_rag.store.fields import scopes_of
+
+        fields = _merge_config_fields(
+            proj_cfg,
+            fields,
+            scopes=scopes_of(field_registry.specs()) if field_registry is not None else None,
+            in_config_project=proj_cfg.project_id in (None, project_id),
+        )
     if field_registry is not None and fields:
         _check_field_patch(field_registry.specs(), fields, project=project_id)
 
@@ -3927,10 +3952,33 @@ def metadata_cmd(
             fields_project = proj_cfg.project_id
         if not tags and proj_cfg.tags:
             tags = tuple(proj_cfg.tags)
-    fields = _merge_config_fields(proj_cfg, fields)
 
     be = _backend_for(db_path)
     doc_id = _backend_resolve(be, doc_id)
+
+    if proj_cfg is not None and proj_cfg.fields:
+        from datasheet_rag.store.fields import scopes_of
+
+        # The config's project-scoped fields belong to its project_id: fill
+        # them in only when the write goes there and the document is in that
+        # project after it. `--remove-project <toml project>`, or `--project`
+        # naming another board, must not carry this board's subsystem along.
+        # A config with no project_id ties its fields to no project: the
+        # user's --project decides, or the write fails for want of one.
+        cfg_project = proj_cfg.project_id
+        in_config_project = cfg_project is None
+        if cfg_project is not None and fields_project == cfg_project:
+            if cfg_project in add_projects:
+                in_config_project = True
+            elif cfg_project not in remove_projects:
+                stored = be.get_metadata(doc_id)
+                in_config_project = stored is not None and cfg_project in stored.projects
+        fields = _merge_config_fields(
+            proj_cfg,
+            fields,
+            scopes=scopes_of(be.list_fields()),
+            in_config_project=in_config_project,
+        )
 
     # --mpn-alias appends to the mpn list: the one --mpn (or .rag.toml) just
     # gave, else the one already stored.

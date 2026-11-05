@@ -24,6 +24,7 @@ from datasheet_rag.models.chunk import (
     ChunkMetadata,
     LayoutType,
 )
+from datasheet_rag.store.fields import MetadataFieldError
 from datasheet_rag.store.schema import connect
 
 EMBED_DIM = 4
@@ -132,6 +133,21 @@ def test_ingest_rejects_a_bad_project_patch_before_writing_chunks(
             embed=False,
         )
     assert backend.get_document(did) is None
+
+
+def test_ingest_rejects_a_project_field_outside_its_projects_before_writing_chunks(
+    backend: LocalBackend,
+) -> None:
+    did = "f" * 64
+    with pytest.raises(MetadataFieldError, match="not in project 'other'"):
+        backend.ingest_chunk_graph(
+            _plain_graph(did),
+            project_id="p1",
+            metadata=MetadataPatch(fields={"subsystem": "power"}, project="other"),
+            embed=False,
+        )
+    assert backend.get_document(did) is None
+    assert _doc_projects(backend, did) == []
 
 
 def _doc_projects(backend: LocalBackend, did: str) -> list[str]:

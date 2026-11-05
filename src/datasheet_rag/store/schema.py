@@ -113,7 +113,12 @@ def _migrate_to_v3(conn: sqlite3.Connection) -> None:
     migration fail with the document ids and names rather than lose data.
     One transaction: a failure leaves the v2 store as it was.
     """
-    from datasheet_rag.store.fields import _coerce, ensure_field_tables, write_field_values
+    from datasheet_rag.store.fields import (
+        _coerce,
+        ensure_field_tables,
+        field_scopes,
+        write_field_values,
+    )
 
     if conn.in_transaction:
         conn.commit()
@@ -134,6 +139,7 @@ def _migrate_to_v3(conn: sqlite3.Connection) -> None:
         has_attrs = "attributes" in cols
         select = ["doc_id", *present, *(["attributes"] if has_attrs else [])]
         rows = conn.execute(f"SELECT {', '.join(select)} FROM doc_metadata").fetchall()
+        scopes = field_scopes(conn)
         problems: list[str] = []
         for row in rows:
             patch: dict[str, list[str]] = {}
@@ -145,7 +151,7 @@ def _migrate_to_v3(conn: sqlite3.Connection) -> None:
                     patch[col] = _coerce(raw.split(","), "list")
                 else:
                     patch[col] = _coerce(raw, "single")
-            write_field_values(conn, row["doc_id"], patch)
+            write_field_values(conn, row["doc_id"], patch, scopes=scopes)
             if not has_attrs or not row["attributes"]:
                 continue
             attrs = json.loads(row["attributes"])
@@ -314,6 +320,22 @@ def _migrate_to_v5(conn: sqlite3.Connection) -> None:
             conn.commit()
             return
         field_cols = {r["name"] for r in conn.execute("PRAGMA table_info(metadata_fields)")}
+        # "project_fields" becomes a built-in attribute and column name; a v4
+        # user field by that name would be hidden behind it. Fail rather than
+        # guess a new name.
+        if (
+            field_cols
+            and conn.execute(
+                "SELECT 1 FROM metadata_fields WHERE name = 'project_fields'"
+            ).fetchone()
+        ):
+            raise MigrationError(
+                "cannot upgrade the store to v5: a registered field is named "
+                "'project_fields', which is now reserved. With the previous version, "
+                "copy out any values the field holds, then remove it with "
+                "`rag fields remove project_fields --clear` (--clear deletes those "
+                "values)."
+            )
         if field_cols and "scope" not in field_cols:
             conn.execute(f"ALTER TABLE metadata_fields ADD COLUMN {SCOPE_COLUMN_DDL}")
         ensure_field_tables(conn)

@@ -161,3 +161,21 @@ def test_v5_migration_fails_loudly_and_changes_nothing(
         assert "doc_project_field_values" not in tables
     finally:
         raw.close()
+
+
+def test_v5_migration_rejects_a_user_field_named_project_fields(tmp_path: Path) -> None:
+    path = tmp_path / "rag.sqlite"
+    _make_v4_store(path, _GOOD_ROWS)
+    raw = sqlite3.connect(path)
+    raw.execute("INSERT INTO metadata_fields (name, shape) VALUES ('project_fields', 'single')")
+    raw.commit()
+    raw.close()
+
+    with pytest.raises(MigrationError, match="'project_fields', which is now reserved"):
+        connect(path, embedding_dim=EMBED_DIM)
+
+    raw = sqlite3.connect(path)
+    try:
+        assert raw.execute("SELECT version FROM schema_version").fetchone()[0] == 4
+    finally:
+        raw.close()

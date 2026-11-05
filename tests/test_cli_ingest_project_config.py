@@ -70,6 +70,24 @@ def test_ingest_applies_fields_from_config(tmp_path: Path, fake_backend: _FakeBa
     assert patch.fields == {"doc_type": "technical-manual", "revision": "B", "owner": "fw"}
 
 
+def test_ingest_keeps_config_subsystem_in_the_config_project(
+    tmp_path: Path, fake_backend: _FakeBackend
+) -> None:
+    (tmp_path / ".rag.toml").write_text(
+        'project_id = "board-a"\n[fields]\nsubsystem = "power"\nmanufacturer = "TI"\n'
+    )
+    pdf = _pdf(tmp_path)
+
+    assert _ingest(str(pdf)).exit_code == 0
+    assert fake_backend.calls[0]["metadata"].fields == {"subsystem": "power", "manufacturer": "TI"}
+
+    # Another project: board-a's subsystem is left out; document fields stay.
+    result = _ingest(str(pdf), "--project-id", "board-b")
+    assert result.exit_code == 0, result.output
+    assert fake_backend.calls[1]["project_id"] == "board-b"
+    assert fake_backend.calls[1]["metadata"].fields == {"manufacturer": "TI"}
+
+
 def test_ingest_without_fields_sends_none(tmp_path: Path, fake_backend: _FakeBackend) -> None:
     pdf = _pdf(tmp_path)
 

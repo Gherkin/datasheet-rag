@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Mapping
-from typing import Any, Literal, get_args
+from typing import Any, Literal, NamedTuple, get_args
 
 from pydantic import BaseModel, Field
 
@@ -226,22 +226,52 @@ def get_metadata(conn: sqlite3.Connection, doc_id: str) -> DocMetadata | None:
     )
 
 
-def check_patch(
+class CheckedWrite(NamedTuple):
+    """A metadata write that :func:`check_write` accepted, normalised."""
+
+    #: ``{field: [values]}``; an empty list removes the field's value.
+    fields: dict[str, list[str]]
+    scopes: dict[str, FieldScope]
+    #: Where the project-scoped fields go, stripped; ``None`` when not named.
+    project: str | None
+    add: list[str]
+    remove: list[str]
+
+
+def check_write(
     conn: sqlite3.Connection,
+    doc_id: str,
     *,
+    add_projects: list[str] | None = None,
+    remove_projects: list[str] | None = None,
     fields: Mapping[str, Any] | None = None,
     project: str | None = None,
-) -> dict[str, list[str]]:
-    """Validate the ``fields`` of a metadata write.
+) -> CheckedWrite:
+    """Validate a metadata write (the arguments of :func:`set_metadata`).
 
-    Returns the normalised field patch (see
-    ``store.fields.normalize_field_patch``). Raises :class:`MetadataFieldError`
-    for an unregistered field, a value that does not fit its field's shape,
-    or a project-scoped field with no ``project`` to write it in. Writes
-    nothing, so a caller can check a patch before work it would be a waste to
-    throw away (ingest does).
+    Raises :class:`MetadataFieldError` for an unregistered field, a value
+    that does not fit its field's shape, a project-scoped field with no
+    ``project``, or a project-scoped value set in a project the document is
+    not in after this write. Clearing a project-scoped value needs no
+    membership: the document holds no value outside its projects. Raises
+    ``ValueError`` for a project both added and removed. Writes nothing, so
+    ingest checks a patch before work it would be a waste to throw away.
     """
-    return check_patch_for(field_shapes(conn), field_scopes(conn), fields=fields, project=project)
+    project = project.strip() if project is not None and project.strip() else None
+    scopes = field_scopes(conn)
+    field_patch = check_patch_for(field_shapes(conn), scopes, fields=fields, project=project)
+    add, remove = check_project_change(add_projects, remove_projects)
+    sets_project_value = any(
+        values and scopes.get(name) == "project" for name, values in field_patch.items()
+    )
+    if project is not None and sets_project_value:
+        current = get_projects_for_docs(conn, [doc_id]).get(doc_id, [])
+        if project in remove or (project not in current and project not in add):
+            raise MetadataFieldError(
+                f"{doc_id} is not in project {project!r}; add it to the project "
+                "first (--add-project) to set its project fields there"
+            )
+    return CheckedWrite(field_patch, scopes, project, add, remove)
 
 
 def check_patch_for(
@@ -251,8 +281,9 @@ def check_patch_for(
     fields: Mapping[str, Any] | None = None,
     project: str | None = None,
 ) -> dict[str, list[str]]:
-    """:func:`check_patch` against a registry already read, so a client can
-    reject a bad patch before parsing a PDF."""
+    """Check ``fields`` against a registry already read, so a client can
+    reject a bad patch before parsing a PDF. Returns the normalised patch
+    (see ``store.fields.normalize_field_patch``)."""
     patch = normalize_field_patch_for(shapes, fields or {})
     check_patch_project(scopes, patch, project)
     return patch
@@ -287,24 +318,22 @@ def set_metadata(
       value must fit the field's shape, or :class:`MetadataFieldError` is
       raised before anything is written.
     * ``project``: where the project-scoped fields in ``fields`` are
-      written. Required when ``fields`` names one, and the document must be
-      in that project after this write (an ``add_projects`` in the same call
-      counts); otherwise :class:`MetadataFieldError`, before anything is
-      written.
+      written. Required when ``fields`` names one. To set a value there the
+      document must be in that project after this write (an
+      ``add_projects`` in the same call counts); clearing one needs no
+      membership. Otherwise :class:`MetadataFieldError`, before anything is
+      written (see :func:`check_write`).
 
     Returns the resulting :class:`DocMetadata` after the upsert.
     """
-    project = project.strip() if project is not None and project.strip() else None
-    field_patch = check_patch(conn, fields=fields, project=project)
-    add, remove = check_project_change(add_projects, remove_projects)
-    scopes = field_scopes(conn)
-    if project is not None and any(scopes.get(f) == "project" for f in field_patch):
-        current = get_projects_for_docs(conn, [doc_id]).get(doc_id, [])
-        if project in remove or (project not in current and project not in add):
-            raise MetadataFieldError(
-                f"{doc_id} is not in project {project!r}; add it to the project "
-                "first (--add-project) to set its project fields there"
-            )
+    checked = check_write(
+        conn,
+        doc_id,
+        add_projects=add_projects,
+        remove_projects=remove_projects,
+        fields=fields,
+        project=project,
+    )
 
     existing = get_metadata(conn, doc_id)
     merged_tags = list(tags) if tags is not None else (existing.tags if existing else [])
@@ -319,9 +348,9 @@ def set_metadata(
         """,
         (doc_id, json.dumps(merged_tags)),
     )
-    change_projects(conn, doc_id, add=add, remove=remove)
-    delete_doc_project_values(conn, doc_id, remove)
-    write_field_values(conn, doc_id, field_patch, project=project)
+    change_projects(conn, doc_id, add=checked.add, remove=checked.remove)
+    delete_doc_project_values(conn, doc_id, checked.remove)
+    write_field_values(conn, doc_id, checked.fields, scopes=checked.scopes, project=checked.project)
     conn.commit()
 
     # Re-read so updated_at reflects the DB clock.

@@ -143,6 +143,17 @@ def test_project_field_needs_a_project(conn: sqlite3.Connection) -> None:
         )
 
 
+def test_clearing_a_project_field_needs_no_membership(conn: sqlite3.Connection) -> None:
+    set_metadata(conn, "d", add_projects=["a"])
+    # The document holds no value outside its projects: nothing to clear.
+    md = set_metadata(conn, "d", fields={"subsystem": None}, project="gone")
+    assert md.project_fields == {}
+    # Leaving and clearing in one call is fine too.
+    set_metadata(conn, "d", fields={"subsystem": "power"}, project="a")
+    md = set_metadata(conn, "d", remove_projects=["a"], fields={"subsystem": ""}, project="a")
+    assert md.projects == [] and md.project_fields == {}
+
+
 def test_leaving_a_project_drops_its_project_fields(conn: sqlite3.Connection) -> None:
     set_metadata(conn, "d", add_projects=["a", "b"])
     set_metadata(conn, "d", fields={"subsystem": "power"}, project="a")
