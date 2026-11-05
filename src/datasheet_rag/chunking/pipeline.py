@@ -107,6 +107,7 @@ def save_chunk_graph(graph: ChunkGraph, path: Path) -> Path:
     # Serialize without embeddings (they'd make the file huge)
     data: dict[str, Any] = {
         "doc_id": graph.doc_id,
+        "title_hints": graph.title_hints,
         "stats": graph.stats(),
         "chunks": {},
     }
@@ -128,7 +129,7 @@ def load_chunk_graph(path: Path) -> ChunkGraph:
     with open(path) as f:
         data = json.load(f)
 
-    graph = ChunkGraph(doc_id=data["doc_id"])
+    graph = ChunkGraph(doc_id=data["doc_id"], title_hints=data.get("title_hints"))
     for chunk_id, chunk_dict in data["chunks"].items():
         chunk = Chunk(**chunk_dict)
         graph.add(chunk)

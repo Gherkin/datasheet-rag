@@ -920,5 +920,9 @@ def _page_rows(
 
 
 def _chunk_excludes(graph: ChunkGraph) -> dict[str, Any]:
-    """Exclude embedding vectors from each chunk in the serialized graph."""
-    return {"chunks": {cid: _EXCLUDE_VECS for cid in graph.chunks}}
+    """Exclude embedding vectors from each chunk in the serialized graph.
+
+    ``title_hints`` is left out too: the payload's own ``title_hints`` field is
+    the one the server reads.
+    """
+    return {"chunks": {cid: _EXCLUDE_VECS for cid in graph.chunks}, "title_hints": True}

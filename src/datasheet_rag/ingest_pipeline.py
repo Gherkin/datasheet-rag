@@ -61,9 +61,10 @@ class ParseResult:
     graph: ChunkGraph
     doc_id: str
     resolved_backend: str
-    #: What the Docling outline gave. ``None`` when no outline was read (a
-    #: cached chunk graph with no outline beside it, or Textract, which has no
-    #: hints), so the store keeps the hints it has instead of clearing them.
+    #: What the Docling outline gave, read from the cached chunk graph on a
+    #: resume. ``None`` when there is none (Textract, which has no hints, or a
+    #: cached graph saved without them), so the store keeps the hints it has
+    #: instead of clearing them.
     title_hints: dict[str, str] | None = None
     figure_count: int = 0
 
@@ -145,12 +146,6 @@ def check_backend_prerequisites(
         "RAG_S3_BUCKET where the pipeline runs. Textract reads its input PDF "
         "from S3."
     )
-
-
-def _title_hints(running_header: str, pdf_meta_title: str) -> dict[str, str]:
-    """The title hints a Docling outline found, without the empty ones."""
-    hints = {"running_header": running_header, "pdf_meta_title": pdf_meta_title}
-    return {k: v for k, v in hints.items() if v}
 
 
 def parse_pdf_to_graph(
@@ -262,14 +257,10 @@ def parse_pdf_to_graph(
             _step("Multi-scale chunking")
             _detail(f"[yellow]Resuming — loading cached chunk graph[/] → [cyan]{chunks_path}[/]")
             graph = load_chunk_graph(chunks_path)
-            # The graph was chunked from this outline, so its hints are still
-            # the parse's hints. With no outline, None keeps the stored ones.
-            if outline_path.exists():
-                with open(outline_path) as f:
-                    cached_outline = DocumentOutline.from_dict(json.load(f)["outline"])
-                title_hints = _title_hints(
-                    cached_outline.running_header, cached_outline.pdf_meta_title
-                )
+            # The hints saved with the graph are the ones of the outline it
+            # was chunked from. A graph saved without them gives None, which
+            # keeps the stored hints.
+            title_hints = graph.title_hints
         else:
             _step("Docling layout analysis")
             if outline_path.exists() and not force:
@@ -296,7 +287,7 @@ def parse_pdf_to_graph(
                     )
                 _detail(f"Layout analysis cached → [cyan]{outline_path}[/]")
 
-            title_hints = _title_hints(outline.running_header, outline.pdf_meta_title)
+            title_hints = outline.title_hints()
             summary = outline.summary()
             _detail(
                 f"{summary['top_level_sections']} chapters, "
@@ -337,6 +328,7 @@ def parse_pdf_to_graph(
                 config=config,
                 summarizer_mode="extractive",
             )
+            graph.title_hints = title_hints
             save_chunk_graph(graph, chunks_path)
 
     # ── 2b. Textract path (scanned PDFs) ─────────────────────────────────

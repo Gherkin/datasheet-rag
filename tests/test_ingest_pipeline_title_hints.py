@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from datasheet_rag.chunking.layout_parser import DocumentOutline
-from datasheet_rag.chunking.pipeline import save_chunk_graph
+from datasheet_rag.chunking.pipeline import load_chunk_graph, save_chunk_graph
 from datasheet_rag.config import get_settings
 from datasheet_rag.ingest_pipeline import parse_pdf_to_graph
 from datasheet_rag.models.chunk import Chunk, ChunkGraph, ChunkLevel, ChunkMetadata
@@ -40,8 +40,8 @@ def _write_outline(outline: DocumentOutline) -> None:
     path.write_text(json.dumps({"outline": outline.to_dict(), "figure_regions": []}))
 
 
-def _write_chunk_cache() -> None:
-    g = ChunkGraph(doc_id=DID)
+def _write_chunk_cache(title_hints: dict[str, str] | None = None) -> None:
+    g = ChunkGraph(doc_id=DID, title_hints=title_hints)
     g.add(
         Chunk(
             id=f"{DID}:L2:0",
@@ -54,26 +54,34 @@ def _write_chunk_cache() -> None:
     save_chunk_graph(g, get_settings().output_dir / f"{DID}_chunks.json")
 
 
-def test_cached_chunk_graph_without_outline_reports_no_hints(pdf: Path) -> None:
+def test_cached_chunk_graph_without_hints_reports_none(pdf: Path) -> None:
+    # The outline beside it is not read: nothing ties it to this graph.
     _write_chunk_cache()
+    _write_outline(DocumentOutline(doc_id=DID, running_header="OTHER"))
     parsed = parse_pdf_to_graph(pdf, doc_id=DID, skip_figures=True)
     assert parsed.title_hints is None
 
 
-def test_cached_chunk_graph_reads_hints_from_its_outline(pdf: Path) -> None:
-    # A --dry-run or a failed embed leaves both caches; the next ingest must
-    # still store the hints that parse found.
-    _write_chunk_cache()
-    _write_outline(DocumentOutline(doc_id=DID, running_header="LM317"))
+def test_cached_chunk_graph_reports_its_own_hints(pdf: Path) -> None:
+    # A --dry-run or a failed embed leaves the chunk cache; the next ingest
+    # must still store the hints that parse found, not a newer outline's.
+    _write_chunk_cache({"running_header": "LM317"})
+    _write_outline(DocumentOutline(doc_id=DID, running_header="OTHER"))
     parsed = parse_pdf_to_graph(pdf, doc_id=DID, skip_figures=True)
     assert parsed.title_hints == {"running_header": "LM317"}
 
 
-def test_cached_chunk_graph_with_hintless_outline_reports_an_empty_dict(pdf: Path) -> None:
-    _write_chunk_cache()
-    _write_outline(DocumentOutline(doc_id=DID))
+def test_cached_chunk_graph_with_empty_hints_reports_an_empty_dict(pdf: Path) -> None:
+    _write_chunk_cache({})
     parsed = parse_pdf_to_graph(pdf, doc_id=DID, skip_figures=True)
     assert parsed.title_hints == {}
+
+
+def test_fresh_chunking_saves_hints_with_the_graph(pdf: Path) -> None:
+    _write_outline(DocumentOutline(doc_id=DID, running_header="LM317"))
+    parse_pdf_to_graph(pdf, doc_id=DID, skip_figures=True)
+    saved = load_chunk_graph(get_settings().output_dir / f"{DID}_chunks.json")
+    assert saved.title_hints == {"running_header": "LM317"}
 
 
 def test_outline_without_hints_reports_an_empty_dict(pdf: Path) -> None:

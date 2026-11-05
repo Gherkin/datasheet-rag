@@ -1372,7 +1372,7 @@ def get_text_cmd(doc_id: str, output: Path | None) -> None:
     Section titles are emitted as headings so the dump keeps the document's
     structure rather than running together as one wall of prose.
     """
-    _, outline = _load_outline(doc_id)
+    _, _, outline = _load_outline(doc_id)
 
     parts: list[str] = []
     for section in outline.all_sections_flat:
@@ -1443,9 +1443,9 @@ def _resolve_layout_input(arg: str) -> tuple[str, str, Path]:
     )
 
 
-def _load_outline(arg: str) -> tuple[str, DocumentOutline]:
+def _load_outline(arg: str) -> tuple[str, str, DocumentOutline]:
     """Load a cached layout artifact as a `DocumentOutline`, whichever backend
-    produced it.
+    produced it. Returns ``(doc_id, backend, outline)``.
 
     `DocumentOutline` is the backend-neutral representation the whole chunking
     pipeline already runs on — Docling builds one directly, and Textract blocks
@@ -1461,8 +1461,8 @@ def _load_outline(arg: str) -> tuple[str, DocumentOutline]:
 
     if backend == "docling":
         # The cache wraps the outline alongside its figure regions.
-        return doc_id, DocumentOutline.from_dict(data["outline"])
-    return doc_id, parse_textract_blocks(data, doc_id=doc_id)
+        return doc_id, backend, DocumentOutline.from_dict(data["outline"])
+    return doc_id, backend, parse_textract_blocks(data, doc_id=doc_id)
 
 
 class _FlaggedTable(NamedTuple):
@@ -1641,7 +1641,7 @@ def chunk_cmd(
     )
     from datasheet_rag.chunking.splitter import SplitterConfig
 
-    doc_id, outline = _load_outline(doc_id)
+    doc_id, backend, outline = _load_outline(doc_id)
 
     # Default to the manifest ingest wrote for this document — without it a
     # re-chunk would silently drop every figure from the graph.
@@ -1666,6 +1666,8 @@ def chunk_cmd(
         config=config,
         summarizer_mode=summarizer,
     )
+    # Only a Docling outline has title hints; Textract has none to report.
+    graph.title_hints = outline.title_hints() if backend == "docling" else None
 
     # Save
     settings = get_settings()
