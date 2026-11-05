@@ -257,13 +257,22 @@ def parse_pdf_to_graph(
         save_pdf_locally(pdf_path, did)
 
         chunks_path = settings.output_dir / f"{did}_chunks.json"
+        outline_path = settings.output_dir / f"{did}_outline.json"
         if chunks_path.exists() and not force:
             _step("Multi-scale chunking")
             _detail(f"[yellow]Resuming — loading cached chunk graph[/] → [cyan]{chunks_path}[/]")
             graph = load_chunk_graph(chunks_path)
+            # The graph was chunked from this outline, so its hints are still
+            # the parse's hints. With no outline, None keeps the stored ones.
+            if outline_path.exists():
+                with open(outline_path) as f:
+                    cached_outline = json.load(f)["outline"]
+                title_hints = _title_hints(
+                    cached_outline.get("running_header", ""),
+                    cached_outline.get("pdf_meta_title", ""),
+                )
         else:
             _step("Docling layout analysis")
-            outline_path = settings.output_dir / f"{did}_outline.json"
             if outline_path.exists() and not force:
                 _detail(
                     f"[yellow]Resuming — loading cached layout analysis[/] → "

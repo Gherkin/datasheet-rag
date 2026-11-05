@@ -40,7 +40,7 @@ def _write_outline(outline: DocumentOutline) -> None:
     path.write_text(json.dumps({"outline": outline.to_dict(), "figure_regions": []}))
 
 
-def test_cached_chunk_graph_reports_no_hints(pdf: Path) -> None:
+def _write_chunk_cache() -> None:
     g = ChunkGraph(doc_id=DID)
     g.add(
         Chunk(
@@ -52,11 +52,21 @@ def test_cached_chunk_graph_reports_no_hints(pdf: Path) -> None:
         )
     )
     save_chunk_graph(g, get_settings().output_dir / f"{DID}_chunks.json")
-    # An outline on disk is not read on this branch, so it must not leak in.
-    _write_outline(DocumentOutline(doc_id=DID, running_header="LM317"))
 
+
+def test_cached_chunk_graph_without_outline_reports_no_hints(pdf: Path) -> None:
+    _write_chunk_cache()
     parsed = parse_pdf_to_graph(pdf, doc_id=DID, skip_figures=True)
     assert parsed.title_hints is None
+
+
+def test_cached_chunk_graph_reads_hints_from_its_outline(pdf: Path) -> None:
+    # A --dry-run or a failed embed leaves both caches; the next ingest must
+    # still store the hints that parse found.
+    _write_chunk_cache()
+    _write_outline(DocumentOutline(doc_id=DID, running_header="LM317"))
+    parsed = parse_pdf_to_graph(pdf, doc_id=DID, skip_figures=True)
+    assert parsed.title_hints == {"running_header": "LM317"}
 
 
 def test_outline_without_hints_reports_an_empty_dict(pdf: Path) -> None:

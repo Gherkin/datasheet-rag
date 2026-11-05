@@ -286,8 +286,8 @@ class RagBackend(ABC):
 
         ``title_hints`` are the hints the parse found. A dict, even an empty
         one, replaces the stored hints whole. ``None`` means no parse computed
-        them (a cached chunk graph, a Textract parse, `rag repair embeddings`),
-        and the stored hints are kept.
+        them (a cached chunk graph with no outline beside it, a Textract parse,
+        `rag repair embeddings`), and the stored hints are kept.
 
         ``source_pdf`` is the file the graph was parsed from, for a caller that
         parsed it somewhere other than where the store lives. A store that
