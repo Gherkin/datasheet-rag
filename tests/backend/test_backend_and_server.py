@@ -867,6 +867,30 @@ def test_remote_title_hints_none_keeps_and_empty_clears(client) -> None:
     assert client.get(f"/documents/{did}/metadata").json()["running_header"] is None
 
 
+def test_remote_ingest_sends_graph_hints_and_the_field_wins(client, monkeypatch) -> None:
+    """The graph goes over the wire with its hints; the server stores the field's."""
+    from datasheet_rag.backend.remote import RemoteBackend
+
+    received: list[dict[str, str] | None] = []
+    real_validate = ChunkGraph.model_validate
+
+    def spy(data, *a, **kw):  # type: ignore[no-untyped-def]
+        graph = real_validate(data, *a, **kw)
+        received.append(graph.title_hints)
+        return graph
+
+    monkeypatch.setattr(ChunkGraph, "model_validate", spy)
+    be = RemoteBackend.__new__(RemoteBackend)
+    be._client = client
+    be._compute = "server"
+    did = "e" * 64
+    g = _plain_graph(did)
+    g.title_hints = {"running_header": "OTHER"}
+    be.ingest_chunk_graph(g, title_hints={"running_header": "LM317"}, embed=False)
+    assert received == [{"running_header": "OTHER"}]
+    assert client.get(f"/documents/{did}/metadata").json()["running_header"] == "LM317"
+
+
 def test_remote_client_inference_uses_stored_hints_when_none_sent(client, monkeypatch) -> None:
     from datasheet_rag.backend.remote import RemoteBackend
 
