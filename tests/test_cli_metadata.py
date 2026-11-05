@@ -457,23 +457,40 @@ def test_project_config_subsystem_does_not_block_leaving_its_project(
     assert meta["projects"] == [] and meta["project_fields"] == {}
 
 
-def test_project_config_subsystem_stays_in_its_project(
+def test_project_config_subsystem_is_not_dropped_silently(
     db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     (tmp_path / ".rag.toml").write_text(_BOARD_A_TOML)
     monkeypatch.chdir(tmp_path)
-    # Joining another board only: the doc is not in board-a, so the config's
-    # subsystem has nowhere to go and is left out.
+    # Joining another board only: the doc is not in board-a, where the
+    # config's subsystem belongs.
     result = _meta(db_path, DOC_A, "--add-project", "board-b", "--mpn", "X")
-    assert result.exit_code == 0, result.output
-    assert _get_json(db_path, DOC_A)["projects"] == ["board-b"]
-    # Writing in board-b: board-a's subsystem is not carried there (the
-    # config still adds its project, as for any write with no project change).
+    assert result.exit_code == 1
+    assert "sets subsystem for project 'board-a'" in result.output
+    assert "--add-project board-a" in result.output
+    # Writing in board-b: board-a's subsystem is not carried there.
     result = _meta(db_path, DOC_A, "--project", "board-b", "--mpn", "Y")
+    assert result.exit_code == 1
+    assert "this write goes to 'board-b'" in result.output
+    assert "No metadata recorded" in _meta(db_path, DOC_A).output  # nothing written
+    # A value given on the command line is what the user asked for.
+    result = _meta(
+        db_path, DOC_A, "--add-project", "board-b", "--project", "board-b", "--subsystem", "aux"
+    )
     assert result.exit_code == 0, result.output
-    meta = _get_json(db_path, DOC_A)
-    assert meta["projects"] == ["board-a", "board-b"]
-    assert meta["project_fields"] == {}
+    assert _get_json(db_path, DOC_A)["project_fields"] == {"board-b": {"subsystem": "aux"}}
+
+
+def test_clearing_a_subsystem_outside_the_project_prints_a_note(db_path: Path) -> None:
+    _meta(db_path, DOC_A, "--add-project", "board-a")
+    result = _meta(db_path, DOC_A, "--project", "gone", "--unset-field", "subsystem")
+    assert result.exit_code == 0, result.output
+    output = " ".join(result.output.split())  # Rich wraps the note
+    assert "not in project 'gone'" in output and "nothing was cleared" in output
+    # In a project the document is in, no note.
+    result = _meta(db_path, DOC_A, "--project", "board-a", "--unset-field", "subsystem")
+    assert result.exit_code == 0, result.output
+    assert "Note:" not in result.output
 
 
 def test_project_alone_is_not_a_write(db_path: Path) -> None:

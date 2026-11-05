@@ -37,9 +37,10 @@ Example ``.rag.toml``::
 ``[fields]`` sets any registered field, built-in (``mpn``, ``manufacturer``,
 ``doc_type``, ``subsystem``) or user-registered (GH #120). A project-scoped
 field such as ``subsystem`` is written in the config's ``project_id``
-and only there: a write to another project (``--project``,
-``ingest --project-id``) or one that takes the document out of the config's
-project leaves it out (GH #123).
+and only there. ``rag metadata`` refuses a write that cannot put it there
+(``--project`` naming another project, or a document not in the config's
+project) and leaves it out when the document leaves that project.
+``rag ingest --project-id`` naming another project leaves it out (GH #123).
 
 The schema is closed: an unknown key, a value of the wrong type or a file
 that is not valid TOML raises ``ProjectConfigError`` rather than being

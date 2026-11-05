@@ -3956,28 +3956,37 @@ def metadata_cmd(
     be = _backend_for(db_path)
     doc_id = _backend_resolve(be, doc_id)
 
+    scopes: dict[str, FieldScope] | None = None
     if proj_cfg is not None and proj_cfg.fields:
-        from datasheet_rag.store.fields import scopes_of
+        from datasheet_rag.store.fields import project_scoped_names, scopes_of
 
-        # The config's project-scoped fields belong to its project_id: fill
-        # them in only when the write goes there and the document is in that
-        # project after it. `--remove-project <toml project>`, or `--project`
-        # naming another board, must not carry this board's subsystem along.
-        # A config with no project_id ties its fields to no project: the
-        # user's --project decides, or the write fails for want of one.
+        scopes = scopes_of(be.list_fields())
+        # The config's project-scoped fields belong to its project_id. Leaving
+        # that project drops them: the values go with the membership. Any
+        # other write that cannot put them there is an error, not a silent
+        # drop. A config with no project_id ties its fields to no project:
+        # the user's --project decides, or the write fails for want of one.
         cfg_project = proj_cfg.project_id
-        in_config_project = cfg_project is None
-        if cfg_project is not None and fields_project == cfg_project:
-            if cfg_project in add_projects:
-                in_config_project = True
-            elif cfg_project not in remove_projects:
+        leaving = cfg_project is not None and cfg_project in remove_projects
+        from_cfg = [n for n in project_scoped_names(scopes, proj_cfg.fields) if n not in fields]
+        if cfg_project is not None and not leaving and from_cfg:
+            names = ", ".join(from_cfg)
+            if fields_project != cfg_project:
+                raise click.ClickException(
+                    f".rag.toml sets {names} for project {cfg_project!r}, but this "
+                    f"write goes to {fields_project!r}. Give {names} for "
+                    f"{fields_project!r} on the command line, or drop --project."
+                )
+            if cfg_project not in add_projects:
                 stored = be.get_metadata(doc_id)
-                in_config_project = stored is not None and cfg_project in stored.projects
+                if stored is None or cfg_project not in stored.projects:
+                    raise click.ClickException(
+                        f".rag.toml sets {names} for project {cfg_project!r}, but "
+                        f"{doc_id} is not in it. Add it with --add-project "
+                        f"{cfg_project}, or run outside this folder."
+                    )
         fields = _merge_config_fields(
-            proj_cfg,
-            fields,
-            scopes=scopes_of(be.list_fields()),
-            in_config_project=in_config_project,
+            proj_cfg, fields, scopes=scopes, in_config_project=not leaving
         )
 
     # --mpn-alias appends to the mpn list: the one --mpn (or .rag.toml) just
@@ -4019,7 +4028,34 @@ def metadata_cmd(
     except ValueError as e:
         raise click.ClickException(str(e)) from e
     console.print(f"[green]Saved metadata for[/] {doc_id}")
+    _note_clears_outside_project(be, meta, fields, fields_project, remove_projects, scopes)
     console.print(meta.model_dump_json(indent=2, exclude_none=True))
+
+
+def _note_clears_outside_project(
+    be: RagBackend,
+    meta: DocMetadata,
+    fields: Mapping[str, Any],
+    project: str | None,
+    remove_projects: Iterable[str],
+    scopes: Mapping[str, FieldScope] | None,
+) -> None:
+    """Say so when a project-scoped field was cleared in a project the
+    document is not in: the store does nothing then, and the user may have
+    meant another project. Leaving that project in the same call is not
+    worth a note; its values go with the membership."""
+    cleared = [n for n, v in fields.items() if v is None or v == "" or v == []]
+    project = project.strip() if project else None
+    if not cleared or project is None or project in meta.projects or project in remove_projects:
+        return
+    from datasheet_rag.store.fields import project_scoped_names, scopes_of
+
+    names = project_scoped_names(scopes or scopes_of(be.list_fields()), cleared)
+    if names:
+        console.print(
+            f"[yellow]Note:[/] {meta.doc_id} is not in project {project!r}, so it holds "
+            f"no {', '.join(names)} there; nothing was cleared."
+        )
 
 
 # ---------------------------------------------------------------------------
