@@ -211,10 +211,12 @@ def _migrate_to_v4(conn: sqlite3.Connection) -> None:
             has_fields
             and conn.execute("SELECT 1 FROM metadata_fields WHERE name = 'projects'").fetchone()
         ):
-            raise RuntimeError(
+            raise MigrationError(
                 "cannot upgrade the store to v4: a registered field is named "
-                "'projects', which is now reserved. Remove that field "
-                "(`rag fields remove projects`) with the previous version first."
+                "'projects', which is now reserved. With the previous version, "
+                "copy out any values the field holds, then remove it with "
+                "`rag fields remove projects --clear` (--clear deletes those "
+                "values)."
             )
         ensure_projects_table(conn)
         for table, index in (

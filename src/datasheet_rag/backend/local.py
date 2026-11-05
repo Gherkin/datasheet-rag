@@ -74,7 +74,7 @@ from datasheet_rag.store import (
 )
 from datasheet_rag.store.fields import FieldShape, check_filter_fields
 from datasheet_rag.store.metadata import check_patch, set_needs_reembed, set_title_hints
-from datasheet_rag.store.projects import project_scope_sql
+from datasheet_rag.store.projects import change_projects, project_scope_sql
 
 if TYPE_CHECKING:
     from datasheet_rag.ingest_pipeline import ProgressCallback
@@ -665,11 +665,11 @@ class LocalBackend(RagBackend):
             patch.add_project(project_id)
             if group_name is not None:
                 patch.group_name = patch.group_name or group_name
-            # Join the projects before the chunks land, so a failure later
-            # (a stopped figure describe) never leaves a new document stored
-            # outside its project.
-            if patch.add_projects:
-                set_metadata(conn, did, add_projects=patch.add_projects)
+            # The projects are joined right before each chunk insert, which
+            # commits them with the chunks: no stored state has chunks without
+            # their projects (a stopped describe) or projects without chunks
+            # (a failed embed).
+            join = patch.add_projects or []
             described = 0
             # The provisional insert below prunes too, so the final insert
             # finds nothing left to drop — count both or the describe path
@@ -689,6 +689,7 @@ class LocalBackend(RagBackend):
                 vectors_tmp = (
                     embed_chunk_graph(graph, embedder=self._get_embedder()) if embed else vectors
                 )
+                change_projects(conn, did, add=join)
                 pruned += insert_chunk_graph(
                     conn,
                     graph,
@@ -724,6 +725,7 @@ class LocalBackend(RagBackend):
             # graph does not carry (descriptions, a curated title, a relinked
             # figure path) for every id that survives, which is why this is not
             # a delete-then-insert.
+            change_projects(conn, did, add=join)
             stats = insert_chunk_graph(
                 conn,
                 graph,

@@ -9,7 +9,7 @@ import pytest
 
 from datasheet_rag.models.chunk import Chunk, ChunkLevel, ChunkMetadata
 from datasheet_rag.store.metadata import get_metadata, list_docs
-from datasheet_rag.store.schema import SCHEMA_VERSION, _migrate_to_v4, connect
+from datasheet_rag.store.schema import SCHEMA_VERSION, MigrationError, _migrate_to_v4, connect
 from datasheet_rag.store.sqlite import count_chunks, insert_chunks
 
 EMBED_DIM = 4
@@ -100,7 +100,7 @@ def test_v4_migration_refuses_a_user_field_named_projects(tmp_path: Path) -> Non
     raw.commit()
     raw.close()
 
-    with pytest.raises(RuntimeError, match="'projects'"):
+    with pytest.raises(MigrationError, match="'projects'"):
         connect(path, embedding_dim=EMBED_DIM)
 
     raw = sqlite3.connect(path)

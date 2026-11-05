@@ -3873,10 +3873,8 @@ def metadata_cmd(
     # no project change: `--remove-project <toml project>` must not be undone.
     proj_cfg = get_project_config()
     if proj_cfg is not None:
-        # A blank project_id means no project, as it does for ingest.
-        toml_project = (proj_cfg.project_id or "").strip()
-        if toml_project and not (add_projects or remove_projects):
-            add_projects = (toml_project,)
+        if proj_cfg.project_id and not (add_projects or remove_projects):
+            add_projects = (proj_cfg.project_id,)
         group_name = proj_cfg.group if group_name is None else group_name
         subsystem = proj_cfg.subsystem if subsystem is None else subsystem
         if not tags and proj_cfg.tags:

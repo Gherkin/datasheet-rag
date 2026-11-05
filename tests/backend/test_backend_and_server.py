@@ -134,21 +134,47 @@ def test_ingest_rejects_a_bad_project_patch_before_writing_chunks(
     assert backend.get_document(did) is None
 
 
-def test_ingest_joins_the_project_before_the_chunks_land(
+def _doc_projects(backend: LocalBackend, did: str) -> list[str]:
+    from datasheet_rag.store.projects import get_projects_for_docs
+
+    return get_projects_for_docs(backend._get_conn(), [did]).get(did, [])
+
+
+def test_ingest_joins_the_project_with_the_chunks(
     backend: LocalBackend, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A failure after the first chunk write must not leave the doc outside its project."""
-    import datasheet_rag.backend.local as local_mod
+    import datasheet_rag.description as description_mod
 
     def boom(*_a: Any, **_k: Any) -> Any:
         raise RuntimeError("stopped")
 
-    monkeypatch.setattr(local_mod, "insert_chunk_graph", boom)
+    monkeypatch.setattr(description_mod, "FigureDescriber", lambda **_k: None)
+    monkeypatch.setattr(description_mod, "describe_figures_in_store", boom)
+    did = "f" * 64
+    with pytest.raises(RuntimeError, match="stopped"):
+        backend.ingest_chunk_graph(
+            _plain_graph(did), project_id="p1", embed=False, describe_figures=True
+        )
+    assert _doc_projects(backend, did) == ["p1"]
+
+
+def test_failed_ingest_before_any_chunk_leaves_no_project_row(
+    backend: LocalBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No document is listed in a project while it has no chunks."""
+    import datasheet_rag.store.sqlite as sqlite_mod
+
+    def boom(*_a: Any, **_k: Any) -> Any:
+        raise RuntimeError("stopped")
+
+    # Fail inside the insert transaction, after the project join was sent.
+    monkeypatch.setattr(sqlite_mod, "_chunk_row", boom)
     did = "f" * 64
     with pytest.raises(RuntimeError, match="stopped"):
         backend.ingest_chunk_graph(_plain_graph(did), project_id="p1", embed=False)
-    md = backend.get_metadata(did)
-    assert md is not None and md.projects == ["p1"]
+    assert _doc_projects(backend, did) == []
+    assert backend.get_metadata(did) is None
 
 
 def test_metadata_patch_rejects_a_project_both_added_and_removed() -> None:

@@ -35,6 +35,15 @@ def test_find_project_configs_in_cwd(tmp_path: Path) -> None:
     assert cfg.path == tmp_path / ".rag.toml"
 
 
+@pytest.mark.parametrize(("raw", "expected"), [(" proj-a ", "proj-a"), ("  ", None)])
+def test_project_id_is_stripped_and_blank_is_unset(
+    tmp_path: Path, raw: str, expected: str | None
+) -> None:
+    """Stored project names are stripped, so the query scope must be too (GH #121)."""
+    (tmp_path / ".rag.toml").write_text(f'project_id = "{raw}"\n')
+    assert find_project_configs(tmp_path)[0].project_id == expected
+
+
 def test_find_project_configs_walks_up_to_parent(tmp_path: Path) -> None:
     (tmp_path / ".rag.toml").write_text('project_id = "proj-a"\n')
     nested = tmp_path / "sub" / "dir"
