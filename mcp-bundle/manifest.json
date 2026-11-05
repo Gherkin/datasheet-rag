@@ -69,7 +69,7 @@
     },
     {
       "name": "get_document_metadata",
-      "description": "Fetch the metadata sidecar for a document (metadata fields such as MPN and manufacturer, tags, subsystem)"
+      "description": "Fetch the metadata sidecar for a document (metadata fields such as MPN and manufacturer, tags, and per-project fields such as subsystem)"
     },
     {
       "name": "stats",

@@ -25,11 +25,12 @@ class DocSummary(BaseModel):
     doc_id: str
     #: Every project the document belongs to, sorted.
     projects: list[str] = Field(default_factory=list)
-    group_name: str | None = None
-    subsystem: str | None = None
     tags: list[str] = Field(default_factory=list)
-    #: Registered-field values, e.g. ``{"mpn": ["INA226"], "acme-id": "D-17"}``.
+    #: Document-scoped field values, e.g. ``{"mpn": ["INA226"], "acme-id": "D-17"}``.
     fields: dict[str, str | list[str]] = Field(default_factory=dict)
+    #: Project-scoped field values per project, e.g.
+    #: ``{"netdaq": {"subsystem": "power"}}``.
+    project_fields: dict[str, dict[str, str | list[str]]] = Field(default_factory=dict)
     doc_title: str | None = None
     page_count: int | None = None
 
@@ -147,6 +148,8 @@ class MetadataPatch(BaseModel):
     and leave the document's other projects alone; a project in both, or an
     empty name, is rejected here.
     In ``fields`` each named field is replaced; a ``None`` value removes it.
+    ``project`` names the project the project-scoped fields in ``fields``
+    (``subsystem``) are written in; it is required when there are any.
     The pipeline's bookkeeping (title provenance, title hints, the re-embed
     marker) is not part of a patch. Unknown names are rejected, not ignored,
     so a value sent under a name the patch does not have is never dropped.
@@ -156,10 +159,9 @@ class MetadataPatch(BaseModel):
 
     add_projects: list[str] | None = None
     remove_projects: list[str] | None = None
-    group_name: str | None = None
-    subsystem: str | None = None
     tags: list[str] | None = None
     fields: dict[str, str | list[str] | None] | None = None
+    project: str | None = None
 
     @model_validator(mode="after")
     def _check_projects(self) -> MetadataPatch:

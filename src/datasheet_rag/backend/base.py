@@ -34,7 +34,7 @@ from datasheet_rag.backend.models import (
 from datasheet_rag.ingest_pipeline import ProgressCallback
 from datasheet_rag.models.chunk import Chunk, ChunkGraph
 from datasheet_rag.store import DocMetadata, FieldSpec, SearchFilters, SearchResult, TitleSource
-from datasheet_rag.store.fields import FieldShape
+from datasheet_rag.store.fields import FieldScope, FieldShape
 
 SearchMode = Literal["hybrid", "vector", "keyword"]
 
@@ -99,7 +99,6 @@ class RagBackend(ABC):
         self,
         *,
         project_id: str | None = None,
-        group_name: str | None = None,
         fields: dict[str, str] | None = None,
         limit: int | None = None,
         offset: int = 0,
@@ -109,8 +108,9 @@ class RagBackend(ABC):
         ``project_id`` keeps documents that belong to that project, among
         any others they belong to. ``fields`` filters on registered fields
         (AND-ed; a list field matches if any value is equal,
-        case-insensitive). ``limit=None`` returns every match from
-        ``offset`` on.
+        case-insensitive; a project-scoped field matches in ``project_id``,
+        or in any project when none is given). ``limit=None`` returns every
+        match from ``offset`` on.
         """
 
     @abstractmethod
@@ -154,7 +154,6 @@ class RagBackend(ABC):
         self,
         *,
         project_id: str | None = None,
-        group_name: str | None = None,
         fields: dict[str, str] | None = None,
     ) -> list[DocMetadata]: ...
 
@@ -165,9 +164,6 @@ class RagBackend(ABC):
         Pipeline bookkeeping, kept apart from :meth:`set_metadata`: a
         metadata patch cannot set it.
         """
-
-    @abstractmethod
-    def apply_metadata_to_chunks(self, doc_id: str) -> int: ...
 
     # ---- metadata fields (GH #120) ----
     @abstractmethod
@@ -180,6 +176,7 @@ class RagBackend(ABC):
         name: str,
         *,
         shape: FieldShape = "single",
+        scope: FieldScope = "document",
         description: str = "",
         roles: Sequence[str] = (),
     ) -> FieldSpec:
@@ -268,7 +265,6 @@ class RagBackend(ABC):
         *,
         figures: FigureUploads | None = None,
         project_id: str | None = None,
-        group_name: str | None = None,
         metadata: MetadataPatch | None = None,
         embed: bool = True,
         describe_figures: bool = False,
@@ -282,7 +278,9 @@ class RagBackend(ABC):
 
         ``project_id`` adds the document to that project; projects it is
         already in are kept (GH #121). Leaving a project is a metadata
-        patch's ``remove_projects``.
+        patch's ``remove_projects``. Project-scoped fields in ``metadata``
+        are written in ``project_id`` unless the patch names its own
+        ``project`` (GH #123).
 
         ``vectors`` supplies embeddings the caller already computed, which
         makes ``embed`` a no-op — the client-side compute path (GH #43) uses it
@@ -310,7 +308,6 @@ class RagBackend(ABC):
         *,
         doc_id: str | None = None,
         project_id: str | None = None,
-        group_name: str | None = None,
         metadata: MetadataPatch | None = None,
         backend: str = "docling",
         skip_figures: bool = False,

@@ -29,7 +29,6 @@ from datasheet_rag.models.chunk import (
 )
 from datasheet_rag.store.fields import MetadataFieldError
 from datasheet_rag.store.metadata import (
-    apply_metadata_to_chunks,
     delete_metadata,
     get_metadata,
     list_docs,
@@ -598,7 +597,7 @@ def test_filters_restrict_searches(conn: sqlite3.Connection) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_metadata_set_get_update_and_apply(conn: sqlite3.Connection) -> None:
+def test_metadata_set_get_update(conn: sqlite3.Connection) -> None:
     # Insert chunks for doc1 first, in no project.
     chunks = _seed_chunks()
     doc1_chunks = [c for c in chunks if c.doc_id == "doc1"]
@@ -610,7 +609,6 @@ def test_metadata_set_get_update_and_apply(conn: sqlite3.Connection) -> None:
         conn,
         "doc1",
         add_projects=["proj-1"],
-        group_name="grp-1",
         fields={"mpn": "MPN-123", "manufacturer": "Acme"},
         tags=["analog", "ldo"],
     )
@@ -630,7 +628,7 @@ def test_metadata_set_get_update_and_apply(conn: sqlite3.Connection) -> None:
     assert updated.fields["mpn"] == ["MPN-456"]
     # Manufacturer was not passed -> preserved.
     assert updated.fields["manufacturer"] == "Acme"
-    # Projects / group preserved.
+    # Projects preserved.
     assert updated.projects == ["proj-1"]
     assert updated.tags == ["analog", "ldo"]
 
@@ -642,13 +640,6 @@ def test_metadata_set_get_update_and_apply(conn: sqlite3.Connection) -> None:
     listed = list_docs(conn, project_id="proj-1")
     assert [m.doc_id for m in listed] == ["doc1"]
     assert list_docs(conn, project_id="non-existent") == []
-
-    # apply_metadata_to_chunks back-fills the group.
-    n_updated = apply_metadata_to_chunks(conn, "doc1")
-    assert n_updated == len(doc1_chunks)
-    assert {r[0] for r in conn.execute("SELECT group_name FROM chunks WHERE doc_id = 'doc1'")} == {
-        "grp-1"
-    }
 
     # And searches respect the project.
     target = doc1_chunks[0]
@@ -686,9 +677,9 @@ def test_a_document_can_belong_to_several_projects(conn: sqlite3.Connection) -> 
 
 def test_project_change_is_validated_before_writing(conn: sqlite3.Connection) -> None:
     with pytest.raises(ValueError, match="both to add and to remove"):
-        set_metadata(conn, "doc1", add_projects=["x"], remove_projects=["x"], subsystem="s")
+        set_metadata(conn, "doc1", add_projects=["x"], remove_projects=["x"], tags=["s"])
     with pytest.raises(ValueError, match="cannot be empty"):
-        set_metadata(conn, "doc1", add_projects=[" "], subsystem="s")
+        set_metadata(conn, "doc1", add_projects=[" "], tags=["s"])
     assert get_metadata(conn, "doc1") is None
     # Names are stripped.
     assert set_metadata(conn, "doc1", add_projects=[" p "]).projects == ["p"]
@@ -735,12 +726,13 @@ def test_list_docs_rejects_unregistered_field(conn: sqlite3.Connection) -> None:
         list_docs(conn, fields={"nope": "x"})
 
 
-def test_apply_metadata_noops_when_missing(conn: sqlite3.Connection) -> None:
-    # No sidecar row at all.
-    assert apply_metadata_to_chunks(conn, "doc-unknown") == 0
-    # Sidecar exists but no project / group set.
-    set_metadata(conn, "doc-bare", fields={"mpn": "X"})
-    assert apply_metadata_to_chunks(conn, "doc-bare") == 0
+def test_chunks_carry_no_document_metadata(conn: sqlite3.Connection) -> None:
+    # GH #123: group_name left the chunk rows; every filter goes through the
+    # document's own tables.
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(chunks)")}
+    assert "group_name" not in cols
+    md_cols = {r["name"] for r in conn.execute("PRAGMA table_info(doc_metadata)")}
+    assert not {"group_name", "subsystem"} & md_cols
 
 
 # ---------------------------------------------------------------------------

@@ -38,10 +38,10 @@ class SearchFilters(BaseModel):
     doc_ids: list[str] | None = None
     #: Keep chunks of documents that belong to this project (among others).
     project_id: str | None = None
-    group_name: str | None = None
     #: Registered-field filters, AND-ed: ``{"mpn": "INA226"}`` keeps chunks
-    #: of documents whose mpn list holds INA226 (case-insensitive). See
-    #: ``store.fields``.
+    #: of documents whose mpn list holds INA226 (case-insensitive). A
+    #: project-scoped field (``subsystem``) matches in ``project_id`` when it
+    #: is set, else in any project. See ``store.fields``.
     fields: dict[str, str] | None = None
     level: ChunkLevel | list[ChunkLevel] | None = None
     layout_types: list[LayoutType] | None = None
@@ -71,12 +71,10 @@ class SearchFilters(BaseModel):
             clauses.append(clause)
             params.extend(clause_params)
 
-        if self.group_name is not None:
-            clauses.append("c.group_name = ?")
-            params.append(self.group_name)
-
         if self.fields:
-            field_clauses, field_params = field_filter_sql(self.fields, doc_id_column="c.doc_id")
+            field_clauses, field_params = field_filter_sql(
+                self.fields, doc_id_column="c.doc_id", project_id=self.project_id
+            )
             clauses.extend(field_clauses)
             params.extend(field_params)
 

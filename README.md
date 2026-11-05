@@ -348,16 +348,17 @@ This way you dont have to specify all metadata at runtime, and it is transferrab
 The format for `rag.toml` is as follows:
 ```
 project_id   = "stm32-h7-devboard"
-group        = "psu"
-subsystem    = "power"
 tags         = ["pinout", "power-tree", "reference-manual"]
 
 [fields]
 mpn          = ["STM32H743VIT6", "STM32H743ZIT6"]   # or a single string
 manufacturer = "STMicroelectronics"
 doc_type     = "reference-manual"
+subsystem    = "power"           # per project: set in project_id
 acme-id      = "D-0172"          # a field registered with `rag fields add`
 ```
+
+`subsystem` is set under `[fields]`. The old top-level `group` and `subsystem` keys were removed; a file that still has them fails with an error that says what to write instead.
 
 A document can belong to several projects. `project_id` adds the document to that project when it is ingested; the projects it was already in are kept. The same datasheet ingested from two project folders ends up in both projects. To leave a project, run `rag metadata <doc> --remove-project <project>` (`--add-project` adds one by hand).
 
@@ -365,7 +366,7 @@ A document can belong to several projects. `project_id` adds the document to tha
 
 The schema is closed. Any of the following makes the command fail with an error that names the file:
 - a key that is not listed above (any other value goes under `[fields]`)
-- a value of the wrong type: `project_id`, `group` and `subsystem` are strings, `tags` is a list of strings, and a `[fields]` value is a string or, for a list field such as `mpn`, a list of strings
+- a value of the wrong type: `project_id` is a string, `tags` is a list of strings, and a `[fields]` value is a string or, for a list field such as `mpn`, a list of strings
 - a file that is not valid TOML
 
 A bad file inside a directory given to `rag ingest ./datasheets` fails only the pdfs below it; the rest are still ingested.
@@ -374,7 +375,7 @@ Whether a `[fields]` name is registered is checked when the values are written, 
 
 ### Metadata fields
 
-A field is a named, typed piece of document metadata. A field must be registered before any document can hold a value for it. You can filter on it with `rag list --field`, and agents can filter on it in the MCP `search` and `list_documents` tools. Three fields are built in: `mpn` (a list), `manufacturer` and `doc_type`. Register your own for things the built-ins don't cover, such as an internal document number, a vendor's document number or an internal part number:
+A field is a named, typed piece of document metadata. A field must be registered before any document can hold a value for it. You can filter on it with `rag list --field`, and agents can filter on it in the MCP `search` and `list_documents` tools. Four fields are built in: `mpn` (a list), `manufacturer`, `doc_type` and `subsystem` (one value per project, see below). Register your own for things the built-ins don't cover, such as an internal document number, a vendor's document number or an internal part number:
 
 ```
 rag fields add acme-id --description "ACME document number"
@@ -386,6 +387,20 @@ rag fields list
 Set the values with `rag metadata <doc> --field acme-id=D-0172`. Repeat `--field` for a list field; `--mpn` is repeatable the same way. Remove a value with `--unset-field acme-id`. Filtering matches whole values and ignores case, and a list field matches if any of its values is equal. `rag list --columns mpn,acme-id` shows a column per field. The MCP tool `list_metadata_fields` tells an agent which fields exist.
 
 `rag fields remove <name>` refuses while any document has a value for the field. `rag fields remove <name> --clear` deletes those values with the field. Built-in fields cannot be removed.
+
+#### Fields with one value per project
+
+Most fields hold one value per document. Some describe the role a document plays on one board. The built-in `subsystem` is one of these: one regulator datasheet can be `power` on one board and `aux` on another. These fields have the scope `project` and hold one value per (document, project):
+
+```
+rag metadata <doc> --project netdaq  --subsystem power
+rag metadata <doc> --project board-b --subsystem aux
+rag fields add board-ref --scope project     # your own per-project field
+```
+
+A write goes to the project named with `--project`. Without it, the `.rag.toml` `project_id` is used. If neither is given, the write fails. The project is never guessed from the projects the document is in. The document must be in that project. When a document leaves a project, its per-project values there are deleted.
+
+`rag ingest --subsystem` writes to the ingest project. `rag list --subsystem` and `rag search --subsystem` match the value in the listed or searched project, or in any project with `--global`. The MCP `fields` filter does the same.
 
 ## Usage
 

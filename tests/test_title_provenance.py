@@ -170,7 +170,7 @@ def test_title_source_defaults_to_auto(conn) -> None:
 def test_provenance_is_a_column_a_metadata_write_leaves_alone(conn) -> None:
     _ingest(conn, "Contents")
     set_doc_title(conn, DOC, "Hand Written", source="manual")
-    set_metadata(conn, DOC, subsystem="power")
+    set_metadata(conn, DOC, tags=["power"])
 
     md = get_metadata(conn, DOC)
     assert md is not None and md.title_source == "manual"

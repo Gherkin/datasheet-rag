@@ -380,7 +380,11 @@ def _parse_field_items(items: tuple[str, ...], *, option: str = "--field") -> di
 
 
 def _shortcut_fields(
-    *, mpn: tuple[str, ...], manufacturer: str | None, doc_type: str | None
+    *,
+    mpn: tuple[str, ...],
+    manufacturer: str | None,
+    doc_type: str | None,
+    subsystem: str | None,
 ) -> dict[str, Any]:
     """The built-in-field shortcut options as a field patch (unset ones omitted).
 
@@ -394,6 +398,8 @@ def _shortcut_fields(
         out["manufacturer"] = manufacturer
     if doc_type is not None:
         out["doc_type"] = doc_type
+    if subsystem is not None:
+        out["subsystem"] = subsystem
     return out
 
 
@@ -429,13 +435,19 @@ def _merge_config_fields(proj_cfg: ProjectConfig | None, fields: dict[str, Any])
     return {**proj_cfg.fields, **fields}
 
 
-def _check_field_patch(registered: Iterable[FieldSpec], fields: dict[str, Any]) -> None:
-    """Reject a bad field patch before any slow work (parsing a PDF)."""
-    from datasheet_rag.store.fields import shapes_of
+def _check_field_patch(
+    registered: Iterable[FieldSpec], fields: dict[str, Any], *, project: str | None
+) -> None:
+    """Reject a bad field patch before any slow work (parsing a PDF).
+
+    ``project`` is where the patch's project-scoped fields would be written.
+    """
+    from datasheet_rag.store.fields import scopes_of, shapes_of
     from datasheet_rag.store.metadata import check_patch_for
 
+    specs = list(registered)
     try:
-        check_patch_for(shapes_of(registered), fields=fields)
+        check_patch_for(shapes_of(specs), scopes_of(specs), fields=fields, project=project)
     except ValueError as e:
         raise click.ClickException(str(e)) from e
 
@@ -697,8 +709,6 @@ _DOC_COLUMNS: dict[str, Callable[[IngestedDoc], Any]] = {
 
 _META_COLUMNS: dict[str, Callable[[DocMetadata], Any]] = {
     "projects": lambda m: m.projects,
-    "group": lambda m: m.group_name,
-    "subsystem": lambda m: m.subsystem,
     "tags": lambda m: m.tags,
     "updated": lambda m: m.updated_at,
     "stale": lambda m: "[yellow]re-embed[/]" if m.needs_reembed else "",
@@ -715,7 +725,6 @@ _LIST_COLUMN_ALIASES = {
     "ingested_at": "ingested",
     "project": "projects",
     "project_id": "projects",
-    "group_name": "group",
     "updated_at": "updated",
 }
 
@@ -726,7 +735,7 @@ _LIST_RIGHT_ALIGNED = {"chunks", "pages"}
 # rather than appending them. Showing all eleven at once is unreadable on an
 # 80-column terminal, where Rich squeezes every cell down to nothing.
 _LIST_DEFAULT_COLUMNS = ("title", "chunks", "pages", "ingested")
-_LIST_WIDE_COLUMNS = ("projects", "group", "mpn", "manufacturer", "subsystem", "tags")
+_LIST_WIDE_COLUMNS = ("projects", "mpn", "manufacturer", "subsystem", "tags")
 
 
 def _parse_list_columns(columns: tuple[str, ...]) -> list[str]:
@@ -737,10 +746,14 @@ def _parse_list_columns(columns: tuple[str, ...]) -> list[str]:
     return [_LIST_COLUMN_ALIASES.get(name, name) for name in parsed]
 
 
-def _list_cell(name: str, doc: IngestedDoc, meta: DocMetadata | None) -> Any:
+def _list_cell(
+    name: str, doc: IngestedDoc, meta: DocMetadata | None, project_id: str | None = None
+) -> Any:
     """Value of column *name* for one row, or None when it has none.
 
-    A name that is not a built-in column is a registered field.
+    A name that is not a built-in column is a registered field. A
+    project-scoped field shows its value in ``project_id``; in an unscoped
+    listing it shows every project's value, ``project: value``.
     """
     if (doc_getter := _DOC_COLUMNS.get(name)) is not None:
         return doc_getter(doc)
@@ -748,7 +761,18 @@ def _list_cell(name: str, doc: IngestedDoc, meta: DocMetadata | None) -> Any:
         return None
     if (meta_getter := _META_COLUMNS.get(name)) is not None:
         return meta_getter(meta)
-    return meta.fields.get(name)
+    if name in meta.fields:
+        return meta.fields[name]
+    if project_id is not None:
+        return meta.project_fields.get(project_id, {}).get(name)
+    from datasheet_rag.store.fields import display_value
+
+    per_project = [
+        f"{project}: {display_value(values[name])}"
+        for project, values in sorted(meta.project_fields.items())
+        if name in values
+    ]
+    return "; ".join(per_project) or None
 
 
 def _fmt_list_cell(value: Any) -> str:
@@ -778,8 +802,13 @@ def _fmt_list_cell(value: Any) -> str:
     is_flag=True,
     help="Show every project, ignoring any .rag.toml scoping.",
 )
-@click.option("--group", "group_name", default=None, help="Only show documents in this group.")
 @click.option("--mpn", default=None, help="Only show documents with this part number.")
+@click.option(
+    "--subsystem",
+    default=None,
+    help="Only show documents with this subsystem in the listed project "
+    "(in any project with --global).",
+)
 @click.option(
     "--field",
     "field_items",
@@ -787,7 +816,8 @@ def _fmt_list_cell(value: Any) -> str:
     metavar="NAME=VALUE",
     help="Only show documents whose registered field NAME holds VALUE "
     "(repeatable, all must match; a list field matches any entry; "
-    "case-insensitive). See `rag fields list`.",
+    "case-insensitive; a project-scoped field matches in the listed "
+    "project). See `rag fields list`.",
 )
 @click.option(
     "--tag",
@@ -803,7 +833,7 @@ def _fmt_list_cell(value: Any) -> str:
     multiple=True,
     metavar="COL,COL,...",
     help="Choose the columns to show (comma-separated, repeatable). "
-    "Built-ins: title, chunks, pages, ingested, projects, group, mpn, "
+    "Built-ins: title, chunks, pages, ingested, projects, mpn, "
     "manufacturer, subsystem, doc_type, tags, updated, stale, and any "
     "registered field (`rag fields list`). doc_id is always shown.",
 )
@@ -811,7 +841,7 @@ def _fmt_list_cell(value: Any) -> str:
     "--wide",
     "-w",
     is_flag=True,
-    help="Show the sidecar columns (projects, group, mpn, manufacturer, "
+    help="Show the sidecar columns (projects, mpn, manufacturer, "
     "subsystem, tags, then each user-registered field) in place of the "
     "chunk/page/ingest columns. Implied whenever a filter is given.",
 )
@@ -825,8 +855,8 @@ def list_docs(
     db_path: Path | None,
     project_id: str | None,
     is_global: bool,
-    group_name: str | None,
     mpn: str | None,
+    subsystem: str | None,
     field_items: tuple[str, ...],
     tags: tuple[str, ...],
     columns: tuple[str, ...],
@@ -837,8 +867,11 @@ def list_docs(
 
     Shows the store's own view — title, chunk and page counts, ingest time.
     Pass --wide, or any sidecar filter, to swap those for the metadata columns
-    (projects, group, mpn, manufacturer, subsystem, tags) instead; filters
-    narrow the listing to documents whose sidecar row matches.
+    (projects, mpn, manufacturer, subsystem, tags) instead; filters narrow the
+    listing to documents whose sidecar row matches.
+
+    subsystem holds one value per project. A listing scoped to a project
+    shows that project's value; with --global it shows each project's.
 
     --columns replaces both views with exactly the columns you name. Each
     registered field is a column of its own:
@@ -889,8 +922,12 @@ def list_docs(
         if "mpn" in field_filters:
             raise click.UsageError("mpn given both as --mpn and --field; use one")
         field_filters["mpn"] = mpn
+    if subsystem is not None:
+        if "subsystem" in field_filters:
+            raise click.UsageError("subsystem given both as --subsystem and --field; use one")
+        field_filters["subsystem"] = subsystem
 
-    filtering = bool(group_name or field_filters or tags)
+    filtering = bool(field_filters or tags)
     be = _backend_for(db_path)
     # The default view shows no field columns, so it needs no registry read
     # (one fewer round trip in remote mode).
@@ -921,10 +958,7 @@ def list_docs(
     # sidecar and belongs in the default view.
     try:
         meta_by_id = {
-            m.doc_id: m
-            for m in be.list_docs(
-                project_id=project_id, group_name=group_name, fields=field_filters or None
-            )
+            m.doc_id: m for m in be.list_docs(project_id=project_id, fields=field_filters or None)
         }
     except Exception:
         meta_by_id = {}
@@ -975,7 +1009,7 @@ def list_docs(
 
     for doc in docs:
         meta = meta_by_id.get(doc.doc_id)
-        table.add_row(*(_fmt_list_cell(_list_cell(name, doc, meta)) for name in shown))
+        table.add_row(*(_fmt_list_cell(_list_cell(name, doc, meta, project_id)) for name in shown))
 
     console.print(table)
     if stale_ids:
@@ -1724,13 +1758,11 @@ def chunk_cmd(
     default=None,
     help="Add the document to this project. Projects it is already in are kept.",
 )
-@click.option("--group", "group_name", default=None, help="Group name to attach to every chunk.")
 @click.option("--verbose/--quiet", default=True, help="Print per-batch progress.")
 def embed(
     doc_id: str,
     db_path: Path | None,
     project_id: str | None,
-    group_name: str | None,
     verbose: bool,
 ) -> None:
     """Embed a document's chunk graph and store it.
@@ -1755,7 +1787,6 @@ def embed(
     proj_cfg = get_project_config()
     if proj_cfg is not None:
         project_id = project_id or proj_cfg.project_id
-        group_name = group_name or proj_cfg.group
 
     console.print(f"Loading chunk graph from [cyan]{chunks_json}[/]…")
     graph = load_chunk_graph(chunks_json)
@@ -1785,7 +1816,6 @@ def embed(
         graph,
         figures=figures_upload,
         project_id=project_id,
-        group_name=group_name,
         metadata=MetadataPatch(),
         embed=True,
         describe_figures=False,
@@ -1828,7 +1858,12 @@ def embed(
     is_flag=True,
     help="Search every project, ignoring any .rag.toml scoping.",
 )
-@click.option("--group", "group_name", default=None, help="Restrict to a group.")
+@click.option(
+    "--subsystem",
+    default=None,
+    help="Restrict to documents with this subsystem in the searched project "
+    "(in any project with --global).",
+)
 @click.option("--doc-id", "doc_ids", multiple=True, help="Restrict to one or more doc IDs.")
 @click.option(
     "--level",
@@ -1848,7 +1883,7 @@ def search(
     db_path: Path | None,
     project_id: str | None,
     is_global: bool,
-    group_name: str | None,
+    subsystem: str | None,
     doc_ids: tuple[str, ...],
     level: str | None,
     show_context: bool,
@@ -1879,7 +1914,7 @@ def search(
     filters = SearchFilters(
         doc_ids=resolved_doc_ids if resolved_doc_ids else None,
         project_id=project_id,
-        group_name=group_name,
+        fields={"subsystem": subsystem} if subsystem is not None else None,
         level=level_enum,
     )
 
@@ -2590,14 +2625,18 @@ def _print_cost_table(cost: CostEstimate, heading: str = "Estimated AWS cost") -
     "Projects it is already in are kept; leave one with "
     "`rag metadata <doc> --remove-project`.",
 )
-@click.option("--group", "group_name", default=None, help="Group name attached to all chunks.")
 @click.option(
     "--mpn",
     multiple=True,
     help="Manufacturer part number, e.g. STM32H743VIT6. Repeat for several.",
 )
 @click.option("--manufacturer", default=None, help="Manufacturer name, e.g. STMicroelectronics.")
-@click.option("--subsystem", default=None, help="e.g. power, rf, mcu.")
+@click.option(
+    "--subsystem",
+    default=None,
+    help="The document's subsystem in the ingest project, e.g. power, rf, mcu. "
+    "Needs a project (--project-id or .rag.toml).",
+)
 @click.option(
     "--doc-type", default=None, help="datasheet | reference-manual | errata | app-note | …"
 )
@@ -2711,7 +2750,6 @@ def ingest(
     pdf_path: Path,
     doc_id: str | None,
     project_id: str | None,
-    group_name: str | None,
     mpn: tuple[str, ...],
     manufacturer: str | None,
     subsystem: str | None,
@@ -2755,8 +2793,6 @@ def ingest(
         store_backend=store_backend,
         field_registry=_FieldRegistry(store_backend) if store_backend is not None else None,
         project_id=project_id,
-        group_name=group_name,
-        subsystem=subsystem,
         tags=tags,
         fields=_merge_shortcuts(
             _parse_field_items(field_items),
@@ -2766,6 +2802,7 @@ def ingest(
                 mpn=tuple(m for m in mpn if m),
                 manufacturer=manufacturer or None,
                 doc_type=doc_type or None,
+                subsystem=subsystem or None,
             ),
         ),
         skip_figures=skip_figures,
@@ -2874,8 +2911,6 @@ def _ingest_one(
     store_backend: RagBackend | None,
     field_registry: _FieldRegistry | None,
     project_id: str | None,
-    group_name: str | None,
-    subsystem: str | None,
     tags: tuple[str, ...],
     fields: dict[str, Any],
     skip_figures: bool,
@@ -2913,8 +2948,6 @@ def _ingest_one(
         raise click.ClickException(str(e)) from e
     if proj_cfg is not None:
         project_id = project_id or proj_cfg.project_id
-        group_name = group_name or proj_cfg.group
-        subsystem = subsystem or proj_cfg.subsystem
         if not tags and proj_cfg.tags:
             tags = tuple(proj_cfg.tags)
 
@@ -2926,11 +2959,12 @@ def _ingest_one(
 
     # A store write follows (store_backend is None on a dry run): read the
     # field registry now, so a bad field fails before the PDF is parsed, not
-    # after. A patch with no fields has nothing to check.
+    # after. A patch with no fields has nothing to check. Project-scoped
+    # fields (subsystem) are written in the ingest project.
     backend_obj = store_backend
     fields = _merge_config_fields(proj_cfg, fields)
     if field_registry is not None and fields:
-        _check_field_patch(field_registry.specs(), fields)
+        _check_field_patch(field_registry.specs(), fields, project=project_id)
 
     settings = get_settings()
     if accurate_tables is None:
@@ -2978,7 +3012,6 @@ def _ingest_one(
 
         assert backend_obj is not None  # built above for every non-dry run
         meta_patch = MetadataPatch(
-            subsystem=subsystem or None,
             tags=list(tags) if tags else None,
             fields=fields or None,
         )
@@ -2987,7 +3020,6 @@ def _ingest_one(
                 pdf_path,
                 doc_id=doc_id,
                 project_id=project_id,
-                group_name=group_name,
                 metadata=meta_patch,
                 backend=backend,
                 skip_figures=skip_figures,
@@ -3094,7 +3126,6 @@ def _ingest_one(
         _warn_missing_figure_crops(missing, len(figures_upload))
 
     meta_patch = MetadataPatch(
-        subsystem=subsystem or None,
         tags=list(tags) if tags else None,
         fields=fields or None,
     )
@@ -3105,7 +3136,6 @@ def _ingest_one(
             graph,
             figures=figures_upload,
             project_id=project_id,
-            group_name=group_name,
             metadata=meta_patch,
             embed=True,
             describe_figures=do_describe,
@@ -3727,9 +3757,17 @@ def repair_tables_cmd(
     "remove_projects",
     multiple=True,
     metavar="PROJECT",
-    help="Remove the document from this project (repeatable).",
+    help="Remove the document from this project (repeatable). Its "
+    "per-project fields there (subsystem) are deleted with it.",
 )
-@click.option("--group", "group_name", default=None, help="Set the document's group name.")
+@click.option(
+    "--project",
+    "fields_project",
+    default=None,
+    metavar="PROJECT",
+    help="The project to set per-project fields such as --subsystem in "
+    "(default: project_id from .rag.toml). The document must be in it.",
+)
 @click.option(
     "--mpn",
     multiple=True,
@@ -3747,7 +3785,12 @@ def repair_tables_cmd(
     default=None,
     help="Manufacturer name, e.g. STMicroelectronics. Replaces the current value.",
 )
-@click.option("--subsystem", default=None, help="e.g. power, rf, mcu.")
+@click.option(
+    "--subsystem",
+    default=None,
+    help="The document's subsystem in one project, e.g. power, rf, mcu "
+    "(see --project). --subsystem '' clears it there.",
+)
 @click.option(
     "--doc-type", default=None, help="datasheet | reference-manual | errata | app-note | …"
 )
@@ -3779,17 +3822,12 @@ def repair_tables_cmd(
     help="Remove a field's value from the document (repeatable).",
 )
 @_db_option
-@click.option(
-    "--apply-to-chunks/--no-apply-to-chunks",
-    default=True,
-    help="Propagate group_name into the chunks table.",
-)
 def metadata_cmd(
     doc_id: str,
     doc_title: str | None,
     add_projects: tuple[str, ...],
     remove_projects: tuple[str, ...],
-    group_name: str | None,
+    fields_project: str | None,
     mpn: tuple[str, ...],
     mpn_aliases: tuple[str, ...],
     manufacturer: str | None,
@@ -3800,7 +3838,6 @@ def metadata_cmd(
     field_items: tuple[str, ...],
     unset_fields: tuple[str, ...],
     db_path: Path | None,
-    apply_to_chunks: bool,
 ) -> None:
     """Show a document's metadata sidecar row, or update it.
 
@@ -3827,6 +3864,13 @@ def metadata_cmd(
 
     In a folder with a .rag.toml, a write with neither option adds the
     document to the .rag.toml project.
+
+    subsystem holds one value per project: a datasheet can be "power" on
+    one board and "aux" on another. --project names the project to set it
+    in; without it the .rag.toml project is used. The project is never
+    guessed from the document's memberships:
+
+        rag metadata <doc_id> --project board-b --subsystem aux
     """
     from datasheet_rag.backend import MetadataPatch
     from datasheet_rag.project_config import get_project_config
@@ -3836,7 +3880,7 @@ def metadata_cmd(
     # would silently turn every `rag metadata <doc>` into a write. The scalar
     # options are tested against None, not truthiness: `--title ''` is an
     # explicit request to clear the field, not an absent option.
-    scalars = (doc_title, group_name, manufacturer, subsystem, doc_type)
+    scalars = (doc_title, manufacturer, subsystem, doc_type)
     is_read = all(v is None for v in scalars) and not any(
         (
             add_projects,
@@ -3850,6 +3894,8 @@ def metadata_cmd(
         )
     )
     if is_read:
+        if fields_project is not None:
+            raise click.UsageError("--project names where to write a per-project field; set one")
         be = _backend_for(db_path)
         existing = be.get_metadata(_backend_resolve(be, doc_id))
         if existing is None:
@@ -3860,7 +3906,9 @@ def metadata_cmd(
 
     fields: dict[str, Any] = _merge_shortcuts(
         _parse_field_items(field_items),
-        _shortcut_fields(mpn=mpn, manufacturer=manufacturer, doc_type=doc_type),
+        _shortcut_fields(
+            mpn=mpn, manufacturer=manufacturer, doc_type=doc_type, subsystem=subsystem
+        ),
     )
     both = sorted(set(fields) & set(unset_fields))
     if both:
@@ -3875,8 +3923,8 @@ def metadata_cmd(
     if proj_cfg is not None:
         if proj_cfg.project_id and not (add_projects or remove_projects):
             add_projects = (proj_cfg.project_id,)
-        group_name = proj_cfg.group if group_name is None else group_name
-        subsystem = proj_cfg.subsystem if subsystem is None else subsystem
+        if fields_project is None:
+            fields_project = proj_cfg.project_id
         if not tags and proj_cfg.tags:
             tags = tuple(proj_cfg.tags)
     fields = _merge_config_fields(proj_cfg, fields)
@@ -3915,20 +3963,15 @@ def metadata_cmd(
             MetadataPatch(
                 add_projects=list(add_projects) or None,
                 remove_projects=list(remove_projects) or None,
-                group_name=group_name,
-                subsystem=subsystem,
                 tags=new_tags,
                 fields=fields or None,
+                project=fields_project,
             ),
         )
     except ValueError as e:
         raise click.ClickException(str(e)) from e
     console.print(f"[green]Saved metadata for[/] {doc_id}")
     console.print(meta.model_dump_json(indent=2, exclude_none=True))
-
-    if apply_to_chunks:
-        updated = be.apply_metadata_to_chunks(doc_id)
-        console.print(f"  Propagated to {updated} chunk rows.")
 
 
 # ---------------------------------------------------------------------------
@@ -3953,13 +3996,18 @@ def fields_group() -> None:
 @fields_group.command("list", short_help="Show every registered field.")
 @_db_option
 def fields_list_cmd(db_path: Path | None) -> None:
-    """Show every registered field: name, shape, roles, description."""
+    """Show every registered field: name, shape, scope, roles, description."""
     table = Table(title="Metadata fields")
-    for col in ("name", "shape", "roles", "built in", "description"):
+    for col in ("name", "shape", "scope", "roles", "built in", "description"):
         table.add_column(col, style="cyan" if col == "name" else None)
     for f in _backend_for(db_path).list_fields():
         table.add_row(
-            f.name, f.shape, ", ".join(f.roles) or "—", "yes" if f.builtin else "", f.description
+            f.name,
+            f.shape,
+            f.scope,
+            ", ".join(f.roles) or "—",
+            "yes" if f.builtin else "",
+            f.description,
         )
     console.print(table)
 
@@ -3972,6 +4020,13 @@ def fields_list_cmd(db_path: Path | None) -> None:
     default="single",
     help="single: one value per document. list: several, in order.",
 )
+@click.option(
+    "--scope",
+    type=click.Choice(["document", "project"]),
+    default="document",
+    help="document: one value per document, the same in every project. "
+    "project: one value per document in each project (like subsystem).",
+)
 @click.option("--description", default="", help="Shown to agents and in `rag fields list`.")
 @click.option(
     "--role",
@@ -3982,24 +4037,31 @@ def fields_list_cmd(db_path: Path | None) -> None:
 )
 @_db_option
 def fields_add_cmd(
-    name: str, shape: str, description: str, roles: tuple[str, ...], db_path: Path | None
+    name: str,
+    shape: str,
+    scope: str,
+    description: str,
+    roles: tuple[str, ...],
+    db_path: Path | None,
 ) -> None:
     """Register field NAME (lower case, digits, '-' and '_').
 
     \b
         rag fields add acme-id --description "ACME document number"
         rag fields add acme-pn --shape list --role part
+        rag fields add board-ref --scope project
     """
     try:
         spec = _backend_for(db_path).register_field(
             name,
             shape=shape,  # type: ignore[arg-type]  # click.Choice guarantees the literal
+            scope=scope,  # type: ignore[arg-type]  # click.Choice guarantees the literal
             description=description,
             roles=roles,
         )
     except ValueError as e:
         raise click.ClickException(str(e)) from e
-    console.print(f"[green]Registered[/] {spec.name} ({spec.shape})")
+    console.print(f"[green]Registered[/] {spec.name} ({spec.shape}, per {spec.scope})")
 
 
 @fields_group.command("remove", short_help="Unregister a field.")

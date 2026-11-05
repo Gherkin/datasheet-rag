@@ -22,7 +22,7 @@ from datasheet_rag.project_config import (
 
 def test_find_project_configs_in_cwd(tmp_path: Path) -> None:
     (tmp_path / ".rag.toml").write_text(
-        'project_id = "proj-a"\ngroup = "power"\ntags = ["x", "y"]\n'
+        'project_id = "proj-a"\ntags = ["x", "y"]\n[fields]\nsubsystem = "power"\n'
     )
 
     configs = find_project_configs(tmp_path)
@@ -30,7 +30,7 @@ def test_find_project_configs_in_cwd(tmp_path: Path) -> None:
     assert len(configs) == 1
     cfg = configs[0]
     assert cfg.project_id == "proj-a"
-    assert cfg.group == "power"
+    assert cfg.fields == {"subsystem": "power"}
     assert cfg.tags == ["x", "y"]
     assert cfg.path == tmp_path / ".rag.toml"
 
@@ -62,7 +62,7 @@ def test_find_project_configs_collects_whole_chain_nearest_first(tmp_path: Path)
     )
     subsystem = tmp_path / "power"
     subsystem.mkdir()
-    (subsystem / ".rag.toml").write_text('subsystem = "power"\ngroup = "psu"\n')
+    (subsystem / ".rag.toml").write_text('[fields]\nsubsystem = "power"\n')
     mpn_dir = subsystem / "STM32H743"
     mpn_dir.mkdir()
     (mpn_dir / ".rag.toml").write_text('[fields]\nmpn = "STM32H743VIT6"\n')
@@ -136,6 +136,9 @@ def test_comma_mpn_string_is_one_value(tmp_path: Path) -> None:
         ('doc_type = "errata"\n', "unknown key\\(s\\) doc_type"),
         ('[attributes]\nrevision = "B"\n', "unknown key\\(s\\) attributes"),
         ('[keys]\nacme-id = "D-1"\n', "unknown key\\(s\\) keys"),
+        # Removed in GH #123; the error says what to write instead.
+        ('group = "psu"\n', "group was removed; use \\[fields\\] subsystem"),
+        ('subsystem = "power"\n', "move it under \\[fields\\]"),
         ("[fields]\nmpn = 226\n", "'mpn' must be a string or a list of strings"),
         ('[fields]\ndoc_type = ["a"]\n', "'doc_type' must be a string"),
         ('[fields]\nmanufacturer = ["a"]\n', "'manufacturer' must be a string"),
@@ -163,28 +166,21 @@ def test_merge_project_configs_returns_none_for_empty_chain() -> None:
 
 
 def test_merge_project_configs_nearest_scalar_wins(tmp_path: Path) -> None:
-    nearest = ProjectConfig(
-        path=tmp_path / "mpn" / ".rag.toml", fields={"mpn": "STM32H743VIT6"}, subsystem="mcu"
-    )
-    middle = ProjectConfig(
-        path=tmp_path / "subsystem" / ".rag.toml", subsystem="power", group="psu"
-    )
+    nearest = ProjectConfig(path=tmp_path / "mpn" / ".rag.toml", fields={"mpn": "STM32H743VIT6"})
+    middle = ProjectConfig(path=tmp_path / "subsystem" / ".rag.toml", project_id="proj-b")
     root = ProjectConfig(
         path=tmp_path / ".rag.toml",
         project_id="proj-a",
         fields={"manufacturer": "STMicro"},
-        subsystem="root",
     )
 
     merged = merge_project_configs([nearest, middle, root])
 
     assert merged is not None
     assert merged.path == nearest.path
-    assert merged.project_id == "proj-a"
+    # The nearest file that sets project_id wins over the root's.
+    assert merged.project_id == "proj-b"
     assert merged.fields == {"mpn": "STM32H743VIT6", "manufacturer": "STMicro"}
-    assert merged.group == "psu"
-    # nearest sets subsystem explicitly, so it wins over middle/root
-    assert merged.subsystem == "mcu"
 
 
 def test_merge_project_configs_merges_fields_by_name_nearest_wins(tmp_path: Path) -> None:
@@ -231,7 +227,7 @@ def test_get_project_config_for_merges_chain_from_given_directory(
     (tmp_path / ".rag.toml").write_text('project_id = "netdaq"\ntags = ["netdaq"]\n')
     subsystem = tmp_path / "datasheets" / "eth_phy"
     subsystem.mkdir(parents=True)
-    (subsystem / ".rag.toml").write_text('subsystem = "eth_phy"\ngroup = "ethernet"\n')
+    (subsystem / ".rag.toml").write_text('[fields]\nsubsystem = "eth_phy"\n')
     mpn_dir = subsystem / "LAN8720"
     mpn_dir.mkdir()
     (mpn_dir / ".rag.toml").write_text('[fields]\nmpn = "LAN8720A"\nmanufacturer = "Microchip"\n')
@@ -244,9 +240,7 @@ def test_get_project_config_for_merges_chain_from_given_directory(
 
     assert cfg is not None
     assert cfg.project_id == "netdaq"
-    assert cfg.subsystem == "eth_phy"
-    assert cfg.group == "ethernet"
-    assert cfg.fields == {"mpn": "LAN8720A", "manufacturer": "Microchip"}
+    assert cfg.fields == {"mpn": "LAN8720A", "manufacturer": "Microchip", "subsystem": "eth_phy"}
     assert cfg.tags == ["netdaq"]
 
 

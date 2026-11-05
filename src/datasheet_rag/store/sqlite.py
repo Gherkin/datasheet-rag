@@ -99,14 +99,14 @@ def figure_source_available(figure_image_path: str | None, figure_s3_key: str | 
 # tuple aligned is the single source of truth for the row shape.
 _INSERT_SQL = """
 INSERT INTO chunks (
-    id, doc_id, group_name, level,
+    id, doc_id, level,
     text, context_text, token_count, layout_type, page_numbers,
     chapter_title, section_title, doc_title,
     parent_id, prev_id, next_id, chapter_root_id,
     figure_s3_key, figure_caption, figure_image_path, figure_description,
     metadata_json
 ) VALUES (
-    ?, ?, ?, ?,
+    ?, ?, ?,
     ?, ?, ?, ?, ?,
     ?, ?, ?,
     ?, ?, ?, ?,
@@ -115,8 +115,7 @@ INSERT INTO chunks (
 )
 ON CONFLICT(id) DO UPDATE SET
     doc_id            = excluded.doc_id,
-    group_name        = excluded.group_name,
-    level             = excluded.level,
+    level            = excluded.level,
     text              = excluded.text,
     context_text      = excluded.context_text,
     token_count       = excluded.token_count,
@@ -176,13 +175,12 @@ def _vector_to_bytes(vector: Sequence[float]) -> bytes:
 def _chunk_row(
     chunk: Chunk,
     *,
-    group_name: str | None,
     keep_title: bool = True,
 ) -> tuple[object, ...]:
     """Flatten a :class:`Chunk` into the parameter tuple for :data:`_INSERT_SQL`.
 
-    ``group_name`` is wired in at insert time; the chunk model has none.
-    Chunks carry no project: membership is per document (``doc_projects``).
+    Chunks carry no project and no document metadata: membership and
+    metadata are per document (``doc_projects``, ``doc_metadata``).
 
     ``keep_title=False`` blanks the outgoing ``doc_title`` so the upsert's
     ``NULLIF`` defers to the stored one — how :func:`insert_chunks` drops a
@@ -195,7 +193,6 @@ def _chunk_row(
     return (
         chunk.id,
         chunk.doc_id,
-        group_name,
         int(chunk.level),
         chunk.text,
         chunk.context_text,
@@ -269,7 +266,6 @@ def insert_chunks_stats(
     chunks: Iterable[Chunk],
     vectors: Mapping[str, Sequence[float]] | None = None,
     *,
-    group_name: str | None = None,
     title_source: str = "auto",
     force_title: bool = False,
     prune: bool = False,
@@ -285,10 +281,8 @@ def insert_chunks_stats(
     vectors:
         Optional ``chunk_id -> embedding`` mapping. Only the chunks that
         have a vector here get a row in ``chunk_vecs``; the rest are
-        text-only (useful for partial re-ingest).
-    group_name:
-        Written to the column of every inserted row. Project membership is
-        not set here — see ``store.metadata.set_metadata``.
+        text-only (useful for partial re-ingest). Project membership and
+        metadata are not set here — see ``store.metadata.set_metadata``.
     title_source:
         Provenance of the ``doc_title`` these chunks carry. Ingest parses
         the title out of page 1, so it defaults to ``"auto"`` — the
@@ -329,11 +323,7 @@ def insert_chunks_stats(
                 )
                 keep_title[chunk.doc_id] = keep
 
-            row = _chunk_row(
-                chunk,
-                group_name=group_name,
-                keep_title=keep,
-            )
+            row = _chunk_row(chunk, keep_title=keep)
             cur.execute(_INSERT_SQL, row)
 
             if vectors is not None and chunk.id in vectors:
@@ -372,7 +362,6 @@ def insert_chunks(
     chunks: Iterable[Chunk],
     vectors: Mapping[str, Sequence[float]] | None = None,
     *,
-    group_name: str | None = None,
     title_source: str = "auto",
     force_title: bool = False,
     prune: bool = False,
@@ -382,7 +371,6 @@ def insert_chunks(
         conn,
         chunks,
         vectors=vectors,
-        group_name=group_name,
         title_source=title_source,
         force_title=force_title,
         prune=prune,
@@ -394,7 +382,6 @@ def insert_chunk_graph(
     graph: ChunkGraph,
     vectors: Mapping[str, Sequence[float]] | None = None,
     *,
-    group_name: str | None = None,
     title_source: str = "auto",
     force_title: bool = False,
 ) -> InsertStats:
@@ -414,7 +401,6 @@ def insert_chunk_graph(
         conn,
         graph.chunks.values(),
         vectors=vectors,
-        group_name=group_name,
         title_source=title_source,
         force_title=force_title,
         prune=True,
