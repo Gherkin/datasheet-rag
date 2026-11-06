@@ -12,6 +12,7 @@ from datasheet_rag.store.fields import list_fields
 from datasheet_rag.store.metadata import get_metadata, list_docs, set_metadata
 from datasheet_rag.store.schema import SCHEMA_VERSION, MigrationError, _migrate_to_v5, connect
 from datasheet_rag.store.sqlite import insert_chunks
+from tests.store._legacy import to_v5_layout
 
 EMBED_DIM = 4
 
@@ -46,6 +47,7 @@ def _make_v4_store(path: Path, rows: list[_Row]) -> None:
         insert_chunks(c, [_chunk(doc, 0), _chunk(doc, 1)])
         if projects:
             set_metadata(c, doc, add_projects=projects)
+    to_v5_layout(c)
     c.execute("DROP TABLE doc_project_field_values")
     c.execute("DROP TABLE doc_field_values")
     c.execute("DROP TABLE metadata_fields")

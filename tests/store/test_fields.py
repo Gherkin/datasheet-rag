@@ -24,6 +24,7 @@ from datasheet_rag.store.metadata import (
     set_title_hints,
 )
 from datasheet_rag.store.schema import SCHEMA_VERSION, MigrationError, _migrate_to_v3, connect
+from tests.store._legacy import to_v5_layout
 
 EMBED_DIM = 4
 
@@ -273,6 +274,8 @@ def _make_v2_store(path: Path, rows: list[tuple[object, ...]]) -> None:
     """A store shaped as v2 left it: mpn/manufacturer/doc_type columns, and
     free-form ``attributes`` JSON holding the pipeline's bookkeeping."""
     c = connect(path, embedding_dim=EMBED_DIM)
+    to_v5_layout(c)
+    c.execute("DROP TABLE doc_projects")
     c.execute("DROP TABLE doc_project_field_values")
     c.execute("DROP TABLE doc_field_values")
     c.execute("DROP TABLE metadata_fields")

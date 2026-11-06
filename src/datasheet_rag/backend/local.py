@@ -28,11 +28,14 @@ from datasheet_rag.backend.models import (
     ChunkPage,
     DocPage,
     DocSummary,
+    DocumentRevisions,
     FigureBytes,
     FigureCitation,
     IngestedDoc,
+    IngestLink,
     IngestResult,
     MetadataPatch,
+    RevisionSummary,
     StatsResult,
     TitleContext,
 )
@@ -71,7 +74,15 @@ from datasheet_rag.store import (
     update_figure_description,
     vector_search,
 )
-from datasheet_rag.store.fields import FieldScope, FieldShape, check_filter_fields
+from datasheet_rag.store import documents as revs
+from datasheet_rag.store.fields import (
+    FieldScope,
+    FieldShape,
+    check_filter_fields,
+    field_scopes,
+    normalize_field_patch,
+)
+from datasheet_rag.store.identity import get_identity_rule, match_documents, set_identity_rule
 from datasheet_rag.store.metadata import (
     check_write,
     join_projects,
@@ -252,22 +263,22 @@ class LocalBackend(RagBackend):
         fields: dict[str, str] | None = None,
         limit: int | None = None,
         offset: int = 0,
+        all_revisions: bool = False,
     ) -> DocPage:
-        docs = list_docs(self._get_conn(), project_id=project_id, fields=fields)
+        docs = list_docs(
+            self._get_conn(), project_id=project_id, fields=fields, all_revisions=all_revisions
+        )
         matched: dict[str, DocMetadata | None] = {d.doc_id: d for d in docs}
-
-        # The sidecar row is optional: it is written by the metadata-tagging
-        # step, which ingestion does not require. A document that skipped it
-        # is still chunked, searchable and reachable by every other read path,
-        # so list it too — with the sidecar fields left null — rather than
-        # reporting an empty catalogue for a store that plainly has documents
-        # in it. A field filter suppresses the fallback: field values live
-        # nowhere but the sidecar tables, so a document without a sidecar
-        # row cannot match one.
+        # insert_chunks gives every stored PDF a revision row (GH #124), but a
+        # store can still hold chunks without one (a sidecar deleted on its
+        # own). Such a PDF is chunked and searchable, so list it too, with its
+        # metadata left empty, rather than hide it. A field filter suppresses
+        # the fallback: a PDF without metadata cannot match one.
         if not fields:
+            known = revs.documents_of(self._get_conn(), None)
             for row in get_ingested_docs(self._get_conn(), project_id=project_id):
-                matched.setdefault(row["doc_id"], None)
-
+                if row["doc_id"] not in known:
+                    matched[row["doc_id"]] = None
         # Page before deriving title and page count: those cost two queries
         # per document, and a page should not pay for the whole store.
         ordered = sorted(matched)
@@ -285,7 +296,8 @@ class LocalBackend(RagBackend):
             )
             if row is None:
                 return None
-        return self._doc_summary(doc_id, meta)
+            return self._doc_summary(doc_id, None)
+        return self._doc_summary(meta.doc_id, meta)
 
     def _doc_summary(self, doc_id: str, d: DocMetadata | None) -> DocSummary:
         title, page_count = self._derived_doc_fields(doc_id)
@@ -293,6 +305,10 @@ class LocalBackend(RagBackend):
             return DocSummary(doc_id=doc_id, doc_title=title, page_count=page_count)
         return DocSummary(
             doc_id=d.doc_id,
+            document_id=d.document_id,
+            revision=d.revision,
+            revisions=d.revisions,
+            overrides=d.overrides,
             projects=d.projects,
             tags=d.tags,
             fields=d.fields,
@@ -320,6 +336,23 @@ class LocalBackend(RagBackend):
     def resolve_doc_id(self, doc_id: str) -> str:
         return resolve_doc_id(self._get_conn(), doc_id)
 
+    def resolve_document(self, ref: str) -> str:
+        return revs.format_document_id(self._document_id(ref))
+
+    def _document_id(self, ref: str) -> int:
+        """The document a ``D12`` or a revision doc_id (prefix ok) names."""
+        conn = self._get_conn()
+        n = revs.parse_document_ref(ref)
+        if n is not None:
+            if not revs.document_exists(conn, n):
+                raise revs.RevisionError(f"no document {revs.format_document_id(n)}")
+            return n
+        doc_id = resolve_doc_id(conn, ref)
+        found = revs.document_of(conn, doc_id)
+        if found is None:
+            raise revs.RevisionError(f"{doc_id[:12]} is not a known revision")
+        return found
+
     # -- metadata ------------------------------------------------------
     def get_metadata(self, doc_id: str) -> DocMetadata | None:
         return get_metadata(self._get_conn(), doc_id)
@@ -333,8 +366,138 @@ class LocalBackend(RagBackend):
         *,
         project_id: str | None = None,
         fields: dict[str, str] | None = None,
+        all_revisions: bool = False,
     ) -> list[DocMetadata]:
-        return list_docs(self._get_conn(), project_id=project_id, fields=fields)
+        return list_docs(
+            self._get_conn(), project_id=project_id, fields=fields, all_revisions=all_revisions
+        )
+
+    # -- revisions -----------------------------------------------------
+    def _revisions(self, document_id: int) -> DocumentRevisions:
+        conn = self._get_conn()
+        ids = revs.revisions_of(conn, document_id)
+        if not ids:
+            return DocumentRevisions(document_id=revs.format_document_id(document_id))
+        metas = {m.doc_id: m for m in (get_metadata(conn, d) for d in ids) if m is not None}
+        counts = {
+            r[0]: (int(r[1]), r[2])
+            for r in conn.execute(
+                "SELECT doc_id, COUNT(*), MIN(created_at) FROM chunks "
+                f"WHERE doc_id IN ({','.join('?' * len(ids))}) GROUP BY doc_id",
+                ids,
+            )
+        }
+        titles = get_doc_titles(conn)
+        out = []
+        for i, d in enumerate(ids):
+            m = metas.get(d)
+            n, at = counts.get(d, (0, None))
+            out.append(
+                RevisionSummary(
+                    doc_id=d,
+                    revision=m.revision if m else None,
+                    newest=i == 0,
+                    doc_title=titles.get(d),
+                    chunk_count=n,
+                    ingested_at=at,
+                    overrides=m.overrides if m else [],
+                )
+            )
+        return DocumentRevisions(document_id=revs.format_document_id(document_id), revisions=out)
+
+    def list_revisions(self, ref: str) -> DocumentRevisions:
+        return self._revisions(self._document_id(ref))
+
+    def add_revision(self, document: str, doc_id: str) -> DocumentRevisions:
+        with self._write_lock:
+            target = self._document_id(document)
+            full = resolve_doc_id(self._get_conn(), doc_id)
+            revs.add_revision(self._get_conn(), target, full)
+            return self._revisions(target)
+
+    def move_revision(
+        self, doc_id: str, *, above: str | None = None, below: str | None = None
+    ) -> DocumentRevisions:
+        with self._write_lock:
+            conn = self._get_conn()
+            document_id = revs.move_revision(
+                conn,
+                resolve_doc_id(conn, doc_id),
+                above=resolve_doc_id(conn, above) if above else None,
+                below=resolve_doc_id(conn, below) if below else None,
+            )
+            return self._revisions(document_id)
+
+    def unlink_revision(self, doc_id: str) -> DocumentRevisions:
+        with self._write_lock:
+            conn = self._get_conn()
+            return self._revisions(revs.unlink_revision(conn, resolve_doc_id(conn, doc_id)))
+
+    def get_identity_rule(self) -> str | None:
+        rule = get_identity_rule(self._get_conn())
+        return str(rule) if rule is not None else None
+
+    def set_identity_rule(self, rule: str | None) -> str | None:
+        with self._write_lock:
+            stored = set_identity_rule(self._get_conn(), rule)
+        return str(stored) if stored is not None else None
+
+    def plan_ingest_link(
+        self,
+        *,
+        doc_id: str | None = None,
+        metadata: MetadataPatch | None = None,
+        new_revision_of: str | None = None,
+    ) -> IngestLink:
+        return self._plan_link(doc_id, metadata, new_revision_of)
+
+    def _plan_link(
+        self,
+        doc_id: str | None,
+        metadata: MetadataPatch | None,
+        new_revision_of: str | None,
+    ) -> IngestLink:
+        """Decide the document a PDF goes into (see :meth:`ingest_chunk_graph`)."""
+        conn = self._get_conn()
+        existing = revs.document_of(conn, doc_id) if doc_id else None
+        if existing is not None:
+            ref = revs.format_document_id(existing)
+            if new_revision_of is not None and self._document_id(new_revision_of) != existing:
+                raise revs.RevisionError(
+                    f"{doc_id[:12] if doc_id else ''} is already stored, as a revision of "
+                    f"{ref}; move it with rag revisions unlink / add"
+                )
+            return IngestLink(action="kept", document_id=ref)
+        if new_revision_of is not None:
+            target = revs.format_document_id(self._document_id(new_revision_of))
+            return IngestLink(action="explicit", document_id=target)
+        rule = get_identity_rule(conn)
+        if rule is None or metadata is None or not metadata.fields:
+            return IngestLink(action="new")
+        scopes = field_scopes(conn)
+        values = {
+            name: v
+            for name, v in normalize_field_patch(conn, metadata.fields).items()
+            if v and scopes.get(name) == "document"
+        }
+        matches = match_documents(conn, rule, values)
+        if len(matches) > 1:
+            raise revs.RevisionError(
+                f"the identity rule ({rule}) matches "
+                + " and ".join(
+                    f"{revs.format_document_id(m.document_id)} ({', '.join(m.fields)})"
+                    for m in matches
+                )
+                + "; nothing was ingested. Name the document with --new-revision-of, "
+                "or make the field values tell them apart."
+            )
+        if matches:
+            return IngestLink(
+                action="rule",
+                document_id=revs.format_document_id(matches[0].document_id),
+                fields=matches[0].fields,
+            )
+        return IngestLink(action="new")
 
     def set_needs_reembed(self, doc_id: str, value: bool) -> None:
         with self._write_lock:
@@ -586,6 +749,7 @@ class LocalBackend(RagBackend):
         vectors: Mapping[str, Sequence[float]] | None = None,
         inferred_title: str | None = None,
         source_pdf: Path | None = None,
+        new_revision_of: str | None = None,
     ) -> IngestResult:
         # source_pdf is accepted and ignored: this store is on the same
         # machine that parsed, and save_pdf_locally already put the file in
@@ -658,18 +822,33 @@ class LocalBackend(RagBackend):
             patch.add_project(project_id)
             if patch.project is None and project_id and project_id.strip():
                 patch.project = project_id.strip()
-            # Reject an unregistered or mis-shaped field, or a project-scoped
-            # one with no project or in a project the document will not be
-            # in, before any chunk is written, not after the whole ingest has
-            # run (GH #120, #123).
-            check_write(
-                conn,
-                did,
-                add_projects=patch.add_projects,
-                remove_projects=patch.remove_projects,
-                fields=patch.fields,
-                project=patch.project,
-            )
+            # Decide which document the PDF goes into (GH #124): the one named
+            # by new_revision_of, else the one the identity rule matches, else
+            # a new one. An ambiguous match raises here, before any write.
+            link = self._plan_link(did, patch, new_revision_of)
+            try:
+                if link.action in ("explicit", "rule"):
+                    target = revs.parse_document_ref(link.document_id or "")
+                    assert target is not None
+                    # Uncommitted: it lands with the first chunk insert below.
+                    revs.ensure_revision(conn, did, document_id=target)
+                # Reject an unregistered or mis-shaped field, or a project-scoped
+                # one with no project or in a project the document will not be
+                # in, before any chunk is written, not after the whole ingest has
+                # run (GH #120, #123).
+                check_write(
+                    conn,
+                    did,
+                    add_projects=patch.add_projects,
+                    remove_projects=patch.remove_projects,
+                    fields=patch.fields,
+                    project=patch.project,
+                    this_revision=bool(patch.this_revision),
+                    revision=patch.revision,
+                )
+            except BaseException:
+                conn.rollback()
+                raise
             # The projects are joined right before each chunk insert, which
             # commits them with the chunks: no stored state has chunks without
             # their projects (a stopped describe) or projects without chunks
@@ -758,8 +937,12 @@ class LocalBackend(RagBackend):
 
                 title = infer_and_backfill_title(self._get_conn(), did)
 
+        document = revs.document_of(self._get_conn(), did)
+        document_ref = revs.format_document_id(document) if document is not None else ""
         return IngestResult(
             doc_id=did,
+            document_id=document_ref,
+            link=link.model_copy(update={"document_id": document_ref}),
             inserted=stats.inserted,
             pruned=pruned,
             described=described,
@@ -784,6 +967,7 @@ class LocalBackend(RagBackend):
         accurate_tables: bool | None = None,
         force: bool = False,
         progress: ProgressCallback | None = None,
+        new_revision_of: str | None = None,
     ) -> IngestResult:
         # Local: run the parse pipeline in-process, then embed + store. The
         # figures are already cropped to disk under figures_dir and the graph
@@ -812,6 +996,7 @@ class LocalBackend(RagBackend):
             describe_figures=do_describe,
             infer_title=infer_title,
             title_hints=parsed.title_hints,
+            new_revision_of=new_revision_of,
         )
 
     def delete_doc(self, doc_id: str) -> int:

@@ -1,0 +1,482 @@
+"""Documents and their revisions (GH #124).
+
+A *revision* is one PDF, named by its ``doc_id`` (the SHA-256 of the file).
+A *document* groups the revisions of one datasheet — Rev A, Rev B, Rev C —
+and is named ``D12``. Metadata (projects, tags, registered fields) belongs to
+the document, so it applies to every revision. A revision holds its own
+label (``"Rev C"``), title and pipeline bookkeeping, and may override a
+document's field values or tags for itself only (``store.metadata``).
+
+The revisions of a document are kept in an explicit order: ``position`` on
+``doc_metadata``, higher is newer. Nothing parses revision labels. Search and
+listings show the newest revision of each document unless asked for all.
+
+Tables:
+
+* ``documents``      – one row per document; ``tags`` is the document's tag list.
+* ``doc_metadata``   – one row per revision (see ``store.schema``), carrying
+                       ``document_id``, ``position`` and the ``revision`` label.
+* ``store_settings`` – store-wide settings; holds the identity rule
+                       (``store.identity``).
+
+Every ingested PDF has a ``doc_metadata`` row and so a document:
+:func:`ensure_revision` creates one on first sight (``insert_chunks`` calls it).
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import sqlite3
+from collections.abc import Iterable, Sequence
+from typing import NamedTuple
+
+_REF_RE = re.compile(r"^D(\d+)$")
+
+
+class RevisionError(ValueError):
+    """A revision operation that cannot be applied as asked. A ``ValueError``
+    so the HTTP layer maps it to 400."""
+
+
+def ensure_documents_tables(conn: sqlite3.Connection) -> None:
+    """Create ``documents`` and ``store_settings`` if absent. Does not commit."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS documents (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            tags       TEXT,                 -- JSON array of strings
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS store_settings (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+        """
+    )
+
+
+# ---------------------------------------------------------------------------
+# Ids
+# ---------------------------------------------------------------------------
+
+
+def format_document_id(document_id: int) -> str:
+    """The user-facing form of a document id: ``D12``."""
+    return f"D{int(document_id)}"
+
+
+def parse_document_ref(ref: str) -> int | None:
+    """``12`` for ``"D12"``; ``None`` when ``ref`` is not a document id.
+
+    Only an upper-case ``D`` counts. A doc_id is lower-case hex, so
+    ``d12`` may well be the start of one (``d12f…``) and is read as such.
+    """
+    m = _REF_RE.match(ref.strip())
+    return int(m.group(1)) if m else None
+
+
+def document_exists(conn: sqlite3.Connection, document_id: int) -> bool:
+    return (
+        conn.execute("SELECT 1 FROM documents WHERE id = ?", (document_id,)).fetchone() is not None
+    )
+
+
+class Target(NamedTuple):
+    """What a reference names: a document, and the revision when it named one."""
+
+    document_id: int
+    #: The revision's doc_id, or ``None`` when the reference was a ``D12``.
+    doc_id: str | None
+
+
+def resolve_target(conn: sqlite3.Connection, ref: str) -> Target:
+    """Resolve ``D12`` or an exact doc_id to its document.
+
+    A doc_id with no revision row yet gets one (and a new document): metadata
+    may be written before a PDF is ingested. A ``D12`` that does not exist
+    raises :class:`RevisionError`. Prefix resolution of doc_ids happens in the
+    backend (``resolve_doc_id``), before this is called.
+    """
+    n = parse_document_ref(ref)
+    if n is not None:
+        if not document_exists(conn, n):
+            raise RevisionError(f"no document {format_document_id(n)}")
+        return Target(n, None)
+    return Target(ensure_revision(conn, ref), ref)
+
+
+def document_of(conn: sqlite3.Connection, doc_id: str) -> int | None:
+    row = conn.execute(
+        "SELECT document_id FROM doc_metadata WHERE doc_id = ?", (doc_id,)
+    ).fetchone()
+    return int(row[0]) if row is not None and row[0] is not None else None
+
+
+def documents_of(conn: sqlite3.Connection, doc_ids: Iterable[str] | None) -> dict[str, int]:
+    """``{doc_id: document_id}``; ``None`` reads every revision."""
+    if doc_ids is None:
+        rows = conn.execute(
+            "SELECT doc_id, document_id FROM doc_metadata WHERE document_id IS NOT NULL"
+        ).fetchall()
+    else:
+        ids = list(doc_ids)
+        rows = []
+        for start in range(0, len(ids), 500):
+            batch = ids[start : start + 500]
+            rows.extend(
+                conn.execute(
+                    "SELECT doc_id, document_id FROM doc_metadata "
+                    f"WHERE document_id IS NOT NULL AND doc_id IN ({','.join('?' * len(batch))})",
+                    batch,
+                ).fetchall()
+            )
+    return {r[0]: int(r[1]) for r in rows}
+
+
+def revisions_of(conn: sqlite3.Connection, document_id: int) -> list[str]:
+    """The doc_ids of a document's revisions, newest first."""
+    rows = conn.execute(
+        "SELECT doc_id FROM doc_metadata WHERE document_id = ? ORDER BY position DESC, doc_id",
+        (document_id,),
+    ).fetchall()
+    return [r[0] for r in rows]
+
+
+def newest_revision(conn: sqlite3.Connection, document_id: int) -> str | None:
+    revs = revisions_of(conn, document_id)
+    return revs[0] if revs else None
+
+
+def is_newest(conn: sqlite3.Connection, doc_id: str) -> bool:
+    document_id = document_of(conn, doc_id)
+    return document_id is None or newest_revision(conn, document_id) == doc_id
+
+
+def older_revisions_sql(doc_id_column: str) -> str:
+    """A WHERE clause dropping rows of revisions that have a newer sibling.
+
+    Written as "not older" rather than "is newest" so a row with no revision
+    record at all (chunks written straight to the table) is kept, not hidden.
+    ``doc_id_column`` comes from code, never from user input.
+    """
+    return (
+        f"{doc_id_column} NOT IN (SELECT m.doc_id FROM doc_metadata m "
+        "JOIN doc_metadata n ON n.document_id = m.document_id AND n.position > m.position)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Creating and placing revisions
+# ---------------------------------------------------------------------------
+
+
+def new_document(conn: sqlite3.Connection, *, tags: Sequence[str] | None = None) -> int:
+    """Create an empty document and return its id. Does not commit."""
+    cur = conn.execute(
+        "INSERT INTO documents (tags) VALUES (?)", (json.dumps(list(tags)) if tags else None,)
+    )
+    assert cur.lastrowid is not None
+    return int(cur.lastrowid)
+
+
+def _renumber(conn: sqlite3.Connection, newest_first: Sequence[str]) -> None:
+    """Write positions so ``newest_first[0]`` is newest. Does not commit."""
+    n = len(newest_first)
+    conn.executemany(
+        "UPDATE doc_metadata SET position = ? WHERE doc_id = ?",
+        [(n - 1 - i, d) for i, d in enumerate(newest_first)],
+    )
+
+
+def ensure_revision(
+    conn: sqlite3.Connection, doc_id: str, *, document_id: int | None = None
+) -> int:
+    """Make sure ``doc_id`` has a revision row and return its document id.
+
+    A new revision goes on top of ``document_id`` when given, else into a new
+    document of its own. An existing revision is left where it is (and
+    ``document_id``, if given, must be the document it is in). Does not commit.
+    """
+    row = conn.execute(
+        "SELECT document_id FROM doc_metadata WHERE doc_id = ?", (doc_id,)
+    ).fetchone()
+    if row is not None and row[0] is not None:
+        current = int(row[0])
+        if document_id is not None and document_id != current:
+            raise RevisionError(
+                f"{doc_id[:12]} is already a revision of {format_document_id(current)}"
+            )
+        return current
+    if document_id is None:
+        document_id = new_document(conn)
+    elif not document_exists(conn, document_id):
+        raise RevisionError(f"no document {format_document_id(document_id)}")
+    top = conn.execute(
+        "SELECT COALESCE(MAX(position) + 1, 0) FROM doc_metadata WHERE document_id = ?",
+        (document_id,),
+    ).fetchone()[0]
+    conn.execute(
+        "INSERT INTO doc_metadata (doc_id, document_id, position) VALUES (?, ?, ?) "
+        "ON CONFLICT(doc_id) DO UPDATE SET document_id = excluded.document_id, "
+        "position = excluded.position",
+        (doc_id, document_id, int(top)),
+    )
+    return document_id
+
+
+def ensure_revisions(conn: sqlite3.Connection, doc_ids: Iterable[str]) -> None:
+    """:func:`ensure_revision` for each doc_id not yet known. Does not commit."""
+    known = set(documents_of(conn, list(set(doc_ids))))
+    for doc_id in dict.fromkeys(doc_ids):
+        if doc_id not in known:
+            ensure_revision(conn, doc_id)
+
+
+def _tags_of(conn: sqlite3.Connection, document_id: int) -> list[str]:
+    row = conn.execute("SELECT tags FROM documents WHERE id = ?", (document_id,)).fetchone()
+    return json.loads(row[0]) if row is not None and row[0] else []
+
+
+def _same_values(a: str | list[str], b: str | list[str]) -> bool:
+    def norm(v: str | list[str]) -> set[str]:
+        return {x.casefold() for x in ([v] if isinstance(v, str) else v)}
+
+    return norm(a) == norm(b)
+
+
+def _merge_documents(conn: sqlite3.Connection, source: int, target: int) -> None:
+    """Move ``source``'s metadata onto ``target`` and delete ``source``.
+
+    Projects and tags are joined. A field both hold with different values
+    stops the merge (nothing is written): which one is right is the user's
+    call. Does not commit.
+    """
+    from datasheet_rag.store.fields import get_document_values, get_project_values
+    from datasheet_rag.store.projects import get_projects_for_documents
+
+    src_vals = get_document_values(conn, [source]).get(source, {})
+    dst_vals = get_document_values(conn, [target]).get(target, {})
+    src_pvals = get_project_values(conn, [source]).get(source, {})
+    dst_pvals = get_project_values(conn, [target]).get(target, {})
+    conflicts = [
+        f"{name} ({format_document_id(target)}: {dst_vals[name]!r}, "
+        f"{format_document_id(source)}: {value!r})"
+        for name, value in src_vals.items()
+        if name in dst_vals and not _same_values(dst_vals[name], value)
+    ]
+    for project, values in src_pvals.items():
+        for name, value in values.items():
+            other = dst_pvals.get(project, {}).get(name)
+            if other is not None and not _same_values(other, value):
+                conflicts.append(
+                    f"{name} in {project} ({format_document_id(target)}: {other!r}, "
+                    f"{format_document_id(source)}: {value!r})"
+                )
+    if conflicts:
+        raise RevisionError(
+            "the two documents hold different values for: "
+            + "; ".join(conflicts)
+            + ". Make them agree (rag metadata <doc> --field name=value) and try again."
+        )
+
+    for name in src_vals:
+        if name not in dst_vals:
+            conn.execute(
+                "UPDATE document_field_values SET document_id = ? WHERE document_id = ? "
+                "AND field = ?",
+                (target, source, name),
+            )
+    for project, values in src_pvals.items():
+        for name in values:
+            if name not in dst_pvals.get(project, {}):
+                conn.execute(
+                    "UPDATE document_project_field_values SET document_id = ? "
+                    "WHERE document_id = ? AND project_id = ? AND field = ?",
+                    (target, source, project, name),
+                )
+    projects = get_projects_for_documents(conn, [source]).get(source, [])
+    conn.executemany(
+        "INSERT OR IGNORE INTO document_projects (document_id, project_id) VALUES (?, ?)",
+        [(target, p) for p in projects],
+    )
+    tags = list(dict.fromkeys([*_tags_of(conn, target), *_tags_of(conn, source)]))
+    conn.execute(
+        "UPDATE documents SET tags = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        (json.dumps(tags) if tags else None, target),
+    )
+    _delete_document_rows(conn, source)
+
+
+def _delete_document_rows(conn: sqlite3.Connection, document_id: int) -> None:
+    for table in ("document_field_values", "document_project_field_values", "document_projects"):
+        conn.execute(f"DELETE FROM {table} WHERE document_id = ?", (document_id,))
+    conn.execute("DELETE FROM documents WHERE id = ?", (document_id,))
+
+
+class AddResult(NamedTuple):
+    document_id: int
+    #: True when the revision's own document was merged into this one.
+    merged: bool
+
+
+def add_revision(conn: sqlite3.Connection, document_id: int, doc_id: str) -> AddResult:
+    """Put ``doc_id`` on top of ``document_id``'s revisions, as its newest.
+
+    * ``doc_id`` already in that document: it moves to the top.
+    * ``doc_id`` alone in its own document: that document is merged in
+      (see :func:`_merge_documents`) and deleted.
+    * ``doc_id`` in another document with other revisions: refused, so a
+      whole family is never moved by accident.
+
+    Commits.
+    """
+    if not document_exists(conn, document_id):
+        raise RevisionError(f"no document {format_document_id(document_id)}")
+    current = ensure_revision(conn, doc_id)
+    merged = False
+    try:
+        if current != document_id:
+            siblings = revisions_of(conn, current)
+            if len(siblings) > 1:
+                raise RevisionError(
+                    f"{doc_id[:12]} is one of {len(siblings)} revisions of "
+                    f"{format_document_id(current)}; unlink it first "
+                    f"(rag revisions unlink {doc_id[:12]})"
+                )
+            # Move the revision first: its old document is deleted by the merge.
+            conn.execute(
+                "UPDATE doc_metadata SET document_id = ? WHERE doc_id = ?", (document_id, doc_id)
+            )
+            _merge_documents(conn, current, document_id)
+            merged = True
+        order = [d for d in revisions_of(conn, document_id) if d != doc_id]
+        _renumber(conn, [doc_id, *order])
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    return AddResult(document_id, merged)
+
+
+def move_revision(
+    conn: sqlite3.Connection,
+    doc_id: str,
+    *,
+    above: str | None = None,
+    below: str | None = None,
+) -> int:
+    """Move ``doc_id`` directly above (newer than) or below (older than) a sibling.
+
+    Both must be revisions of the same document. Returns that document's id.
+    Commits.
+    """
+    if (above is None) == (below is None):
+        raise RevisionError("give exactly one of above / below")
+    other = above if above is not None else below
+    assert other is not None
+    if other == doc_id:
+        raise RevisionError("cannot move a revision relative to itself")
+    document_id = document_of(conn, doc_id)
+    if document_id is None or document_of(conn, other) != document_id:
+        raise RevisionError(
+            f"{doc_id[:12]} and {other[:12]} are not revisions of the same document"
+        )
+    order = [d for d in revisions_of(conn, document_id) if d != doc_id]
+    i = order.index(other)
+    order.insert(i if above is not None else i + 1, doc_id)
+    _renumber(conn, order)
+    conn.commit()
+    return document_id
+
+
+def unlink_revision(conn: sqlite3.Connection, doc_id: str) -> int:
+    """Take ``doc_id`` out of its document into a new one, and return the new id.
+
+    The new document starts with a copy of the old one's projects, tags and
+    field values, so the revision stays in the same projects and keeps the
+    same values. Its own overrides stay with it. Refused when the revision is
+    the document's only one. Commits.
+    """
+    old = document_of(conn, doc_id)
+    if old is None:
+        raise RevisionError(f"{doc_id[:12]} is not a known revision")
+    siblings = revisions_of(conn, old)
+    if len(siblings) < 2:
+        raise RevisionError(
+            f"{doc_id[:12]} is the only revision of {format_document_id(old)}; nothing to unlink"
+        )
+    try:
+        new = new_document(conn, tags=_tags_of(conn, old))
+        conn.execute(
+            "INSERT INTO document_projects (document_id, project_id) "
+            "SELECT ?, project_id FROM document_projects WHERE document_id = ?",
+            (new, old),
+        )
+        conn.execute(
+            "INSERT INTO document_field_values (document_id, field, value, position) "
+            "SELECT ?, field, value, position FROM document_field_values WHERE document_id = ?",
+            (new, old),
+        )
+        conn.execute(
+            "INSERT INTO document_project_field_values "
+            "(document_id, project_id, field, value, position) "
+            "SELECT ?, project_id, field, value, position FROM document_project_field_values "
+            "WHERE document_id = ?",
+            (new, old),
+        )
+        conn.execute(
+            "UPDATE doc_metadata SET document_id = ?, position = 0 WHERE doc_id = ?",
+            (new, doc_id),
+        )
+        _renumber(conn, [d for d in siblings if d != doc_id])
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    return new
+
+
+def delete_revision(conn: sqlite3.Connection, doc_id: str) -> int:
+    """Drop ``doc_id``'s revision row and overrides. Does not commit.
+
+    The document goes with its last revision, with all its metadata. Returns
+    the number of revision rows deleted (0 or 1).
+    """
+    document_id = document_of(conn, doc_id)
+    conn.execute("DELETE FROM doc_field_values WHERE doc_id = ?", (doc_id,))
+    cur = conn.execute("DELETE FROM doc_metadata WHERE doc_id = ?", (doc_id,))
+    if document_id is not None:
+        remaining = revisions_of(conn, document_id)
+        if remaining:
+            _renumber(conn, remaining)
+        else:
+            _delete_document_rows(conn, document_id)
+    return int(cur.rowcount)
+
+
+# ---------------------------------------------------------------------------
+# Store settings
+# ---------------------------------------------------------------------------
+
+
+def get_setting(conn: sqlite3.Connection, key: str) -> str | None:
+    row = conn.execute("SELECT value FROM store_settings WHERE key = ?", (key,)).fetchone()
+    return row[0] if row is not None else None
+
+
+def set_setting(conn: sqlite3.Connection, key: str, value: str | None) -> None:
+    """Set (or with ``None`` remove) a store setting. Does not commit."""
+    if value is None:
+        conn.execute("DELETE FROM store_settings WHERE key = ?", (key,))
+    else:
+        conn.execute(
+            "INSERT INTO store_settings (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )

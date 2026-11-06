@@ -608,6 +608,9 @@ def test_server_ingest_pdf_streams_sse(client, monkeypatch) -> None:
             result = json.loads(data_line[len("data:") :].strip())
     assert result == {
         "doc_id": did,
+        # The store step is stubbed, so the link fields keep their defaults.
+        "document_id": "",
+        "link": None,
         "inserted": 10,
         "pruned": 0,
         "described": 0,

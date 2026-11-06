@@ -54,6 +54,7 @@ from datasheet_rag.store import (
     revoke_api_key,
     stored_embedding_dim,
 )
+from datasheet_rag.store.documents import parse_document_ref
 from datasheet_rag.store.fields import FieldScope, FieldShape, scopes_of, shapes_of
 from datasheet_rag.store.metadata import check_patch_for
 
@@ -120,6 +121,41 @@ class RegisterFieldBody(BaseModel):
 
 class NeedsReembedBody(BaseModel):
     value: bool
+
+
+class AddRevisionBody(BaseModel):
+    document: str
+    doc_id: str
+
+
+class MoveRevisionBody(BaseModel):
+    doc_id: str
+    above: str | None = None
+    below: str | None = None
+
+
+class UnlinkRevisionBody(BaseModel):
+    doc_id: str
+
+
+class IdentityRuleBody(BaseModel):
+    rule: str | None = None
+
+
+class LinkPlanBody(BaseModel):
+    doc_id: str | None = None
+    metadata: MetadataPatch | None = None
+    new_revision_of: str | None = None
+
+
+def _metadata_ref(be: LocalBackend, ref: str) -> str:
+    """A metadata target: a ``D12`` stays a document (after checking it
+    exists), anything else resolves to a full revision doc_id. Resolving
+    first means a prefix or an unknown id never creates a revision row."""
+    if parse_document_ref(ref) is not None:
+        be.resolve_document(ref)
+        return ref
+    return be.resolve_doc_id(ref)
 
 
 def _reject_group_name(present: bool) -> None:
@@ -335,7 +371,51 @@ def build_app() -> FastAPI:
 
     @app.get("/documents/resolve/{doc_id}", dependencies=dep)
     def documents_resolve(doc_id: str, be: LocalBackend = Depends(get_backend)) -> dict[str, Any]:
-        return {"doc_id": be.resolve_doc_id(doc_id)}
+        # A D12 resolves to its newest revision; a doc_id prefix to its document.
+        return {"doc_id": be.resolve_doc_id(doc_id), "document_id": be.resolve_document(doc_id)}
+
+    @app.get("/documents/{ref}/revisions", dependencies=dep)
+    def document_revisions(ref: str, be: LocalBackend = Depends(get_backend)) -> dict[str, Any]:
+        return be.list_revisions(ref).model_dump(mode="json")
+
+    # -- revisions (GH #124) ----------------------------------------------
+    @app.post("/revisions/add", dependencies=ingest_dep)
+    def revisions_add(
+        body: AddRevisionBody, be: LocalBackend = Depends(get_backend)
+    ) -> dict[str, Any]:
+        return be.add_revision(body.document, body.doc_id).model_dump(mode="json")
+
+    @app.post("/revisions/move", dependencies=ingest_dep)
+    def revisions_move(
+        body: MoveRevisionBody, be: LocalBackend = Depends(get_backend)
+    ) -> dict[str, Any]:
+        return be.move_revision(body.doc_id, above=body.above, below=body.below).model_dump(
+            mode="json"
+        )
+
+    @app.post("/revisions/unlink", dependencies=ingest_dep)
+    def revisions_unlink(
+        body: UnlinkRevisionBody, be: LocalBackend = Depends(get_backend)
+    ) -> dict[str, Any]:
+        return be.unlink_revision(body.doc_id).model_dump(mode="json")
+
+    @app.get("/identity-rule", dependencies=dep)
+    def identity_rule(be: LocalBackend = Depends(get_backend)) -> dict[str, Any]:
+        return {"rule": be.get_identity_rule()}
+
+    @app.put("/identity-rule", dependencies=ingest_dep)
+    def identity_rule_set(
+        body: IdentityRuleBody, be: LocalBackend = Depends(get_backend)
+    ) -> dict[str, Any]:
+        return {"rule": be.set_identity_rule(body.rule)}
+
+    @app.post("/ingest/link-plan", dependencies=dep)
+    def ingest_link_plan(
+        body: LinkPlanBody, be: LocalBackend = Depends(get_backend)
+    ) -> dict[str, Any]:
+        return be.plan_ingest_link(
+            doc_id=body.doc_id, metadata=body.metadata, new_revision_of=body.new_revision_of
+        ).model_dump(mode="json")
 
     @app.get("/documents/{doc_id}/pdf", dependencies=dep)
     def document_pdf(doc_id: str, be: LocalBackend = Depends(get_backend)) -> Response:
@@ -400,7 +480,11 @@ def build_app() -> FastAPI:
 
     @app.get("/documents/{doc_id}/metadata", dependencies=dep)
     def document_metadata(doc_id: str, be: LocalBackend = Depends(get_backend)) -> Response:
-        md = be.get_metadata(doc_id)
+        try:
+            ref = _metadata_ref(be, doc_id)
+        except ValueError:
+            return Response(status_code=204)
+        md = be.get_metadata(ref)
         if md is None:
             return Response(status_code=204)
         return JSONResponse(md.model_dump(mode="json"))
@@ -409,8 +493,7 @@ def build_app() -> FastAPI:
     def document_set_metadata(
         doc_id: str, patch: MetadataPatch, be: LocalBackend = Depends(get_backend)
     ) -> dict[str, Any]:
-        # Resolve first: a prefix or an unknown id must not create a sidecar row.
-        return be.set_metadata(be.resolve_doc_id(doc_id), patch).model_dump(mode="json")
+        return be.set_metadata(_metadata_ref(be, doc_id), patch).model_dump(mode="json")
 
     @app.put("/documents/{doc_id}/title", dependencies=ingest_dep)
     def document_set_title(
@@ -460,6 +543,7 @@ def build_app() -> FastAPI:
         field: list[str] | None = Query(None),
         limit: int | None = Query(None, ge=1),
         offset: int = Query(0, ge=0),
+        all_revisions: bool = False,
         be: LocalBackend = Depends(get_backend),
     ) -> dict[str, Any]:
         _reject_group_name(group_name is not None)
@@ -468,6 +552,7 @@ def build_app() -> FastAPI:
             fields=_parse_field_params(field),
             limit=limit,
             offset=offset,
+            all_revisions=all_revisions,
         )
         return {
             "documents": [d.model_dump(mode="json") for d in page.documents],
@@ -480,10 +565,13 @@ def build_app() -> FastAPI:
         project_id: str | None = None,
         group_name: str | None = None,
         field: list[str] | None = Query(None),
+        all_revisions: bool = False,
         be: LocalBackend = Depends(get_backend),
     ) -> dict[str, Any]:
         _reject_group_name(group_name is not None)
-        docs = be.list_docs(project_id=project_id, fields=_parse_field_params(field))
+        docs = be.list_docs(
+            project_id=project_id, fields=_parse_field_params(field), all_revisions=all_revisions
+        )
         return {"documents": [d.model_dump(mode="json") for d in docs]}
 
     # -- metadata fields (GH #120) ----------------------------------------
@@ -667,6 +755,7 @@ def build_app() -> FastAPI:
                 title_hints=title_hints,
                 vectors=vectors,
                 inferred_title=data.get("inferred_title"),
+                new_revision_of=data.get("new_revision_of"),
             )
         except Exception as exc:
             audit(
@@ -748,6 +837,15 @@ def build_app() -> FastAPI:
                 check_patch_for(
                     shapes_of(specs), scopes_of(specs), fields=metadata.fields, project=project
                 )
+            # Which document the PDF goes into (GH #124): an ambiguous rule
+            # match or an unknown new_revision_of fails here, not after the parse.
+            from datasheet_rag.storage import _content_hash
+
+            be.plan_ingest_link(
+                doc_id=doc_id or _content_hash(tmp_path),
+                metadata=metadata,
+                new_revision_of=opts.get("new_revision_of"),
+            )
         except (BackendUnavailableError, ValueError) as exc:
             tmp_path.unlink(missing_ok=True)
             audit(
@@ -795,6 +893,7 @@ def build_app() -> FastAPI:
                     describe_figures=not skip_figures and not skip_describe,
                     infer_title=bool(opts.get("infer_title", False)),
                     title_hints=parsed.title_hints,
+                    new_revision_of=opts.get("new_revision_of"),
                 )
                 loop.call_soon_threadsafe(
                     queue.put_nowait, ("result", result.model_dump(mode="json"))

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import base64
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -20,9 +20,23 @@ from datasheet_rag.store.projects import check_project_change
 
 
 class DocSummary(BaseModel):
-    """A document listing row: sidecar metadata + a couple derived fields."""
+    """A listing row: one revision and its document's metadata (GH #124).
 
+    A listing shows each document's newest revision unless asked for all.
+    ``projects`` / ``tags`` / ``fields`` / ``project_fields`` are the
+    revision's effective values; ``overrides`` names those set on this
+    revision only.
+    """
+
+    #: The revision (one PDF).
     doc_id: str
+    #: Its document, ``"D12"``.
+    document_id: str = ""
+    #: The revision label, e.g. ``"Rev C"``.
+    revision: str | None = None
+    #: Every revision of the document, newest first.
+    revisions: list[str] = Field(default_factory=list)
+    overrides: list[str] = Field(default_factory=list)
     #: Every project the document belongs to, sorted.
     projects: list[str] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
@@ -162,6 +176,11 @@ class MetadataPatch(BaseModel):
     tags: list[str] | None = None
     fields: dict[str, str | list[str] | None] | None = None
     project: str | None = None
+    #: Write ``tags`` / ``fields`` on this one revision instead of on its
+    #: document (GH #124). Needs a revision's doc_id; no project changes.
+    this_revision: bool | None = None
+    #: The revision label (``"Rev C"``); ``""`` clears it. Always per revision.
+    revision: str | None = None
 
     @model_validator(mode="after")
     def _check_projects(self) -> MetadataPatch:
@@ -182,16 +201,77 @@ class MetadataPatch(BaseModel):
 
     def kwargs(self) -> dict[str, Any]:
         """Return only the set (non-None) fields as set_metadata kwargs."""
-        return self.model_dump(exclude_none=True)
+        out = self.model_dump(exclude_none=True)
+        if not out.get("this_revision"):
+            out.pop("this_revision", None)
+        return out
 
     def is_empty(self) -> bool:
         return not self.kwargs()
+
+    def without_revision(self) -> MetadataPatch:
+        """A copy without the per-revision parts (``this_revision``, ``revision``)."""
+        return self.model_copy(update={"this_revision": None, "revision": None})
+
+
+class RevisionSummary(BaseModel):
+    """One revision in a document's list of revisions."""
+
+    doc_id: str
+    revision: str | None = None
+    newest: bool = False
+    doc_title: str | None = None
+    chunk_count: int = 0
+    ingested_at: str | None = None
+    overrides: list[str] = Field(default_factory=list)
+
+
+class DocumentRevisions(BaseModel):
+    """A document and its revisions, newest first (GH #124)."""
+
+    document_id: str
+    revisions: list[RevisionSummary] = Field(default_factory=list)
+
+
+class IngestLink(BaseModel):
+    """Which document an ingested PDF went into, and why (GH #124).
+
+    ``action``:
+
+    * ``new``      – a new document of its own;
+    * ``explicit`` – the newest revision of the document ``--new-revision-of`` named;
+    * ``rule``     – the newest revision of the one document the identity rule matched;
+    * ``kept``     – a PDF already stored; it stays in its document.
+
+    ``document_id`` is ``None`` for a ``new`` link that has not been written yet.
+    ``fields`` are the rule fields that matched.
+    """
+
+    action: Literal["new", "explicit", "rule", "kept"]
+    document_id: str | None = None
+    fields: list[str] = Field(default_factory=list)
+
+    def describe(self) -> str:
+        """One line for ingest output."""
+        if self.action == "explicit":
+            return f"linked to {self.document_id} as newest revision (--new-revision-of)"
+        if self.action == "rule":
+            return (
+                f"linked to {self.document_id} as newest revision (rule: {', '.join(self.fields)})"
+            )
+        if self.action == "kept":
+            return f"kept in {self.document_id}"
+        return f"new document {self.document_id}" if self.document_id else "new document"
 
 
 class IngestResult(BaseModel):
     """Outcome of an ingest call."""
 
     doc_id: str
+    #: The document the PDF is a revision of, ``"D12"``.
+    document_id: str = ""
+    #: Which document the PDF went into, and why (GH #124).
+    link: IngestLink | None = None
     inserted: int = 0
     # Stale chunks deleted because the new graph no longer carries their ids
     # (GH #44). Worth reporting: nobody asked for those rows to go.

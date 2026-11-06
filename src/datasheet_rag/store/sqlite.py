@@ -29,6 +29,12 @@ from datasheet_rag.models.chunk import (
     ChunkMetadata,
     LayoutType,
 )
+from datasheet_rag.store.documents import (
+    ensure_revisions,
+    format_document_id,
+    newest_revision,
+    parse_document_ref,
+)
 from datasheet_rag.store.metadata import (
     get_title_source,
     set_title_source,
@@ -180,7 +186,7 @@ def _chunk_row(
     """Flatten a :class:`Chunk` into the parameter tuple for :data:`_INSERT_SQL`.
 
     Chunks carry no project and no document metadata: membership and
-    metadata are per document (``doc_projects``, ``doc_metadata``).
+    metadata belong to the document (``store.documents``, ``store.metadata``).
 
     ``keep_title=False`` blanks the outgoing ``doc_title`` so the upsert's
     ``NULLIF`` defers to the stored one — how :func:`insert_chunks` drops a
@@ -350,6 +356,10 @@ def insert_chunks_stats(
                     doc_id,
                 )
             pruned += dropped
+        # Every stored PDF is a revision of some document (GH #124). One the
+        # store has not seen becomes a document of its own; ingest places a
+        # new revision of an existing document before it gets here.
+        ensure_revisions(conn, keep_title)
         conn.commit()
     except Exception:
         conn.rollback()
@@ -660,8 +670,16 @@ def resolve_doc_id(conn: sqlite3.Connection, doc_id: str) -> str:
     read or copy comfortably. Any unambiguous prefix that matches exactly
     one ingested document resolves to that document's full doc_id.
 
+    A document id (``D12``, GH #124) resolves to its newest revision.
+
     Raises ``ValueError`` if the prefix matches zero or more than one document.
     """
+    n = parse_document_ref(doc_id)
+    if n is not None:
+        newest = newest_revision(conn, n)
+        if newest is None:
+            raise ValueError(f"No document {format_document_id(n)}.")
+        return newest
     # A full id wins over longer ids that start with it (`lm317` vs `lm317a`).
     if conn.execute("SELECT 1 FROM chunks WHERE doc_id = ? LIMIT 1", (doc_id,)).fetchone():
         return doc_id

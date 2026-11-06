@@ -144,7 +144,7 @@ def test_field_bad_format_rejected(db_path: Path) -> None:
 
 
 def test_attr_options_are_gone(db_path: Path) -> None:
-    result = _meta(db_path, DOC_A, "--attr", "revision=B")
+    result = _meta(db_path, DOC_A, "--attr", "drawing=B")
     assert result.exit_code == 2 and "No such option" in result.output
 
 
@@ -242,32 +242,32 @@ def test_blank_scalar_beats_project_config_default(
 def test_project_config_supplies_fields(
     db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    assert _fields("add", "revision", "--db", str(db_path)).exit_code == 0
-    (tmp_path / ".rag.toml").write_text('[fields]\ndoc_type = "technical-manual"\nrevision = "A"\n')
+    assert _fields("add", "drawing", "--db", str(db_path)).exit_code == 0
+    (tmp_path / ".rag.toml").write_text('[fields]\ndoc_type = "technical-manual"\ndrawing = "A"\n')
     monkeypatch.chdir(tmp_path)
     result = _meta(db_path, DOC_A, "--mpn", "V700")
     assert result.exit_code == 0, result.output
     meta = _get_json(db_path, DOC_A)
-    assert meta["fields"] == {"mpn": ["V700"], "doc_type": "technical-manual", "revision": "A"}
+    assert meta["fields"] == {"mpn": ["V700"], "doc_type": "technical-manual", "drawing": "A"}
 
 
 def test_field_flags_beat_project_config_fields(
     db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _fields("add", "revision", "--db", str(db_path))
+    _fields("add", "drawing", "--db", str(db_path))
     _fields("add", "owner", "--db", str(db_path))
     _meta(db_path, DOC_A, "--field", "owner=seeded")
-    (tmp_path / ".rag.toml").write_text('[fields]\nrevision = "A"\nowner = "hw"\n')
+    (tmp_path / ".rag.toml").write_text('[fields]\ndrawing = "A"\nowner = "hw"\n')
     monkeypatch.chdir(tmp_path)
-    result = _meta(db_path, DOC_A, "--field", "revision=C", "--unset-field", "owner")
+    result = _meta(db_path, DOC_A, "--field", "drawing=C", "--unset-field", "owner")
     assert result.exit_code == 0, result.output
-    assert _get_json(db_path, DOC_A)["fields"] == {"revision": "C"}
+    assert _get_json(db_path, DOC_A)["fields"] == {"drawing": "C"}
 
 
 def test_old_attributes_table_is_an_unknown_key(
     db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    (tmp_path / ".rag.toml").write_text('[attributes]\nrevision = "B"\n')
+    (tmp_path / ".rag.toml").write_text('[attributes]\ndrawing = "B"\n')
     monkeypatch.chdir(tmp_path)
     result = _meta(db_path, DOC_A, "--mpn", "V700")
     assert result.exit_code == 1

@@ -688,7 +688,9 @@ def test_project_change_is_validated_before_writing(conn: sqlite3.Connection) ->
 def test_delete_metadata_drops_project_memberships(conn: sqlite3.Connection) -> None:
     set_metadata(conn, "doc1", add_projects=["p"])
     delete_metadata(conn, "doc1")
-    assert conn.execute("SELECT COUNT(*) FROM doc_projects").fetchone()[0] == 0
+    # The document went with its only revision, and its memberships with it.
+    assert conn.execute("SELECT COUNT(*) FROM document_projects").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0] == 0
 
 
 def test_mpn_list_keeps_order_and_drops_duplicates(conn: sqlite3.Connection) -> None:

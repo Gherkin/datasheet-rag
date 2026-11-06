@@ -8,17 +8,23 @@ Tables created by :func:`init_schema`:
 * ``chunk_fts``      – FTS5 virtual table providing BM25 keyword search
                        over ``context_text`` and ``text``. Content-linked
                        to ``chunks`` via triggers.
-* ``doc_metadata``   – sidecar table for document-level metadata
-                       (tags) and the pipeline's bookkeeping (title
-                       provenance, title hints, the re-embed marker).
-                       Independent of ``chunks`` so metadata can be
-                       registered before ingestion completes.
-* ``metadata_fields`` – registry of typed, filterable fields (GH #120),
-  ``doc_field_values``, their per-document values and the per-(document,
-  ``doc_project_field_values`` project) values of project-scoped fields
-                       (GH #123) — see :mod:`datasheet_rag.store.fields`.
-* ``doc_projects``   – project membership, one row per (document, project)
-                       (GH #121) — see :mod:`datasheet_rag.store.projects`.
+* ``documents``      – one row per document (``D12``), the level metadata
+                       targets; groups the revisions of a datasheet (GH #124)
+                       — see :mod:`datasheet_rag.store.documents`.
+* ``doc_metadata``   – one row per revision (one PDF): its document, its
+                       place in it, its label and tag override, and the
+                       pipeline's bookkeeping (title provenance, title
+                       hints, the re-embed marker). Independent of
+                       ``chunks`` so metadata can be registered before
+                       ingestion completes.
+* ``metadata_fields`` – registry of typed, filterable fields (GH #120), and
+  ``document_field_values``, their values: per document, per (document,
+  ``document_project_field_values``, project) for project-scoped fields
+  ``doc_field_values``  (GH #123), and per-revision overrides — see
+                       :mod:`datasheet_rag.store.fields`.
+* ``document_projects`` – project membership, one row per (document,
+                       project) (GH #121) — see :mod:`datasheet_rag.store.projects`.
+* ``store_settings`` – store-wide settings (the identity rule, GH #124).
 * ``schema_version`` – single-row table recording the schema version and
                        the embedding dimension the DB was created with.
 """
@@ -37,7 +43,7 @@ from datasheet_rag.config import get_settings
 
 console = Console()
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # Columns added in each schema version, used for in-place migration of
 # databases created at an older version. Each entry is (column_name, DDL
@@ -113,12 +119,7 @@ def _migrate_to_v3(conn: sqlite3.Connection) -> None:
     migration fail with the document ids and names rather than lose data.
     One transaction: a failure leaves the v2 store as it was.
     """
-    from datasheet_rag.store.fields import (
-        _coerce,
-        ensure_field_tables,
-        field_scopes,
-        write_field_values,
-    )
+    from datasheet_rag.store.fields import _coerce, _write_values, ensure_field_tables
 
     if conn.in_transaction:
         conn.commit()
@@ -139,19 +140,15 @@ def _migrate_to_v3(conn: sqlite3.Connection) -> None:
         has_attrs = "attributes" in cols
         select = ["doc_id", *present, *(["attributes"] if has_attrs else [])]
         rows = conn.execute(f"SELECT {', '.join(select)} FROM doc_metadata").fetchall()
-        scopes = field_scopes(conn)
         problems: list[str] = []
         for row in rows:
-            patch: dict[str, list[str]] = {}
             for col in present:
                 raw = row[col]
                 if not raw:
                     continue
-                if col == "mpn":
-                    patch[col] = _coerce(raw.split(","), "list")
-                else:
-                    patch[col] = _coerce(raw, "single")
-            write_field_values(conn, row["doc_id"], patch, scopes=scopes)
+                moved = _coerce(raw.split(","), "list") if col == "mpn" else _coerce(raw, "single")
+                # v3 kept document values per doc_id here; v6 moves them on.
+                _write_values(conn, row["doc_id"], col, moved)
             if not has_attrs or not row["attributes"]:
                 continue
             attrs = json.loads(row["attributes"])
@@ -198,8 +195,6 @@ def _migrate_to_v4(conn: sqlite3.Connection) -> None:
 
     One transaction: a failure leaves the v3 store as it was.
     """
-    from datasheet_rag.store.projects import ensure_projects_table
-
     if conn.in_transaction:
         conn.commit()
     conn.execute("BEGIN IMMEDIATE")
@@ -224,7 +219,7 @@ def _migrate_to_v4(conn: sqlite3.Connection) -> None:
                 "`rag fields remove projects --clear` (--clear deletes those "
                 "values)."
             )
-        ensure_projects_table(conn)
+        _ensure_legacy_tables(conn)
         for table, index in (
             ("chunks", "ix_chunks_project_id"),
             ("doc_metadata", "ix_doc_metadata_project"),
@@ -304,12 +299,7 @@ def _migrate_to_v5(conn: sqlite3.Connection) -> None:
     lose or guess a value. One transaction: a failure leaves the v4 store as
     it was.
     """
-    from datasheet_rag.store.fields import (
-        SCOPE_COLUMN_DDL,
-        _write_project_values,
-        ensure_field_tables,
-    )
-    from datasheet_rag.store.projects import ensure_projects_table, get_projects_for_docs
+    from datasheet_rag.store.fields import SCOPE_COLUMN_DDL, ensure_field_tables
 
     if conn.in_transaction:
         conn.commit()
@@ -339,10 +329,12 @@ def _migrate_to_v5(conn: sqlite3.Connection) -> None:
         if field_cols and "scope" not in field_cols:
             conn.execute(f"ALTER TABLE metadata_fields ADD COLUMN {SCOPE_COLUMN_DDL}")
         ensure_field_tables(conn)
-        ensure_projects_table(conn)
+        _ensure_legacy_tables(conn)
 
         values, problems = _v5_values(conn)
-        projects = get_projects_for_docs(conn, list(values))
+        projects: dict[str, list[str]] = {}
+        for r in conn.execute("SELECT doc_id, project_id FROM doc_projects ORDER BY project_id"):
+            projects.setdefault(r[0], []).append(r[1])
         for doc_id, value in values.items():
             if doc_id not in projects:
                 problems.append(
@@ -358,8 +350,11 @@ def _migrate_to_v5(conn: sqlite3.Connection) -> None:
                 "then open the store again:\n  " + "\n  ".join(problems)
             )
         for doc_id, value in values.items():
-            for project in projects[doc_id]:
-                _write_project_values(conn, doc_id, project, "subsystem", [value])
+            conn.executemany(
+                "INSERT OR REPLACE INTO doc_project_field_values"
+                "(doc_id, project_id, field, value, position) VALUES (?, ?, 'subsystem', ?, 0)",
+                [(doc_id, project, value) for project in projects[doc_id]],
+            )
 
         for table, index, cols in (
             ("doc_metadata", "ix_doc_metadata_group", ("group_name", "subsystem")),
@@ -377,9 +372,163 @@ def _migrate_to_v5(conn: sqlite3.Connection) -> None:
         raise
 
 
+def _ensure_legacy_tables(conn: sqlite3.Connection) -> None:
+    """The v4/v5 tables keyed on doc_id: project membership and project-scoped
+    values. The v4 and v5 migrations write them; v6 moves their rows onto
+    documents and drops them. Does not commit."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS doc_projects (
+            doc_id     TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            PRIMARY KEY (doc_id, project_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS doc_project_field_values (
+            doc_id     TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            field      TEXT NOT NULL,
+            value      TEXT NOT NULL COLLATE NOCASE,
+            position   INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (doc_id, project_id, field, value)
+        )
+        """
+    )
+
+
+#: Field names v6 reserves for its revision columns and listing keys.
+_V6_RESERVED = (
+    "revision",
+    "revisions",
+    "document",
+    "document_id",
+    "newest",
+    "overrides",
+    "position",
+)
+
+#: Columns v6 adds to ``doc_metadata``.
+_V6_REVISION_COLUMNS = (
+    ("document_id", "INTEGER"),
+    ("position", "INTEGER NOT NULL DEFAULT 0"),
+    ("revision", "TEXT"),
+)
+
+
+def _migrate_to_v6(conn: sqlite3.Connection) -> None:
+    """Move metadata from each PDF onto a document (GH #124).
+
+    Every stored PDF becomes the only revision of a new document (``D1``,
+    ``D2``, … in doc_id order). The PDF's tags, project memberships, field
+    values and project-scoped values move to its document: ``doc_projects``
+    → ``document_projects``, ``doc_field_values`` → ``document_field_values``
+    (``doc_field_values`` stays, empty, as the per-revision override table),
+    ``doc_project_field_values`` → ``document_project_field_values``. The two
+    old tables are dropped. Nothing is linked: revisions are linked by hand
+    or by the identity rule from here on.
+
+    A registered field whose name v6 reserves makes the migration fail
+    rather than guess a new name. One transaction: a failure leaves the v5
+    store as it was.
+    """
+    from datasheet_rag.store.documents import ensure_documents_tables
+    from datasheet_rag.store.fields import ensure_field_tables
+    from datasheet_rag.store.projects import ensure_projects_table
+
+    if conn.in_transaction:
+        conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        row = conn.execute("SELECT version FROM schema_version WHERE id = 1").fetchone()
+        if row is not None and int(row["version"]) >= 6:
+            conn.commit()
+            return
+        has_fields = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'metadata_fields'"
+        ).fetchone()
+        if has_fields:
+            marks = ",".join("?" * len(_V6_RESERVED))
+            clash = [
+                r[0]
+                for r in conn.execute(
+                    f"SELECT name FROM metadata_fields WHERE name IN ({marks}) ORDER BY name",
+                    _V6_RESERVED,
+                )
+            ]
+            if clash:
+                raise MigrationError(
+                    f"cannot upgrade the store to v6: registered field(s) {', '.join(clash)} "
+                    "use names that are now reserved. With the previous version, copy "
+                    "out any values they hold, then remove each with "
+                    "`rag fields remove <name> --clear` (--clear deletes those values)."
+                )
+        ensure_documents_tables(conn)
+        ensure_field_tables(conn)
+        ensure_projects_table(conn)
+        _ensure_legacy_tables(conn)
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(doc_metadata)")}
+        for col, ddl in _V6_REVISION_COLUMNS:
+            if col not in cols:
+                conn.execute(f"ALTER TABLE doc_metadata ADD COLUMN {col} {ddl}")
+        conn.execute(
+            "INSERT OR IGNORE INTO doc_metadata (doc_id) "
+            "SELECT doc_id FROM chunks UNION SELECT doc_id FROM doc_projects "
+            "UNION SELECT doc_id FROM doc_field_values "
+            "UNION SELECT doc_id FROM doc_project_field_values"
+        )
+        pending = conn.execute(
+            "SELECT doc_id, tags FROM doc_metadata WHERE document_id IS NULL ORDER BY doc_id"
+        ).fetchall()
+        for r in pending:
+            tags = json.loads(r["tags"]) if r["tags"] else []
+            cur = conn.execute(
+                "INSERT INTO documents (tags) VALUES (?)", (json.dumps(tags) if tags else None,)
+            )
+            conn.execute(
+                "UPDATE doc_metadata SET document_id = ?, position = 0, tags = NULL "
+                "WHERE doc_id = ?",
+                (cur.lastrowid, r["doc_id"]),
+            )
+        conn.execute(
+            "INSERT OR IGNORE INTO document_projects (document_id, project_id) "
+            "SELECT m.document_id, p.project_id FROM doc_projects p "
+            "JOIN doc_metadata m ON m.doc_id = p.doc_id"
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO document_field_values (document_id, field, value, position) "
+            "SELECT m.document_id, v.field, v.value, v.position FROM doc_field_values v "
+            "JOIN doc_metadata m ON m.doc_id = v.doc_id"
+        )
+        conn.execute("DELETE FROM doc_field_values")
+        conn.execute(
+            "INSERT OR IGNORE INTO document_project_field_values "
+            "(document_id, project_id, field, value, position) "
+            "SELECT m.document_id, v.project_id, v.field, v.value, v.position "
+            "FROM doc_project_field_values v JOIN doc_metadata m ON m.doc_id = v.doc_id"
+        )
+        conn.execute("DROP TABLE doc_projects")
+        conn.execute("DROP TABLE doc_project_field_values")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS ix_doc_metadata_document ON doc_metadata(document_id)"
+        )
+        conn.execute("UPDATE schema_version SET version = 6 WHERE id = 1")
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+
+
 #: Data migrations run when an older store is opened, keyed by the version
 #: they bring it to. Run after that version's chunk columns are added.
-_MIGRATIONS_BY_VERSION = {3: _migrate_to_v3, 4: _migrate_to_v4, 5: _migrate_to_v5}
+_MIGRATIONS_BY_VERSION = {
+    3: _migrate_to_v3,
+    4: _migrate_to_v4,
+    5: _migrate_to_v5,
+    6: _migrate_to_v6,
+}
 
 
 def connect(
@@ -823,14 +972,23 @@ def init_schema(conn: sqlite3.Connection, *, embedding_dim: int) -> None:
     # ---- chunk_fts -------------------------------------------------------
     _ensure_fts(conn)
 
+    # ---- documents / store_settings --------------------------------------
+    from datasheet_rag.store.documents import ensure_documents_tables
+
+    ensure_documents_tables(conn)
+
     # ---- doc_metadata ----------------------------------------------------
-    # Sidecar: not a FK to chunks so metadata can be registered before
-    # ingestion completes (and survive a re-ingest).
+    # One row per revision (PDF). Not a FK to chunks so metadata can be
+    # registered before ingestion completes (and survive a re-ingest).
+    # document_id is set on every row by store.documents.ensure_revision.
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS doc_metadata (
             doc_id       TEXT PRIMARY KEY,
-            tags         TEXT,             -- JSON array of strings
+            document_id  INTEGER,          -- documents.id; set by ensure_revision
+            position     INTEGER NOT NULL DEFAULT 0,  -- higher = newer revision
+            revision     TEXT,             -- revision label, e.g. "Rev C"
+            tags         TEXT,             -- JSON array; per-revision override, NULL = inherit
             title_source   TEXT,           -- auto | inferred | manual; NULL = auto
             needs_reembed  INTEGER,        -- 1 once `rag repair` marks it; NULL = no
             pdf_meta_title TEXT,           -- ingest-time title hint
@@ -839,8 +997,9 @@ def init_schema(conn: sqlite3.Connection, *, embedding_dim: int) -> None:
         )
         """
     )
+    cur.execute("CREATE INDEX IF NOT EXISTS ix_doc_metadata_document ON doc_metadata(document_id)")
 
-    # ---- doc_projects ----------------------------------------------------
+    # ---- document_projects -----------------------------------------------
     # Project membership, many projects per document (GH #121).
     from datasheet_rag.store.projects import ensure_projects_table
 

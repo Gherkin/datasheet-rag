@@ -24,8 +24,10 @@ from datasheet_rag.backend.models import (
     ChunkPage,
     DocPage,
     DocSummary,
+    DocumentRevisions,
     FigureBytes,
     IngestedDoc,
+    IngestLink,
     IngestResult,
     MetadataPatch,
     StatsResult,
@@ -102,8 +104,12 @@ class RagBackend(ABC):
         fields: dict[str, str] | None = None,
         limit: int | None = None,
         offset: int = 0,
+        all_revisions: bool = False,
     ) -> DocPage:
         """One page of the matching documents, in ``doc_id`` order.
+
+        One row per document, showing its newest revision; ``all_revisions``
+        gives one row per revision instead (GH #124).
 
         ``project_id`` keeps documents that belong to that project, among
         any others they belong to. ``fields`` filters on registered fields
@@ -140,14 +146,23 @@ class RagBackend(ABC):
         """
 
     @abstractmethod
-    def resolve_doc_id(self, doc_id: str) -> str: ...
+    def resolve_doc_id(self, doc_id: str) -> str:
+        """A full revision doc_id for a prefix, or for a ``D12`` its newest revision."""
+
+    @abstractmethod
+    def resolve_document(self, ref: str) -> str:
+        """The document (``"D12"``) a ref names: a ``D12`` itself, or a
+        revision's doc_id (prefix ok). Raises ``ValueError`` when unknown."""
 
     # ---- metadata sidecar ----
     @abstractmethod
-    def get_metadata(self, doc_id: str) -> DocMetadata | None: ...
+    def get_metadata(self, doc_id: str) -> DocMetadata | None:
+        """A revision's metadata (full doc_id), or a document's (``D12``)."""
 
     @abstractmethod
-    def set_metadata(self, doc_id: str, patch: MetadataPatch) -> DocMetadata: ...
+    def set_metadata(self, doc_id: str, patch: MetadataPatch) -> DocMetadata:
+        """Write a patch on the document of ``doc_id`` (a full doc_id or a
+        ``D12``), or on that one revision with ``patch.this_revision``."""
 
     @abstractmethod
     def list_docs(
@@ -155,7 +170,57 @@ class RagBackend(ABC):
         *,
         project_id: str | None = None,
         fields: dict[str, str] | None = None,
+        all_revisions: bool = False,
     ) -> list[DocMetadata]: ...
+
+    # ---- revisions (GH #124) ----
+    @abstractmethod
+    def list_revisions(self, ref: str) -> DocumentRevisions:
+        """A document's revisions, newest first. ``ref`` is a ``D12`` or a
+        revision's full doc_id."""
+
+    @abstractmethod
+    def add_revision(self, document: str, doc_id: str) -> DocumentRevisions:
+        """Make stored PDF ``doc_id`` the newest revision of ``document``.
+
+        A PDF alone in its own document is merged in (projects and tags
+        joined; a field with different values on both is refused). A PDF
+        that is one of several revisions elsewhere is refused.
+        """
+
+    @abstractmethod
+    def move_revision(
+        self, doc_id: str, *, above: str | None = None, below: str | None = None
+    ) -> DocumentRevisions:
+        """Move a revision directly above (newer than) or below a sibling."""
+
+    @abstractmethod
+    def unlink_revision(self, doc_id: str) -> DocumentRevisions:
+        """Take a revision out into a new document (with a copy of the old
+        document's metadata) and return the new document."""
+
+    @abstractmethod
+    def get_identity_rule(self) -> str | None:
+        """The store's identity rule, or None when it has none."""
+
+    @abstractmethod
+    def set_identity_rule(self, rule: str | None) -> str | None:
+        """Set (or with None clear) the identity rule; returns it as stored."""
+
+    @abstractmethod
+    def plan_ingest_link(
+        self,
+        *,
+        doc_id: str | None = None,
+        metadata: MetadataPatch | None = None,
+        new_revision_of: str | None = None,
+    ) -> IngestLink:
+        """Which document an ingest would put a PDF in, without writing.
+
+        Lets a client fail before parsing: an ambiguous rule match or an
+        unknown ``new_revision_of`` raises ``ValueError`` here exactly as the
+        ingest itself would. ``doc_id`` is the PDF's id when known.
+        """
 
     @abstractmethod
     def set_needs_reembed(self, doc_id: str, value: bool) -> None:
@@ -273,8 +338,15 @@ class RagBackend(ABC):
         vectors: Mapping[str, Sequence[float]] | None = None,
         inferred_title: str | None = None,
         source_pdf: Path | None = None,
+        new_revision_of: str | None = None,
     ) -> IngestResult:
         """Store a parsed graph, embedding / describing / titling as asked.
+
+        A new PDF becomes the newest revision of ``new_revision_of`` (a
+        ``D12`` or a revision's doc_id) when given, else of the one document
+        the identity rule matches, else a new document (GH #124). The
+        metadata patch is written on that document. ``IngestResult.link``
+        says which happened.
 
         ``project_id`` adds the document to that project; projects it is
         already in are kept (GH #121). Leaving a project is a metadata
@@ -320,6 +392,7 @@ class RagBackend(ABC):
         accurate_tables: bool | None = None,
         force: bool = False,
         progress: ProgressCallback | None = None,
+        new_revision_of: str | None = None,
     ) -> IngestResult:
         """Ingest a raw PDF end-to-end: parse → figures → chunk → embed → store.
 
@@ -330,7 +403,8 @@ class RagBackend(ABC):
         """
 
     @abstractmethod
-    def delete_doc(self, doc_id: str) -> int: ...
+    def delete_doc(self, doc_id: str) -> int:
+        """Delete one revision; its document goes with its last revision."""
 
     # ---- lifecycle ----
     def close(self) -> None:  # pragma: no cover - optional override

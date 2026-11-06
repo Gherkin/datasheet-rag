@@ -31,9 +31,15 @@ from datasheet_rag.chunking.summarizer import AbstractiveSummarizer
 from datasheet_rag.eval.dataset import EvalSet
 from datasheet_rag.eval.harness import Embedder, RunConfig, RunReport, run_eval
 from datasheet_rag.models.chunk import Chunk, ChunkGraph, ChunkLevel, LayoutType
-from datasheet_rag.store.fields import field_shapes, get_project_values_for_docs
-from datasheet_rag.store.metadata import set_metadata
-from datasheet_rag.store.projects import get_projects_for_docs, project_scope_sql
+from datasheet_rag.store.documents import (
+    add_revision,
+    documents_of,
+    format_document_id,
+    revisions_of,
+)
+from datasheet_rag.store.fields import field_shapes
+from datasheet_rag.store.metadata import get_metadata, set_metadata
+from datasheet_rag.store.projects import project_scope_sql
 from datasheet_rag.store.schema import connect
 from datasheet_rag.store.sqlite import _row_to_chunk, insert_chunks
 
@@ -192,17 +198,52 @@ def build_variant_store(
 
 
 def _copy_projects(src: sqlite3.Connection, dst: sqlite3.Connection, doc_ids: list[str]) -> None:
-    """Give each document in ``dst`` the projects it has in ``src``, and its
-    values there of the project-scoped fields ``dst`` has registered (the
-    built-in ``subsystem``; a fresh variant store has no user fields)."""
-    for doc_id, projects in get_projects_for_docs(src, doc_ids).items():
-        set_metadata(dst, doc_id, add_projects=projects)
+    """Give the revisions copied into ``dst`` the documents they have in ``src``.
+
+    Revisions of one source document become revisions of one document in
+    ``dst``, in the same order, so the newest-revision filter (GH #124)
+    hides the same chunks. Each document gets its projects, tags and the
+    values of the fields ``dst`` has registered (the built-ins; a fresh
+    variant store has no user fields), and each revision its label and
+    overrides — so scoping and field filters behave as in the source.
+    """
     registered = field_shapes(dst)
-    for doc_id, per_project in get_project_values_for_docs(src, doc_ids).items():
-        for project, values in per_project.items():
+    wanted = set(doc_ids)
+    for document_id in sorted(set(documents_of(src, doc_ids).values())):
+        revs = [d for d in reversed(revisions_of(src, document_id)) if d in wanted]
+        if not revs:
+            continue
+        target = documents_of(dst, revs[:1])[revs[0]]
+        for rev in revs[1:]:
+            add_revision(dst, target, rev)
+        ref = format_document_id(target)
+        source = get_metadata(src, format_document_id(document_id))
+        assert source is not None
+        set_metadata(
+            dst,
+            ref,
+            add_projects=source.projects,
+            tags=source.tags,
+            fields={k: v for k, v in source.fields.items() if k in registered},
+        )
+        for project, values in source.project_fields.items():
             kept = {name: value for name, value in values.items() if name in registered}
             if kept:
-                set_metadata(dst, doc_id, fields=kept, project=project)
+                set_metadata(dst, ref, fields=kept, project=project)
+        for rev in revs:
+            own = get_metadata(src, rev)
+            assert own is not None
+            overrides = {
+                k: own.fields[k] for k in own.overrides if k in registered and k in own.fields
+            }
+            set_metadata(
+                dst,
+                rev,
+                this_revision=True,
+                revision=own.revision or "",
+                fields=overrides or None,
+                tags=own.tags if "tags" in own.overrides else None,
+            )
 
 
 # ---------------------------------------------------------------------------

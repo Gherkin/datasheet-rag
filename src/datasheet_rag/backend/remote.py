@@ -38,8 +38,10 @@ from datasheet_rag.backend.models import (
     ChunkVectors,
     DocPage,
     DocSummary,
+    DocumentRevisions,
     FigureBytes,
     IngestedDoc,
+    IngestLink,
     IngestResult,
     MetadataPatch,
     StatsResult,
@@ -341,12 +343,14 @@ class RemoteBackend(RagBackend):
         fields: dict[str, str] | None = None,
         limit: int | None = None,
         offset: int = 0,
+        all_revisions: bool = False,
     ) -> DocPage:
         params = _drop_none(
             project_id=project_id,
             field=_field_params(fields),
             limit=limit,
             offset=offset or None,
+            all_revisions=all_revisions or None,
         )
         data = self._json("GET", "/documents", params=params)
         rows, total = _page_rows(data, "documents", limit, offset)
@@ -388,6 +392,10 @@ class RemoteBackend(RagBackend):
         resolved: str = self._json("GET", f"/documents/resolve/{doc_id}")["doc_id"]
         return resolved
 
+    def resolve_document(self, ref: str) -> str:
+        resolved: str = self._json("GET", f"/documents/resolve/{ref}")["document_id"]
+        return resolved
+
     # -- metadata ------------------------------------------------------
     def get_metadata(self, doc_id: str) -> DocMetadata | None:
         resp = self._request("GET", f"/documents/{doc_id}/metadata")
@@ -408,10 +416,61 @@ class RemoteBackend(RagBackend):
         *,
         project_id: str | None = None,
         fields: dict[str, str] | None = None,
+        all_revisions: bool = False,
     ) -> list[DocMetadata]:
-        params = _drop_none(project_id=project_id, field=_field_params(fields))
+        params = _drop_none(
+            project_id=project_id,
+            field=_field_params(fields),
+            all_revisions=all_revisions or None,
+        )
         data = self._json("GET", "/metadata", params=params)
         return [DocMetadata.model_validate(d) for d in data["documents"]]
+
+    # -- revisions -----------------------------------------------------
+    def list_revisions(self, ref: str) -> DocumentRevisions:
+        return DocumentRevisions.model_validate(self._json("GET", f"/documents/{ref}/revisions"))
+
+    def add_revision(self, document: str, doc_id: str) -> DocumentRevisions:
+        data = self._json("POST", "/revisions/add", json={"document": document, "doc_id": doc_id})
+        return DocumentRevisions.model_validate(data)
+
+    def move_revision(
+        self, doc_id: str, *, above: str | None = None, below: str | None = None
+    ) -> DocumentRevisions:
+        data = self._json(
+            "POST", "/revisions/move", json={"doc_id": doc_id, "above": above, "below": below}
+        )
+        return DocumentRevisions.model_validate(data)
+
+    def unlink_revision(self, doc_id: str) -> DocumentRevisions:
+        data = self._json("POST", "/revisions/unlink", json={"doc_id": doc_id})
+        return DocumentRevisions.model_validate(data)
+
+    def get_identity_rule(self) -> str | None:
+        rule: str | None = self._json("GET", "/identity-rule")["rule"]
+        return rule
+
+    def set_identity_rule(self, rule: str | None) -> str | None:
+        stored: str | None = self._json("PUT", "/identity-rule", json={"rule": rule})["rule"]
+        return stored
+
+    def plan_ingest_link(
+        self,
+        *,
+        doc_id: str | None = None,
+        metadata: MetadataPatch | None = None,
+        new_revision_of: str | None = None,
+    ) -> IngestLink:
+        data = self._json(
+            "POST",
+            "/ingest/link-plan",
+            json={
+                "doc_id": doc_id,
+                "metadata": metadata.model_dump(mode="json") if metadata else None,
+                "new_revision_of": new_revision_of,
+            },
+        )
+        return IngestLink.model_validate(data)
 
     def set_needs_reembed(self, doc_id: str, value: bool) -> None:
         self._json("PUT", f"/documents/{doc_id}/needs-reembed", json={"value": value})
@@ -589,6 +648,7 @@ class RemoteBackend(RagBackend):
         vectors: Mapping[str, Sequence[float]] | None = None,
         inferred_title: str | None = None,
         source_pdf: Path | None = None,
+        new_revision_of: str | None = None,
     ) -> IngestResult:
         if vectors is not None and describe_figures:
             # The same guard LocalBackend raises (local.py) — and for the same
@@ -665,6 +725,7 @@ class RemoteBackend(RagBackend):
             "infer_title": infer_title,
             "title_hints": title_hints,
             "inferred_title": inferred_title,
+            "new_revision_of": new_revision_of,
             # Packed as base64 float32 rather than JSON numbers: a datasheet's
             # vectors are tens of megabytes spelled out in decimal.
             "vectors": (
@@ -730,6 +791,7 @@ class RemoteBackend(RagBackend):
         accurate_tables: bool | None = None,
         force: bool = False,
         progress: ProgressCallback | None = None,
+        new_revision_of: str | None = None,
     ) -> IngestResult:
         # Stream the raw PDF up; the server runs parse → figures → chunk →
         # embed → store and pushes progress back as Server-Sent Events. We
@@ -782,6 +844,7 @@ class RemoteBackend(RagBackend):
                 # RAG_COMPUTE=client, and an upload that lived here would be
                 # skipped on exactly those paths.
                 source_pdf=pdf_path,
+                new_revision_of=new_revision_of,
             )
             return ingested
 
@@ -799,6 +862,7 @@ class RemoteBackend(RagBackend):
             "meso_tokens": meso_tokens,
             "accurate_tables": accurate_tables,
             "force": force,
+            "new_revision_of": new_revision_of,
         }
         files = {
             "payload": (pdf_path.name, pdf_path.read_bytes(), "application/pdf"),
