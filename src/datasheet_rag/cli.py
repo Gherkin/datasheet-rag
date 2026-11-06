@@ -430,6 +430,7 @@ def _merge_config_fields(
     *,
     scopes: Mapping[str, FieldScope] | None = None,
     in_config_project: bool = True,
+    why_not: str | None = None,
 ) -> dict[str, Any]:
     """Fill ``.rag.toml`` ``[fields]`` in under the user's options.
 
@@ -439,7 +440,9 @@ def _merge_config_fields(
     A project-scoped config field (``subsystem``) belongs to the config's
     ``project_id``. It is filled in only when ``in_config_project``: the
     write goes to that project and the document is in it after the write
-    (always true for a config with no ``project_id``).
+    (always true for a config with no ``project_id``). Otherwise it is left
+    out, and a note says so with ``why_not`` as the reason; ``why_not=None``
+    leaves it out without a note (the document is leaving that project).
     ``scopes`` is the field registry's scopes; ``None`` (no registry read, as
     on a dry run, which writes nothing) fills every field.
     """
@@ -447,7 +450,13 @@ def _merge_config_fields(
         return fields
     cfg_fields = dict(proj_cfg.fields)
     if scopes is not None and not in_config_project:
+        left_out = [k for k in cfg_fields if scopes.get(k) == "project" and k not in fields]
         cfg_fields = {k: v for k, v in cfg_fields.items() if scopes.get(k) != "project"}
+        if left_out and why_not:
+            console.print(
+                f"[yellow]Note:[/] .rag.toml sets {', '.join(left_out)} for project "
+                f"{proj_cfg.project_id!r}; left out because {why_not}."
+            )
     return {**cfg_fields, **fields}
 
 
@@ -2982,12 +2991,13 @@ def _ingest_one(
     if proj_cfg is not None and proj_cfg.fields:
         from datasheet_rag.store.fields import scopes_of
 
+        ingest_project = project_id.strip() if project_id else None
         fields = _merge_config_fields(
             proj_cfg,
             fields,
             scopes=scopes_of(field_registry.specs()) if field_registry is not None else None,
-            in_config_project=proj_cfg.project_id
-            in (None, project_id.strip() if project_id else None),
+            in_config_project=proj_cfg.project_id in (None, ingest_project),
+            why_not=f"this ingest goes to project {ingest_project!r}",
         )
     if field_registry is not None and fields:
         _check_field_patch(field_registry.specs(), fields, project=project_id)
@@ -3974,32 +3984,27 @@ def metadata_cmd(
         from datasheet_rag.store.fields import project_scoped_names, scopes_of
 
         scopes = scopes_of(be.list_fields())
-        # The config's project-scoped fields belong to its project_id. Leaving
-        # that project drops them: the values go with the membership. Any
-        # other write that cannot put them there is an error, not a silent
-        # drop. A config with no project_id ties its fields to no project:
-        # the user's --project decides, or the write fails for want of one.
+        # The config's project-scoped fields belong to its project_id. A write
+        # that cannot put them there leaves them out with a note; leaving that
+        # project leaves them out silently (the values go with the
+        # membership). A config with no project_id ties its fields to no
+        # project: the user's --project decides, or the write fails for want
+        # of one.
         cfg_project = proj_cfg.project_id
-        leaving = cfg_project is not None and cfg_project in remove_projects
+        why_not: str | None = None
+        in_cfg = True
         from_cfg = [n for n in project_scoped_names(scopes, proj_cfg.fields) if n not in fields]
-        if cfg_project is not None and not leaving and from_cfg:
-            names = ", ".join(from_cfg)
-            if fields_project != cfg_project:
-                raise click.ClickException(
-                    f".rag.toml sets {names} for project {cfg_project!r}, but this "
-                    f"write goes to {fields_project!r}. Give {names} for "
-                    f"{fields_project!r} on the command line, or drop --project."
-                )
-            if cfg_project not in add_projects:
+        if cfg_project is not None and from_cfg:
+            if cfg_project in remove_projects:
+                in_cfg = False
+            elif fields_project != cfg_project:
+                in_cfg, why_not = False, f"this write goes to project {fields_project!r}"
+            elif cfg_project not in add_projects:
                 stored = be.get_metadata(doc_id)
                 if stored is None or cfg_project not in stored.projects:
-                    raise click.ClickException(
-                        f".rag.toml sets {names} for project {cfg_project!r}, but "
-                        f"{doc_id} is not in it. Add it with --add-project "
-                        f"{cfg_project}, or run outside this folder."
-                    )
+                    in_cfg, why_not = False, f"{doc_id} is not in that project"
         fields = _merge_config_fields(
-            proj_cfg, fields, scopes=scopes, in_config_project=not leaving
+            proj_cfg, fields, scopes=scopes, in_config_project=in_cfg, why_not=why_not
         )
 
     # --mpn-alias appends to the mpn list: the one --mpn (or .rag.toml) just

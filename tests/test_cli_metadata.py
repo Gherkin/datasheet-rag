@@ -472,22 +472,29 @@ def test_project_config_checks_compare_stripped_project_names(
     assert meta["projects"] == [] and meta["project_fields"] == {}
 
 
-def test_project_config_subsystem_is_not_dropped_silently(
+def test_project_config_subsystem_is_left_out_with_a_note(
     db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     (tmp_path / ".rag.toml").write_text(_BOARD_A_TOML)
     monkeypatch.chdir(tmp_path)
     # Joining another board only: the doc is not in board-a, where the
-    # config's subsystem belongs.
+    # config's subsystem belongs. The rest of the write goes ahead.
     result = _meta(db_path, DOC_A, "--add-project", "board-b", "--mpn", "X")
-    assert result.exit_code == 1
-    assert "sets subsystem for project 'board-a'" in result.output
-    assert "--add-project board-a" in result.output
+    assert result.exit_code == 0, result.output
+    output = " ".join(result.output.split())  # Rich wraps the note
+    assert "sets subsystem for project 'board-a'; left out" in output
+    assert "is not in that project" in output
+    meta = _get_json(db_path, DOC_A)
+    assert meta["projects"] == ["board-b"] and meta["project_fields"] == {}
+    # A pure membership change on another board is not blocked either.
+    result = _meta(db_path, DOC_A, "--remove-project", "board-b")
+    assert result.exit_code == 0, result.output
     # Writing in board-b: board-a's subsystem is not carried there.
+    _meta(db_path, DOC_A, "--add-project", "board-b")
     result = _meta(db_path, DOC_A, "--project", "board-b", "--mpn", "Y")
-    assert result.exit_code == 1
-    assert "this write goes to 'board-b'" in result.output
-    assert "No metadata recorded" in _meta(db_path, DOC_A).output  # nothing written
+    assert result.exit_code == 0, result.output
+    assert "this write goes to project 'board-b'" in " ".join(result.output.split())
+    assert _get_json(db_path, DOC_A)["project_fields"] == {}
     # A value given on the command line is what the user asked for.
     result = _meta(
         db_path, DOC_A, "--add-project", "board-b", "--project", "board-b", "--subsystem", "aux"

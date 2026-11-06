@@ -86,6 +86,9 @@ def test_ingest_keeps_config_subsystem_in_the_config_project(
     assert result.exit_code == 0, result.output
     assert fake_backend.calls[1]["project_id"] == "board-b"
     assert fake_backend.calls[1]["metadata"].fields == {"manufacturer": "TI"}
+    output = " ".join(result.output.split())  # Rich wraps the note
+    assert "sets subsystem for project 'board-a'; left out" in output
+    assert "this ingest goes to project 'board-b'" in output
 
     # A padded --project-id is still board-a: the subsystem stays.
     result = _ingest(str(pdf), "--project-id", "board-a ")
