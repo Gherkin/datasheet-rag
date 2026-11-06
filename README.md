@@ -431,7 +431,7 @@ rag metadata <rev_id> --this-revision --unset-field doc_type   # inherit again
 
 Projects and per-project fields are always set on the whole document.
 
-To change the whole document, name it by its `D12`. `rag metadata <rev_id>` without `--this-revision` stops with an error when the document has more than one revision, because a `rev_id` may mean only that PDF. For a document with one revision, the `rev_id` and the `D12` mean the same thing.
+To change the whole document, name it by its `D12`. `rag metadata <rev_id>` without `--this-revision` stops with an error when it would change fields, tags or projects of a document with more than one revision, because a `rev_id` may mean only that PDF. `--title` and `--revision` are always the revision's own; on such a `rev_id` they do not pick up the `.rag.toml` project, tags or fields. For a document with one revision, the `rev_id` and the `D12` mean the same thing.
 
 #### The identity rule
 

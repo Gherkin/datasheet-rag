@@ -4398,15 +4398,7 @@ def metadata_cmd(
 
     # A per-revision write is an exception to the document's values; the
     # .rag.toml defaults describe the document and stay out of it.
-    proj_cfg = None if this_revision else get_project_config()
-    if proj_cfg is not None:
-        if proj_cfg.project_id and not (add_projects or remove_projects):
-            add_projects = (proj_cfg.project_id,)
-        if fields_project is None:
-            fields_project = proj_cfg.project_id
-        if not tags and proj_cfg.tags:
-            tags = tuple(proj_cfg.tags)
-
+    per_revision = this_revision
     be = _backend_for(db_path)
     rev_id = _metadata_target(be, rev_id)
     if parse_document_ref(rev_id) is not None:
@@ -4427,16 +4419,28 @@ def metadata_cmd(
                 f"{rev_id} is a whole document; {what} needs one revision's rev_id "
                 f"(see rag revisions {rev_id})"
             )
-    elif document_write and not this_revision:
+    elif not this_revision:
         # A rev_id may mean just that PDF; writing to every revision of its
-        # document needs the D12 (GH #124).
+        # document needs the D12 (GH #124). A --title / --revision write on
+        # such a rev_id is the revision's own, so .rag.toml stays out of it.
         current = be.get_metadata(rev_id)
         if current is not None and len(current.revisions) > 1:
-            raise click.UsageError(
-                f"{rev_id[:SHORT_REV_ID_LEN]} is one of {len(current.revisions)} revisions "
-                f"of {current.document_id}. Use {current.document_id} to change all of them, "
-                "or --this-revision for this one (fields and tags only)."
-            )
+            if document_write:
+                raise click.UsageError(
+                    f"{rev_id[:SHORT_REV_ID_LEN]} is one of {len(current.revisions)} revisions "
+                    f"of {current.document_id}. Use {current.document_id} to change all of "
+                    "them, or --this-revision for this one (fields and tags only)."
+                )
+            per_revision = True
+
+    proj_cfg = None if per_revision else get_project_config()
+    if proj_cfg is not None:
+        if proj_cfg.project_id and not (add_projects or remove_projects):
+            add_projects = (proj_cfg.project_id,)
+        if fields_project is None:
+            fields_project = proj_cfg.project_id
+        if not tags and proj_cfg.tags:
+            tags = tuple(proj_cfg.tags)
 
     scopes: dict[str, FieldScope] | None = None
     if proj_cfg is not None and proj_cfg.fields:

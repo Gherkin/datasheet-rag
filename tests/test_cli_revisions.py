@@ -144,6 +144,21 @@ def test_a_rev_id_write_to_a_document_with_revisions_needs_the_d12(db_path: Path
     assert _rag(db_path, "metadata", "D1", "--tag", "y").exit_code == 0
 
 
+def test_a_label_write_on_a_rev_id_with_revisions_skips_rag_toml(
+    db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _rag(db_path, "revisions", "add", "D1", DOC_B)
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / ".rag.toml").write_text('project_id = "board-a"\ntags = ["x"]\n')
+    monkeypatch.chdir(work)
+    for args in (("--revision", "Rev A"), ("--title", "Old")):
+        result = _rag(db_path, "metadata", DOC_A, *args)
+        assert result.exit_code == 0, (args, result.output)
+    meta = _json(_rag(db_path, "metadata", "D1").output)
+    assert meta.get("projects", []) == [] and meta.get("tags", []) == []
+
+
 def test_mpn_alias_on_a_document_builds_on_the_documents_list(db_path: Path) -> None:
     _rag(db_path, "metadata", DOC_A, "--mpn", "C")
     _rag(db_path, "metadata", DOC_A, "--this-revision", "--mpn", "A")
