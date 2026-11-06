@@ -55,7 +55,7 @@ if TYPE_CHECKING:
 
     from datasheet_rag.ingest_pipeline import ProgressCallback
 from datasheet_rag.store import DocMetadata, FieldSpec, SearchFilters, SearchResult, TitleSource
-from datasheet_rag.store.fields import FieldShape
+from datasheet_rag.store.fields import FieldScope, FieldShape
 
 _EXCLUDE_VECS = {"content_embedding", "context_embedding"}
 
@@ -338,14 +338,12 @@ class RemoteBackend(RagBackend):
         self,
         *,
         project_id: str | None = None,
-        group_name: str | None = None,
         fields: dict[str, str] | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> DocPage:
         params = _drop_none(
             project_id=project_id,
-            group_name=group_name,
             field=_field_params(fields),
             limit=limit,
             offset=offset or None,
@@ -409,20 +407,14 @@ class RemoteBackend(RagBackend):
         self,
         *,
         project_id: str | None = None,
-        group_name: str | None = None,
         fields: dict[str, str] | None = None,
     ) -> list[DocMetadata]:
-        params = _drop_none(
-            project_id=project_id, group_name=group_name, field=_field_params(fields)
-        )
+        params = _drop_none(project_id=project_id, field=_field_params(fields))
         data = self._json("GET", "/metadata", params=params)
         return [DocMetadata.model_validate(d) for d in data["documents"]]
 
     def set_needs_reembed(self, doc_id: str, value: bool) -> None:
         self._json("PUT", f"/documents/{doc_id}/needs-reembed", json={"value": value})
-
-    def apply_metadata_to_chunks(self, doc_id: str) -> int:
-        return int(self._json("POST", f"/documents/{doc_id}/apply-metadata")["updated"])
 
     # -- metadata fields -----------------------------------------------
     def list_fields(self) -> list[FieldSpec]:
@@ -434,13 +426,20 @@ class RemoteBackend(RagBackend):
         name: str,
         *,
         shape: FieldShape = "single",
+        scope: FieldScope = "document",
         description: str = "",
         roles: Sequence[str] = (),
     ) -> FieldSpec:
         data = self._json(
             "POST",
             "/metadata/fields",
-            json={"name": name, "shape": shape, "description": description, "roles": list(roles)},
+            json={
+                "name": name,
+                "shape": shape,
+                "scope": scope,
+                "description": description,
+                "roles": list(roles),
+            },
         )
         return FieldSpec.model_validate(data["field"])
 
@@ -582,7 +581,6 @@ class RemoteBackend(RagBackend):
         *,
         figures: FigureUploads | None = None,
         project_id: str | None = None,
-        group_name: str | None = None,
         metadata: MetadataPatch | None = None,
         embed: bool = True,
         describe_figures: bool = False,
@@ -661,7 +659,6 @@ class RemoteBackend(RagBackend):
         payload = {
             "graph": graph.model_dump(mode="json", exclude=_chunk_excludes(graph)),
             "project_id": project_id,
-            "group_name": group_name,
             "metadata": metadata.model_dump(mode="json") if metadata else None,
             "embed": embed,
             "describe_figures": describe_figures,
@@ -721,7 +718,6 @@ class RemoteBackend(RagBackend):
         *,
         doc_id: str | None = None,
         project_id: str | None = None,
-        group_name: str | None = None,
         metadata: MetadataPatch | None = None,
         backend: str = "docling",
         skip_figures: bool = False,
@@ -775,7 +771,6 @@ class RemoteBackend(RagBackend):
                 parsed.graph,
                 figures=uploads or None,
                 project_id=project_id,
-                group_name=group_name,
                 metadata=metadata,
                 embed=True,
                 describe_figures=not skip_figures and not skip_describe,
@@ -793,7 +788,6 @@ class RemoteBackend(RagBackend):
         options = {
             "doc_id": doc_id,
             "project_id": project_id,
-            "group_name": group_name,
             "metadata": metadata.model_dump(mode="json") if metadata else None,
             "backend": backend,
             "skip_figures": skip_figures,

@@ -44,7 +44,6 @@ from datasheet_rag.store import (
     SearchFilters,
     SearchResult,
     TitleSource,
-    apply_metadata_to_chunks,
     connect,
     count_chunks,
     delete_doc,
@@ -72,9 +71,9 @@ from datasheet_rag.store import (
     update_figure_description,
     vector_search,
 )
-from datasheet_rag.store.fields import FieldShape, check_filter_fields
+from datasheet_rag.store.fields import FieldScope, FieldShape, check_filter_fields
 from datasheet_rag.store.metadata import (
-    check_patch,
+    check_write,
     join_projects,
     set_needs_reembed,
     set_title_hints,
@@ -250,17 +249,11 @@ class LocalBackend(RagBackend):
         self,
         *,
         project_id: str | None = None,
-        group_name: str | None = None,
         fields: dict[str, str] | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> DocPage:
-        docs = list_docs(
-            self._get_conn(),
-            project_id=project_id,
-            group_name=group_name,
-            fields=fields,
-        )
+        docs = list_docs(self._get_conn(), project_id=project_id, fields=fields)
         matched: dict[str, DocMetadata | None] = {d.doc_id: d for d in docs}
 
         # The sidecar row is optional: it is written by the metadata-tagging
@@ -268,10 +261,10 @@ class LocalBackend(RagBackend):
         # is still chunked, searchable and reachable by every other read path,
         # so list it too — with the sidecar fields left null — rather than
         # reporting an empty catalogue for a store that plainly has documents
-        # in it. Filters on group or a field suppress the fallback: those
-        # live nowhere but the sidecar, so a document without one cannot
-        # match them.
-        if group_name is None and not fields:
+        # in it. A field filter suppresses the fallback: field values live
+        # nowhere but the sidecar tables, so a document without a sidecar
+        # row cannot match one.
+        if not fields:
             for row in get_ingested_docs(self._get_conn(), project_id=project_id):
                 matched.setdefault(row["doc_id"], None)
 
@@ -301,10 +294,9 @@ class LocalBackend(RagBackend):
         return DocSummary(
             doc_id=d.doc_id,
             projects=d.projects,
-            group_name=d.group_name,
-            subsystem=d.subsystem,
             tags=d.tags,
             fields=d.fields,
+            project_fields=d.project_fields,
             doc_title=title,
             page_count=page_count,
         )
@@ -340,20 +332,13 @@ class LocalBackend(RagBackend):
         self,
         *,
         project_id: str | None = None,
-        group_name: str | None = None,
         fields: dict[str, str] | None = None,
     ) -> list[DocMetadata]:
-        return list_docs(
-            self._get_conn(), project_id=project_id, group_name=group_name, fields=fields
-        )
+        return list_docs(self._get_conn(), project_id=project_id, fields=fields)
 
     def set_needs_reembed(self, doc_id: str, value: bool) -> None:
         with self._write_lock:
             set_needs_reembed(self._get_conn(), doc_id, value)
-
-    def apply_metadata_to_chunks(self, doc_id: str) -> int:
-        with self._write_lock:
-            return apply_metadata_to_chunks(self._get_conn(), doc_id)
 
     # -- metadata fields -----------------------------------------------
     def list_fields(self) -> list[FieldSpec]:
@@ -364,12 +349,18 @@ class LocalBackend(RagBackend):
         name: str,
         *,
         shape: FieldShape = "single",
+        scope: FieldScope = "document",
         description: str = "",
         roles: Sequence[str] = (),
     ) -> FieldSpec:
         with self._write_lock:
             return register_field(
-                self._get_conn(), name, shape=shape, description=description, roles=roles
+                self._get_conn(),
+                name,
+                shape=shape,
+                scope=scope,
+                description=description,
+                roles=roles,
             )
 
     def remove_field(self, name: str, *, clear: bool = False) -> int:
@@ -587,7 +578,6 @@ class LocalBackend(RagBackend):
         *,
         figures: FigureUploads | None = None,
         project_id: str | None = None,
-        group_name: str | None = None,
         metadata: MetadataPatch | None = None,
         embed: bool = True,
         describe_figures: bool = False,
@@ -659,17 +649,27 @@ class LocalBackend(RagBackend):
 
         with self._write_lock:
             conn = self._get_conn()
-            # Reject an unregistered or mis-shaped field before any chunk is
-            # written, not after the whole ingest has run (GH #120).
-            if metadata is not None:
-                check_patch(conn, fields=metadata.fields)
             # Build the sidecar patch now: a project both added and removed
             # raises here, before any chunk is written. Ingest only ever adds
             # a project (GH #121): a document already in others stays in them.
+            # Project-scoped fields go to the ingest project unless the patch
+            # names one (GH #123).
             patch = (metadata or MetadataPatch()).model_copy(deep=True)
             patch.add_project(project_id)
-            if group_name is not None:
-                patch.group_name = patch.group_name or group_name
+            if patch.project is None and project_id and project_id.strip():
+                patch.project = project_id.strip()
+            # Reject an unregistered or mis-shaped field, or a project-scoped
+            # one with no project or in a project the document will not be
+            # in, before any chunk is written, not after the whole ingest has
+            # run (GH #120, #123).
+            check_write(
+                conn,
+                did,
+                add_projects=patch.add_projects,
+                remove_projects=patch.remove_projects,
+                fields=patch.fields,
+                project=patch.project,
+            )
             # The projects are joined right before each chunk insert, which
             # commits them with the chunks: no stored state has chunks without
             # their projects (a stopped describe) or projects without chunks
@@ -695,12 +695,7 @@ class LocalBackend(RagBackend):
                     embed_chunk_graph(graph, embedder=self._get_embedder()) if embed else vectors
                 )
                 join_projects(conn, did, join)
-                pruned += insert_chunk_graph(
-                    conn,
-                    graph,
-                    vectors=vectors_tmp,
-                    group_name=group_name,
-                ).pruned
+                pruned += insert_chunk_graph(conn, graph, vectors=vectors_tmp).pruned
                 conn.commit()
                 descriptions = describe_figures_in_store(
                     conn,
@@ -731,20 +726,13 @@ class LocalBackend(RagBackend):
             # figure path) for every id that survives, which is why this is not
             # a delete-then-insert.
             join_projects(conn, did, join)
-            stats = insert_chunk_graph(
-                conn,
-                graph,
-                vectors=vectors,
-                group_name=group_name,
-            )
+            stats = insert_chunk_graph(conn, graph, vectors=vectors)
             pruned += stats.pruned
             conn.commit()
 
             # 4. Metadata sidecar (the patch built above).
             if not patch.is_empty():
                 set_metadata(conn, did, **patch.kwargs())
-                apply_metadata_to_chunks(conn, did)
-                conn.commit()
             # A dict (even {}) is what the parse found and replaces the stored
             # hints whole. None means no parse computed them: keep the stored.
             if title_hints is not None:
@@ -784,7 +772,6 @@ class LocalBackend(RagBackend):
         *,
         doc_id: str | None = None,
         project_id: str | None = None,
-        group_name: str | None = None,
         metadata: MetadataPatch | None = None,
         backend: str = "docling",
         skip_figures: bool = False,
@@ -820,7 +807,6 @@ class LocalBackend(RagBackend):
         return self.ingest_chunk_graph(
             parsed.graph,
             project_id=project_id,
-            group_name=group_name,
             metadata=metadata,
             embed=True,
             describe_figures=do_describe,

@@ -180,11 +180,10 @@ def test_list_filter_by_tag_requires_all_given_tags(db_path: Path) -> None:
 # case is checked alone and alongside another flag: the alongside form already
 # worked before #37, so only the alone form guards the read-vs-write gate.
 
+#: Document-level shortcuts. --subsystem is per project; see its own tests.
 _SCALAR_FIELDS = [
-    ("--group", "group_name"),
     ("--mpn", "mpn"),
     ("--manufacturer", "manufacturer"),
-    ("--subsystem", "subsystem"),
     ("--doc-type", "doc_type"),
 ]
 
@@ -229,11 +228,7 @@ def test_blank_scalar_clears_field(
 def test_blank_scalar_beats_project_config_default(
     db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flag: str, field: str
 ) -> None:
-    if field in _BUILTIN_FIELDS:
-        body = f'[fields]\n{field} = "from-config"\n'
-    else:
-        body = f'{"group" if field == "group_name" else field} = "from-config"\n'
-    (tmp_path / ".rag.toml").write_text(body)
+    (tmp_path / ".rag.toml").write_text(f'[fields]\n{field} = "from-config"\n')
     monkeypatch.chdir(tmp_path)
     # Alongside another flag, so this reaches the merge whatever the gate does.
     result = _meta(db_path, DOC_A, flag, "", *_OTHER_FLAG)
@@ -386,6 +381,161 @@ def test_list_scopes_to_every_project_a_document_is_in(db_path: Path) -> None:
     assert DOC_A[:10] in in_a.output and DOC_B[:10] not in in_a.output
     in_b = _list(db_path, "--project-id", "board-b")
     assert DOC_A[:10] in in_b.output and DOC_B[:10] in in_b.output
+
+
+# --- subsystem, one value per project (GH #123) -------------------------------
+
+
+def test_group_options_are_gone(db_path: Path) -> None:
+    for args in (["metadata", DOC_A, "--group", "x"], ["list", "--group", "x"]):
+        result = CliRunner().invoke(cli, [*args, "--db", str(db_path)])
+        assert result.exit_code == 2 and "No such option" in result.output, args
+
+
+def test_subsystem_needs_a_named_project(db_path: Path) -> None:
+    _meta(db_path, DOC_A, "--add-project", "board-a")
+    # The document's only project is not taken as the answer.
+    result = _meta(db_path, DOC_A, "--subsystem", "power")
+    assert result.exit_code == 1
+    assert "one value per project" in result.output and "--project" in result.output
+    result = _meta(db_path, DOC_A, "--project", "board-z", "--subsystem", "power")
+    assert result.exit_code == 1 and "not in project 'board-z'" in result.output
+    assert _get_json(db_path, DOC_A)["project_fields"] == {}
+
+
+def test_subsystem_differs_per_project_and_list_shows_it(db_path: Path) -> None:
+    _meta(db_path, DOC_A, "--add-project", "board-a", "--add-project", "board-b")
+    _meta(db_path, DOC_B, "--add-project", "board-a")
+    assert _meta(db_path, DOC_A, "--project", "board-a", "--subsystem", "power").exit_code == 0
+    assert _meta(db_path, DOC_A, "--project", "board-b", "--subsystem", "aux").exit_code == 0
+    assert _meta(db_path, DOC_B, "--project", "board-a", "--subsystem", "rf").exit_code == 0
+    assert _get_json(db_path, DOC_A)["project_fields"] == {
+        "board-a": {"subsystem": "power"},
+        "board-b": {"subsystem": "aux"},
+    }
+
+    in_a = _list(db_path, "--project-id", "board-a", "--subsystem", "power")
+    assert in_a.exit_code == 0, in_a.output
+    assert DOC_A[:10] in in_a.output and DOC_B[:10] not in in_a.output
+    assert "aux" not in in_a.output  # board-b's value is not this listing's
+    in_b = _list(db_path, "--project-id", "board-b", "--subsystem", "power")
+    assert "No ingested documents match" in in_b.output
+
+    everywhere = _list(db_path, "--global", "--columns", "subsystem")
+    assert everywhere.exit_code == 0, everywhere.output
+    assert "board-a: power; board-b: aux" in everywhere.output
+
+    # A blank value clears it in that project only.
+    assert _meta(db_path, DOC_A, "--project", "board-b", "--subsystem", "").exit_code == 0
+    assert _get_json(db_path, DOC_A)["project_fields"] == {"board-a": {"subsystem": "power"}}
+
+
+def test_project_config_sets_subsystem_in_its_project(
+    db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".rag.toml").write_text('project_id = "netdaq"\n[fields]\nsubsystem = "power"\n')
+    monkeypatch.chdir(tmp_path)
+    result = _meta(db_path, DOC_A, "--tag", "x")
+    assert result.exit_code == 0, result.output
+    meta = _get_json(db_path, DOC_A)
+    assert meta["projects"] == ["netdaq"]
+    assert meta["project_fields"] == {"netdaq": {"subsystem": "power"}}
+
+
+_BOARD_A_TOML = 'project_id = "board-a"\n[fields]\nsubsystem = "power"\n'
+
+
+def test_project_config_subsystem_does_not_block_leaving_its_project(
+    db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".rag.toml").write_text(_BOARD_A_TOML)
+    monkeypatch.chdir(tmp_path)
+    assert _meta(db_path, DOC_A, "--tag", "x").exit_code == 0
+    result = _meta(db_path, DOC_A, "--remove-project", "board-a")
+    assert result.exit_code == 0, result.output
+    meta = _get_json(db_path, DOC_A)
+    assert meta["projects"] == [] and meta["project_fields"] == {}
+
+
+def test_project_config_checks_compare_stripped_project_names(
+    db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".rag.toml").write_text(_BOARD_A_TOML)
+    monkeypatch.chdir(tmp_path)
+    # The store strips project names; the .rag.toml checks must too.
+    result = _meta(db_path, DOC_A, "--project", " board-a ", "--tag", "x")
+    assert result.exit_code == 0, result.output
+    assert _get_json(db_path, DOC_A)["project_fields"] == {"board-a": {"subsystem": "power"}}
+    result = _meta(db_path, DOC_A, "--remove-project", "board-a ")
+    assert result.exit_code == 0, result.output
+    meta = _get_json(db_path, DOC_A)
+    assert meta["projects"] == [] and meta["project_fields"] == {}
+    # A blank --project is no project: the config's board-a applies.
+    result = _meta(db_path, DOC_A, "--project", " ", "--tag", "y")
+    assert result.exit_code == 0, result.output
+    assert "left out" not in result.output
+    assert _get_json(db_path, DOC_A)["project_fields"] == {"board-a": {"subsystem": "power"}}
+
+
+def test_project_config_subsystem_is_left_out_with_a_note(
+    db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".rag.toml").write_text(_BOARD_A_TOML)
+    monkeypatch.chdir(tmp_path)
+    # Joining another board only: the doc is not in board-a, where the
+    # config's subsystem belongs. The rest of the write goes ahead.
+    result = _meta(db_path, DOC_A, "--add-project", "board-b", "--mpn", "X")
+    assert result.exit_code == 0, result.output
+    output = " ".join(result.output.split())  # Rich wraps the note
+    assert "sets subsystem for project 'board-a'; left out" in output
+    assert "is not in that project" in output
+    meta = _get_json(db_path, DOC_A)
+    assert meta["projects"] == ["board-b"] and meta["project_fields"] == {}
+    # A pure membership change on another board is not blocked either.
+    result = _meta(db_path, DOC_A, "--remove-project", "board-b")
+    assert result.exit_code == 0, result.output
+    # Writing in board-b: board-a's subsystem is not carried there.
+    result = _meta(db_path, DOC_A, "--add-project", "board-b")
+    assert result.exit_code == 0, result.output
+    result = _meta(db_path, DOC_A, "--project", "board-b", "--mpn", "Y")
+    assert result.exit_code == 0, result.output
+    assert "this write goes to project 'board-b'" in " ".join(result.output.split())
+    assert _get_json(db_path, DOC_A)["project_fields"] == {}
+    # A value given on the command line is what the user asked for.
+    result = _meta(
+        db_path, DOC_A, "--add-project", "board-b", "--project", "board-b", "--subsystem", "aux"
+    )
+    assert result.exit_code == 0, result.output
+    assert _get_json(db_path, DOC_A)["project_fields"] == {"board-b": {"subsystem": "aux"}}
+
+
+def test_clearing_a_subsystem_outside_the_project_prints_a_note(db_path: Path) -> None:
+    _meta(db_path, DOC_A, "--add-project", "board-a")
+    result = _meta(db_path, DOC_A, "--project", "gone", "--unset-field", "subsystem")
+    assert result.exit_code == 0, result.output
+    output = " ".join(result.output.split())  # Rich wraps the note
+    assert "not in project 'gone'" in output and "nothing was cleared" in output
+    # A blank value is a clear too.
+    result = _meta(db_path, DOC_A, "--project", "gone", "--field", "subsystem= ")
+    assert result.exit_code == 0, result.output
+    assert "nothing was cleared" in " ".join(result.output.split())
+    # In a project the document is in, no note.
+    result = _meta(db_path, DOC_A, "--project", "board-a", "--unset-field", "subsystem")
+    assert result.exit_code == 0, result.output
+    assert "Note:" not in result.output
+
+
+def test_project_alone_is_not_a_write(db_path: Path) -> None:
+    result = _meta(db_path, DOC_A, "--project", "board-a")
+    assert result.exit_code == 2 and "--project" in result.output
+
+
+def test_fields_add_project_scope(db_path: Path) -> None:
+    result = _fields("add", "board-ref", "--scope", "project", "--db", str(db_path))
+    assert result.exit_code == 0, result.output
+    assert "per project" in result.output
+    listed = _fields("list", "--db", str(db_path))
+    assert "subsystem" in listed.output and "project" in listed.output
 
 
 def test_no_flags_is_still_a_read(db_path: Path) -> None:

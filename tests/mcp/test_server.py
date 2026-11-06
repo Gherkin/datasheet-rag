@@ -422,20 +422,30 @@ def test_list_documents_filters_by_project(conn: Any) -> None:
         conn,
         "docA",
         add_projects=["p1"],
-        subsystem="mcu",
-        fields={"mpn": "STM32H743", "manufacturer": "ST"},
+        project="p1",
+        fields={"mpn": "STM32H743", "manufacturer": "ST", "subsystem": "mcu"},
     )
     set_metadata(
         conn,
         "docB",
         add_projects=["p2"],
-        subsystem="power",
-        fields={"mpn": "LM317", "manufacturer": "TI"},
+        project="p2",
+        fields={"mpn": "LM317", "manufacturer": "TI", "subsystem": "power"},
     )
 
     out = _list_documents_impl(project_id="p1", conn=conn)["items"]
     assert [d["doc_id"] for d in out] == ["docA"]
     assert out[0]["fields"]["mpn"] == ["STM32H743"]
+    assert out[0]["project_fields"] == {"p1": {"subsystem": "mcu"}}
+    assert "group_name" not in out[0] and "subsystem" not in out[0]
+
+    # subsystem filters inside the listed project.
+    assert (
+        _list_documents_impl(project_id="p1", fields={"subsystem": "power"}, conn=conn)["items"]
+        == []
+    )
+    out = _list_documents_impl(fields={"subsystem": "power"}, conn=conn)["items"]
+    assert [d["doc_id"] for d in out] == ["docB"]
 
 
 def test_list_documents_manufacturer_filter(conn: Any) -> None:
@@ -467,9 +477,11 @@ def test_list_metadata_fields_lists_builtins_and_user_keys(conn: Any) -> None:
         "name": "acme-pn",
         "description": "ACME part no.",
         "shape": "list",
+        "scope": "document",
         "roles": ["part"],
         "builtin": False,
     }
+    assert keys["subsystem"]["scope"] == "project"
 
 
 def test_search_rejects_unregistered_key_filter(conn: Any) -> None:

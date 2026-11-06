@@ -36,7 +36,6 @@ from datasheet_rag.store.fields import (
 from datasheet_rag.store.metadata import (
     DocMetadata,
     TitleSource,
-    apply_metadata_to_chunks,
     delete_metadata,
     get_metadata,
     list_docs,
@@ -90,7 +89,6 @@ __all__ = [
     "SearchFilters",
     "SearchResult",
     "TitleSource",
-    "apply_metadata_to_chunks",
     "connect",
     "count_api_keys",
     "count_chunks",

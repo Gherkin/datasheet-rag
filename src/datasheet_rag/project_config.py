@@ -1,7 +1,7 @@
 """Per-directory project defaults, discovered from ``.rag.toml`` files.
 
 Lets users drop small TOML files in a directory tree to set
-``project_id``/``group``/etc. once, instead of retyping them on every
+``project_id``/``tags``/fields once, instead of retyping them on every
 ``rag`` invocation. Discovery walks up from the current directory the same
 way git/pyproject-style tools find their config — but unlike those tools,
 *every* ``.rag.toml`` along the way is loaded and merged, nearest-wins, so
@@ -11,32 +11,36 @@ you can build a tree of configs:
       .rag.toml                      # project_id, [fields] manufacturer
       datasheets/
         power-subsystem/
-          .rag.toml                  # subsystem = "power", group = "psu"
+          .rag.toml                  # [fields] subsystem = "power"
           STM32H743VIT6/
             .rag.toml                # [fields] mpn = ["STM32H743VIT6"]
             datasheet.pdf
 
 Running ``rag ingest`` from inside ``STM32H743VIT6/`` merges all three files:
 the mpn-level config wins for what it sets (``mpn``), the subsystem-level
-config fills in ``subsystem``/``group``, and the project-level config supplies
-the rest (``project_id``, ``manufacturer``). ``tags`` are unioned across every
-level instead of overridden, and ``[fields]`` are merged name by name.
+config fills in ``subsystem``, and the project-level config supplies the rest
+(``project_id``, ``manufacturer``). ``tags`` are unioned across every level
+instead of overridden, and ``[fields]`` are merged name by name.
 
 Example ``.rag.toml``::
 
     project_id = "stm32-h7-devboard"
-    group = "power-subsystem"
-    subsystem = "mcu"
     tags = ["reference-manual"]
 
     [fields]
     mpn = ["STM32H743VIT6", "STM32H743ZIT6"]
     manufacturer = "STMicroelectronics"
     doc_type = "reference-manual"
+    subsystem = "mcu"            # per project: written in project_id
     acme-id = "D-0172"           # a field registered with `rag fields add`
 
 ``[fields]`` sets any registered field, built-in (``mpn``, ``manufacturer``,
-``doc_type``) or user-registered (GH #120).
+``doc_type``, ``subsystem``) or user-registered (GH #120). A project-scoped
+field such as ``subsystem`` is written in the config's ``project_id``
+and only there. ``rag metadata`` and ``rag ingest`` leave it out, with a
+note, when the write cannot put it there (``--project``/``--project-id``
+naming another project, or a document not in the config's project), and
+leave it out silently when the document leaves that project (GH #123).
 
 The schema is closed: an unknown key, a value of the wrong type or a file
 that is not valid TOML raises ``ProjectConfigError`` rather than being
@@ -57,8 +61,15 @@ from datasheet_rag.store.fields import BUILTIN_FIELDS, FieldValue
 
 CONFIG_FILENAME = ".rag.toml"
 
-_SCALAR_KEYS = ("project_id", "group", "subsystem")
+_SCALAR_KEYS = ("project_id",)
 _KNOWN_KEYS = frozenset({*_SCALAR_KEYS, "tags", "fields"})
+
+#: Top-level keys removed in GH #123, with what replaces them. Named in the
+#: error so an old config says how to fix it, not only that it is wrong.
+_REMOVED_KEYS = {
+    "group": 'group was removed; use [fields] subsystem = "…"',
+    "subsystem": 'subsystem is a field now; move it under [fields]: subsystem = "…"',
+}
 
 
 class ProjectConfigError(ValueError):
@@ -71,8 +82,6 @@ class ProjectConfig:
 
     path: Path
     project_id: str | None = None
-    group: str | None = None
-    subsystem: str | None = None
     tags: list[str] | None = None
     #: Registered-field values. Whether each field is registered is checked
     #: when the values are written, not here: loading a config must not need
@@ -120,6 +129,11 @@ def _load_config(candidate: Path) -> ProjectConfig:
     except OSError as e:
         raise ProjectConfigError(f"{candidate}: cannot be read: {e}") from e
 
+    removed = sorted(set(data) & set(_REMOVED_KEYS))
+    if removed:
+        raise ProjectConfigError(
+            f"{candidate}: " + "; ".join(_REMOVED_KEYS[k] for k in removed) + " (GH #123)"
+        )
     unknown = sorted(set(data) - _KNOWN_KEYS)
     if unknown:
         raise ProjectConfigError(
@@ -140,8 +154,6 @@ def _load_config(candidate: Path) -> ProjectConfig:
         path=candidate,
         # Stored project names are stripped (GH #121); a blank one is unset.
         project_id=(data.get("project_id") or "").strip() or None,
-        group=data.get("group"),
-        subsystem=data.get("subsystem"),
         tags=tags,
         fields=fields or None,
     )
@@ -167,9 +179,9 @@ def find_project_configs(start: Path) -> list[ProjectConfig]:
 def merge_project_configs(configs: Sequence[ProjectConfig]) -> ProjectConfig | None:
     """Merge a most-specific-first chain of configs into one effective config.
 
-    Scalar settings (``project_id``, ``group``, ``subsystem``) use the nearest
-    value that's set — a deeper ``.rag.toml`` overrides its ancestors, the
-    same way directory-local config overrides project-wide config elsewhere.
+    ``project_id`` uses the nearest value that's set — a deeper ``.rag.toml``
+    overrides its ancestors, the same way directory-local config overrides
+    project-wide config elsewhere.
     ``tags`` are unioned across every level instead, since tags are additive
     labels rather than a single value to override (de-duplicated, nearest first).
     ``[fields]`` merge name by name, the nearest file winning per name (a list
@@ -200,8 +212,6 @@ def merge_project_configs(configs: Sequence[ProjectConfig]) -> ProjectConfig | N
     return ProjectConfig(
         path=configs[0].path,
         project_id=_first("project_id"),
-        group=_first("group"),
-        subsystem=_first("subsystem"),
         tags=tags or None,
         fields=fields or None,
     )

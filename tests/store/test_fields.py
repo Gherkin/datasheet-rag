@@ -42,6 +42,8 @@ def test_builtin_fields_ship_registered(conn: sqlite3.Connection) -> None:
     assert {f.name for f in BUILTIN_FIELDS} <= set(fields)
     assert fields["mpn"].shape == "list" and fields["mpn"].roles == ["part"]
     assert fields["manufacturer"].shape == "single" and fields["manufacturer"].builtin
+    assert fields["mpn"].scope == "document"
+    assert fields["subsystem"].scope == "project" and fields["subsystem"].builtin
 
 
 @pytest.mark.parametrize(
@@ -60,7 +62,9 @@ def test_builtin_fields_ship_registered(conn: sqlite3.Connection) -> None:
         ("running_header", "reserved"),
         ("id", "reserved"),  # `rag list --columns` alias of doc_id
         ("chunk_count", "reserved"),
+        ("project_fields", "reserved"),
         ("mpn", "already registered"),
+        ("subsystem", "already registered"),
     ],
 )
 def test_register_rejects_bad_names(conn: sqlite3.Connection, name: str, message: str) -> None:
@@ -86,6 +90,92 @@ def test_register_rejects_unknown_shape_and_role(conn: sqlite3.Connection) -> No
         register_field(conn, "a", shape="many")  # type: ignore[arg-type]
     with pytest.raises(MetadataFieldError, match="unknown role"):
         register_field(conn, "a", roles=["boss"])
+    with pytest.raises(MetadataFieldError, match="unknown scope"):
+        register_field(conn, "a", scope="board")  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# Project-scoped fields (GH #123)
+# ---------------------------------------------------------------------------
+
+
+def test_project_field_holds_one_value_per_project(conn: sqlite3.Connection) -> None:
+    set_metadata(conn, "ldo", add_projects=["netdaq", "board-b"])
+    set_metadata(conn, "ldo", fields={"subsystem": "power"}, project="netdaq")
+    md = set_metadata(conn, "ldo", fields={"subsystem": "aux"}, project="board-b")
+    assert md.project_fields == {"netdaq": {"subsystem": "power"}, "board-b": {"subsystem": "aux"}}
+    # Not a document-level value.
+    assert "subsystem" not in md.fields
+
+    def ids(project: str | None, value: str) -> list[str]:
+        return [m.doc_id for m in list_docs(conn, project_id=project, fields={"subsystem": value})]
+
+    assert ids("netdaq", "power") == ["ldo"]
+    assert ids("netdaq", "aux") == []
+    assert ids("board-b", "AUX") == ["ldo"]  # case-insensitive
+    # Unscoped: any project.
+    assert ids(None, "aux") == ["ldo"]
+    assert ids(None, "power") == ["ldo"]
+
+    # Clearing one project's value keeps the other.
+    md = set_metadata(conn, "ldo", fields={"subsystem": ""}, project="board-b")
+    assert md.project_fields == {"netdaq": {"subsystem": "power"}}
+
+
+def test_project_field_needs_a_project(conn: sqlite3.Connection) -> None:
+    set_metadata(conn, "d", add_projects=["only"])
+    # Never guessed from the document's one project.
+    with pytest.raises(MetadataFieldError, match="one value per project"):
+        set_metadata(conn, "d", fields={"subsystem": "power"})
+    with pytest.raises(MetadataFieldError, match="not in project"):
+        set_metadata(conn, "d", fields={"subsystem": "power"}, project="other")
+    md = get_metadata(conn, "d")
+    assert md is not None and md.project_fields == {}
+    # Joining in the same call is enough.
+    md = set_metadata(
+        conn, "d", add_projects=["other"], fields={"subsystem": "power"}, project="other"
+    )
+    assert md.project_fields == {"other": {"subsystem": "power"}}
+    # Leaving in the same call is not.
+    with pytest.raises(MetadataFieldError, match="not in project"):
+        set_metadata(
+            conn, "d", remove_projects=["other"], fields={"subsystem": "x"}, project="other"
+        )
+
+
+def test_clearing_a_project_field_needs_no_membership(conn: sqlite3.Connection) -> None:
+    set_metadata(conn, "d", add_projects=["a"])
+    # The document holds no value outside its projects: nothing to clear.
+    md = set_metadata(conn, "d", fields={"subsystem": None}, project="gone")
+    assert md.project_fields == {}
+    # Leaving and clearing in one call is fine too.
+    set_metadata(conn, "d", fields={"subsystem": "power"}, project="a")
+    md = set_metadata(conn, "d", remove_projects=["a"], fields={"subsystem": ""}, project="a")
+    assert md.projects == [] and md.project_fields == {}
+
+
+def test_leaving_a_project_drops_its_project_fields(conn: sqlite3.Connection) -> None:
+    set_metadata(conn, "d", add_projects=["a", "b"])
+    set_metadata(conn, "d", fields={"subsystem": "power"}, project="a")
+    set_metadata(conn, "d", fields={"subsystem": "rf"}, project="b")
+    md = set_metadata(conn, "d", remove_projects=["a"])
+    assert md.project_fields == {"b": {"subsystem": "rf"}}
+    # Rejoining starts empty.
+    md = set_metadata(conn, "d", add_projects=["a"])
+    assert md.project_fields == {"b": {"subsystem": "rf"}}
+
+
+def test_user_project_field_and_its_removal(conn: sqlite3.Connection) -> None:
+    spec = register_field(conn, "board-ref", shape="list", scope="project")
+    assert spec.scope == "project"
+    set_metadata(conn, "d", add_projects=["p"])
+    md = set_metadata(conn, "d", fields={"board-ref": ["U1", "U7"]}, project="p")
+    assert md.project_fields == {"p": {"board-ref": ["U1", "U7"]}}
+    with pytest.raises(MetadataFieldError, match="clear"):
+        remove_field(conn, "board-ref")
+    assert remove_field(conn, "board-ref", clear=True) == 1
+    md2 = get_metadata(conn, "d")
+    assert md2 is not None and md2.project_fields == {}
 
 
 def test_set_metadata_validates_fields_before_writing(conn: sqlite3.Connection) -> None:
@@ -132,10 +222,10 @@ def test_bookkeeping_is_separate_from_the_metadata_patch(conn: sqlite3.Connectio
     set_title_hints(conn, "d1", pdf_meta_title="Guide", running_header=None)
     set_needs_reembed(conn, "d1", True)
     # A later metadata write leaves the bookkeeping alone.
-    set_metadata(conn, "d1", subsystem="power")
+    set_metadata(conn, "d1", fields={"subsystem": "power"}, project="p")
     d1 = get_metadata(conn, "d1")
     assert d1 is not None
-    assert (d1.projects, d1.subsystem) == (["p"], "power")
+    assert (d1.projects, d1.project_fields) == (["p"], {"p": {"subsystem": "power"}})
     assert d1.pdf_meta_title == "Guide" and d1.running_header is None
     assert d1.needs_reembed is True
     assert d1.title_source == "auto"
@@ -183,6 +273,7 @@ def _make_v2_store(path: Path, rows: list[tuple[object, ...]]) -> None:
     """A store shaped as v2 left it: mpn/manufacturer/doc_type columns, and
     free-form ``attributes`` JSON holding the pipeline's bookkeeping."""
     c = connect(path, embedding_dim=EMBED_DIM)
+    c.execute("DROP TABLE doc_project_field_values")
     c.execute("DROP TABLE doc_field_values")
     c.execute("DROP TABLE metadata_fields")
     c.execute("DROP TABLE doc_metadata")

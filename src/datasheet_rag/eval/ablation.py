@@ -31,6 +31,7 @@ from datasheet_rag.chunking.summarizer import AbstractiveSummarizer
 from datasheet_rag.eval.dataset import EvalSet
 from datasheet_rag.eval.harness import Embedder, RunConfig, RunReport, run_eval
 from datasheet_rag.models.chunk import Chunk, ChunkGraph, ChunkLevel, LayoutType
+from datasheet_rag.store.fields import field_shapes, get_project_values_for_docs
 from datasheet_rag.store.metadata import set_metadata
 from datasheet_rag.store.projects import get_projects_for_docs, project_scope_sql
 from datasheet_rag.store.schema import connect
@@ -161,8 +162,6 @@ def build_variant_store(
 
     rows = src_conn.execute(sql, params).fetchall()
     chunks = [_row_to_chunk(r) for r in rows]
-    # Preserve group_name from the source row for parity.
-    group_by_id = {r["id"]: r["group_name"] for r in rows}
 
     payloads: list[str] = []
     embeddable: list[Chunk] = []
@@ -184,23 +183,26 @@ def build_variant_store(
     vectors_list = embedder.embed_texts(payloads) if payloads else []
     vectors = {c.id: v for c, v in zip(embeddable, vectors_list, strict=True)}
 
-    # Keep each chunk's group and each document's projects so scoping
-    # filters behave identically to the source.
+    # Keep each document's projects and per-project fields so scoping and
+    # subsystem filters behave identically to the source.
     for chunk in chunks:
-        insert_chunks(
-            dst,
-            [chunk],
-            vectors=vectors,
-            group_name=group_by_id.get(chunk.id),
-        )
+        insert_chunks(dst, [chunk], vectors=vectors)
     _copy_projects(src_conn, dst, sorted({c.doc_id for c in chunks}))
     return dst
 
 
 def _copy_projects(src: sqlite3.Connection, dst: sqlite3.Connection, doc_ids: list[str]) -> None:
-    """Give each document in ``dst`` the projects it has in ``src``."""
+    """Give each document in ``dst`` the projects it has in ``src``, and its
+    values there of the project-scoped fields ``dst`` has registered (the
+    built-in ``subsystem``; a fresh variant store has no user fields)."""
     for doc_id, projects in get_projects_for_docs(src, doc_ids).items():
         set_metadata(dst, doc_id, add_projects=projects)
+    registered = field_shapes(dst)
+    for doc_id, per_project in get_project_values_for_docs(src, doc_ids).items():
+        for project, values in per_project.items():
+            kept = {name: value for name, value in values.items() if name in registered}
+            if kept:
+                set_metadata(dst, doc_id, fields=kept, project=project)
 
 
 # ---------------------------------------------------------------------------
@@ -280,11 +282,6 @@ def build_macro_summarizer_variant_store(
     dim = _embedding_dim(src_conn)
     dst = connect(dst_path, embedding_dim=dim)
 
-    rows = src_conn.execute(
-        "SELECT id, group_name FROM chunks WHERE doc_id = ?", (doc_id,)
-    ).fetchall()
-    group_by_id = {r["id"]: r["group_name"] for r in rows}
-
     graph = _load_doc_graph_from_store(src_conn, doc_id)
     macro_chunks = graph.by_level(ChunkLevel.MACRO)
     original_context = {c.id: c.context_text for c in macro_chunks}
@@ -324,11 +321,6 @@ def build_macro_summarizer_variant_store(
             vectors[chunk_id] = vec
 
     for chunk in graph.chunks.values():
-        insert_chunks(
-            dst,
-            [chunk],
-            vectors=vectors,
-            group_name=group_by_id.get(chunk.id),
-        )
+        insert_chunks(dst, [chunk], vectors=vectors)
     _copy_projects(src_conn, dst, [doc_id])
     return dst

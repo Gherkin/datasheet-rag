@@ -24,6 +24,7 @@ from datasheet_rag.models.chunk import (
     ChunkMetadata,
     LayoutType,
 )
+from datasheet_rag.store.fields import MetadataFieldError
 from datasheet_rag.store.schema import connect
 
 EMBED_DIM = 4
@@ -132,6 +133,21 @@ def test_ingest_rejects_a_bad_project_patch_before_writing_chunks(
             embed=False,
         )
     assert backend.get_document(did) is None
+
+
+def test_ingest_rejects_a_project_field_outside_its_projects_before_writing_chunks(
+    backend: LocalBackend,
+) -> None:
+    did = "f" * 64
+    with pytest.raises(MetadataFieldError, match="not in project 'other'"):
+        backend.ingest_chunk_graph(
+            _plain_graph(did),
+            project_id="p1",
+            metadata=MetadataPatch(fields={"subsystem": "power"}, project="other"),
+            embed=False,
+        )
+    assert backend.get_document(did) is None
+    assert _doc_projects(backend, did) == []
 
 
 def _doc_projects(backend: LocalBackend, did: str) -> list[str]:
@@ -422,6 +438,7 @@ def test_server_metadata_fields_routes_and_field_filters(client) -> None:
             "name": "acme-id",
             "description": "ACME doc no.",
             "shape": "single",
+            "scope": "document",
             "roles": [],
             "builtin": False,
         },
@@ -474,12 +491,60 @@ def test_server_metadata_fields_routes_and_field_filters(client) -> None:
     assert "acme-id" not in md["fields"]
 
 
+def test_server_subsystem_is_per_project_and_group_name_is_refused(client) -> None:
+    did = "f" * 64
+    graph = _graph_with_figure(did).model_dump(mode="json")
+
+    def ingest(**extra: object):
+        payload = {"graph": graph, "embed": False, **extra}
+        files = [("payload", ("payload.json", json.dumps(payload).encode(), "application/json"))]
+        return client.post("/ingest", files=files)
+
+    # Removed in GH #123: refused, not silently dropped.
+    r = ingest(project_id="netdaq", group_name="psu")
+    assert r.status_code == 422 and "group_name was removed" in r.text
+    assert client.get("/documents", params={"group_name": "psu"}).status_code == 422
+    # subsystem with no project to put it in fails before any chunk is written.
+    r = ingest(metadata={"fields": {"subsystem": "power"}})
+    assert r.status_code == 400 and "one value per project" in r.text
+    assert client.get(f"/documents/{did}/metadata").status_code == 204
+
+    # The ingest project is where it goes.
+    r = ingest(project_id="netdaq", metadata={"fields": {"subsystem": "power"}})
+    assert r.status_code == 200, r.text
+    md = client.get(f"/documents/{did}/metadata").json()
+    assert md["project_fields"] == {"netdaq": {"subsystem": "power"}}
+
+    # A patch names its project; another project of the same document differs.
+    r = client.patch(
+        f"/documents/{did}/metadata",
+        json={"add_projects": ["board-b"], "project": "board-b", "fields": {"subsystem": "aux"}},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["project_fields"] == {
+        "board-b": {"subsystem": "aux"},
+        "netdaq": {"subsystem": "power"},
+    }
+    hits = client.get(
+        "/documents", params={"project_id": "board-b", "field": "subsystem:power"}
+    ).json()["documents"]
+    assert hits == []
+    hits = client.get(
+        "/documents", params={"project_id": "netdaq", "field": "subsystem:power"}
+    ).json()["documents"]
+    assert [d["doc_id"] for d in hits] == [did]
+
+    # Registering a project-scoped field over HTTP.
+    r = client.post("/metadata/fields", json={"name": "board-ref", "scope": "project"})
+    assert r.status_code == 200 and r.json()["field"]["scope"] == "project"
+
+
 def test_server_needs_reembed_route(client) -> None:
     did = "e" * 64
     # An id that is not in the store is a 400 and leaves no sidecar row.
     r = client.put(f"/documents/{did}/needs-reembed", json={"value": True})
     assert r.status_code == 400
-    r = client.patch(f"/documents/{did}/metadata", json={"subsystem": "power"})
+    r = client.patch(f"/documents/{did}/metadata", json={"tags": ["power"]})
     assert r.status_code == 400
     assert client.put(f"/documents/{did}/title", json={"title": "X"}).status_code == 400
     assert client.get(f"/documents/{did}/metadata").status_code == 204

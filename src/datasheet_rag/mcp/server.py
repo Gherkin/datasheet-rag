@@ -592,7 +592,6 @@ def _navigate_impl(
 def _list_documents_impl(
     *,
     project_id: str | None = None,
-    group: str | None = None,
     mpn: str | None = None,
     manufacturer: str | None = None,
     fields: dict[str, str] | None = None,
@@ -617,7 +616,6 @@ def _list_documents_impl(
         field_filter[name] = value
     page = be.list_documents(
         project_id=_resolve_project(project_id),
-        group_name=group,
         fields=field_filter or None,
         limit=limit,
         offset=offset,
@@ -626,9 +624,8 @@ def _list_documents_impl(
         {
             "doc_id": d.doc_id,
             "projects": d.projects,
-            "group_name": d.group_name,
-            "subsystem": d.subsystem,
             "fields": d.fields,
+            "project_fields": d.project_fields,
             "tags": d.tags,
             **({"doc_title": d.doc_title} if d.doc_title else {}),
             **({"page_count": d.page_count} if d.page_count is not None else {}),
@@ -1020,8 +1017,10 @@ def build_server(
         - `fields`: restrict to documents whose metadata fields match, e.g.
                     {"mpn": "INA226"} or {"manufacturer": "TI"}. All must
                     match; a list field (like mpn) matches if any value is
-                    equal; case-insensitive. `list_metadata_fields` names
-                    the fields.
+                    equal; case-insensitive. A per-project field (like
+                    subsystem) matches in the project searched, or in any
+                    project when the search is unscoped.
+                    `list_metadata_fields` names the fields.
         """
         return _search_impl(
             query,
@@ -1079,7 +1078,6 @@ def build_server(
     @with_paging
     def list_documents(
         project_id: str | None = None,
-        group: str | None = None,
         mpn: str | None = None,
         manufacturer: str | None = None,
         fields: dict[str, str] | None = None,
@@ -1089,19 +1087,20 @@ def build_server(
         """List documents in the current (or specified) project, by doc_id.
 
         Every ingested document appears, whether or not metadata has been
-        assigned to it; untagged ones come back with null sidecar fields.
-        Each row's `fields` holds its metadata-field values (mpn, manufacturer,
-        doc_type and any user-registered field — see `list_metadata_fields`).
+        assigned to it; untagged ones come back with empty sidecar fields.
+        Each row's `fields` holds its document-level field values (mpn,
+        manufacturer, doc_type and any user-registered field — see
+        `list_metadata_fields`). `project_fields` holds the values that differ
+        per project, such as `subsystem`: {"<project>": {"subsystem": "power"}}.
 
-        Filtering by group or a field narrows this to documents that do have
-        metadata, since that is the only place those live. `mpn` and
-        `manufacturer` are shortcuts for `fields={"mpn": …}` /
-        `{"manufacturer": …}`; `fields` filters on any registered field (all
-        must match, case-insensitive).
+        Filtering by a field narrows this to documents that do have metadata,
+        since that is the only place those live. `mpn` and `manufacturer` are
+        shortcuts for `fields={"mpn": …}` / `{"manufacturer": …}`; `fields`
+        filters on any registered field (all must match, case-insensitive). A
+        per-project field such as `subsystem` matches in the current project.
         """
         return _list_documents_impl(
             project_id=project_id,
-            group=group,
             mpn=mpn,
             manufacturer=manufacturer,
             fields=fields,
@@ -1115,10 +1114,11 @@ def build_server(
         """List the metadata fields documents can carry and be filtered on.
 
         Each field has a name, a description, a shape ('single' value or
-        'list' of values), roles ('part' = its values are part numbers) and
-        whether it is built in. Use the names with the `fields` filter of
-        `search` and `list_documents`. Built-ins: mpn, manufacturer, doc_type;
-        the rest are registered by whoever runs this store, e.g. an internal
+        'list' of values), a scope ('document' = one value per document,
+        'project' = one value per document in each project), roles ('part' =
+        its values are part numbers) and whether it is built in. Use the names
+        with the `fields` filter of `search` and `list_documents`. Built-ins:
+        mpn, manufacturer, doc_type, and the project-scoped subsystem; the rest are registered by whoever runs this store, e.g. an internal
         document number.
         """
         return _list_metadata_fields_impl(backend=backend)

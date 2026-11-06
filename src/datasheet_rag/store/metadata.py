@@ -1,22 +1,18 @@
 """Document-level metadata sidecar.
 
-Sits next to ``chunks`` and stores per-document fields (projects, group,
-tags, and the values of registered fields such as MPN and manufacturer —
-see ``store.fields``) that are independent of any single chunk. Project
-membership lives in its own table (``store.projects``); this module reads
-and writes it with the rest of the document's metadata. It also
-holds the pipeline's own bookkeeping for each document: title provenance,
-the ingest-time title hints and the re-embed marker. Those are typed
-columns the pipeline writes; a metadata patch cannot set them.
+Sits next to ``chunks`` and stores per-document fields (projects, tags, and
+the values of registered fields such as MPN, manufacturer and the
+project-scoped subsystem — see ``store.fields``) that are independent of any
+single chunk. Project membership lives in its own table (``store.projects``);
+this module reads and writes it with the rest of the document's metadata. It
+also holds the pipeline's own bookkeeping for each document: title
+provenance, the ingest-time title hints and the re-embed marker. Those are
+typed columns the pipeline writes; a metadata patch cannot set them.
 
-Two properties of this sidecar matter:
-
-* It can be written **before** ingestion completes — useful for the CLI
-  to register a PDF up front so its chunks are in the right projects
-  once they're produced.
-* :func:`apply_metadata_to_chunks` back-fills ``chunks.group_name`` from
-  the sidecar after chunks have been inserted, so existing rows pick up
-  changes without a full re-ingest.
+The sidecar can be written **before** ingestion completes — useful for the
+CLI to register a PDF up front so its chunks are in the right projects once
+they're produced. Chunks carry none of it: every read scopes and filters
+through these tables.
 """
 
 from __future__ import annotations
@@ -24,16 +20,22 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Mapping
-from typing import Any, Literal, get_args
+from typing import Any, Literal, NamedTuple, get_args
 
 from pydantic import BaseModel, Field
 
 from datasheet_rag.store.fields import (
+    FieldScope,
     FieldShape,
+    MetadataFieldError,
     check_filter_fields,
+    check_patch_project,
+    delete_doc_project_values,
     delete_doc_values,
     field_filter_sql,
+    field_scopes,
     field_shapes,
+    get_project_values_for_docs,
     get_values_for_docs,
     normalize_field_patch_for,
     write_field_values,
@@ -53,13 +55,15 @@ class DocMetadata(BaseModel):
     doc_id: str
     #: Every project the document belongs to, sorted (``doc_projects``).
     projects: list[str] = Field(default_factory=list)
-    group_name: str | None = None
-    subsystem: str | None = None
     tags: list[str] = Field(default_factory=list)
-    #: Values of registered fields (``store.fields``), including the built-in
-    #: ``mpn`` (a list), ``manufacturer`` and ``doc_type``. A field with no
-    #: value on this document is absent.
+    #: Values of document-scoped fields (``store.fields``), including the
+    #: built-in ``mpn`` (a list), ``manufacturer`` and ``doc_type``. A field
+    #: with no value on this document is absent.
     fields: dict[str, str | list[str]] = Field(default_factory=dict)
+    #: Values of project-scoped fields such as ``subsystem``, per project:
+    #: ``{"netdaq": {"subsystem": "power"}}``. A project with no values is
+    #: absent.
+    project_fields: dict[str, dict[str, str | list[str]]] = Field(default_factory=dict)
     #: Pipeline bookkeeping, read-only through the metadata API: where the
     #: title came from (see below), whether `rag repair` marked the document
     #: for re-embedding, and the two title hints captured at ingest.
@@ -188,16 +192,16 @@ def _row_to_metadata(
     row: sqlite3.Row,
     fields: dict[str, str | list[str]] | None = None,
     projects: list[str] | None = None,
+    project_fields: dict[str, dict[str, str | list[str]]] | None = None,
 ) -> DocMetadata:
     tags_raw = row["tags"]
     tags = json.loads(tags_raw) if tags_raw else []
     return DocMetadata(
         doc_id=row["doc_id"],
         projects=list(projects or []),
-        group_name=row["group_name"],
-        subsystem=row["subsystem"],
         tags=tags,
         fields=dict(fields or {}),
+        project_fields=dict(project_fields or {}),
         title_source=row["title_source"] or "auto",
         needs_reembed=bool(row["needs_reembed"]),
         pdf_meta_title=row["pdf_meta_title"],
@@ -216,29 +220,73 @@ def get_metadata(conn: sqlite3.Connection, doc_id: str) -> DocMetadata | None:
         return None
     values = get_values_for_docs(conn, [doc_id])
     projects = get_projects_for_docs(conn, [doc_id])
-    return _row_to_metadata(row, values.get(doc_id), projects.get(doc_id))
+    project_values = get_project_values_for_docs(conn, [doc_id])
+    return _row_to_metadata(
+        row, values.get(doc_id), projects.get(doc_id), project_values.get(doc_id)
+    )
 
 
-def check_patch(
-    conn: sqlite3.Connection, *, fields: Mapping[str, Any] | None = None
-) -> dict[str, list[str]]:
-    """Validate the ``fields`` of a metadata write.
+class CheckedWrite(NamedTuple):
+    """A metadata write that :func:`check_write` accepted, normalised."""
 
-    Returns the normalised field patch (see
-    ``store.fields.normalize_field_patch``). Raises :class:`MetadataFieldError`
-    for an unregistered field or a value that does not fit its field's shape.
-    Writes nothing, so a caller can check a patch before work it would be a
-    waste to throw away (ingest does).
+    #: ``{field: [values]}``; an empty list removes the field's value.
+    fields: dict[str, list[str]]
+    scopes: dict[str, FieldScope]
+    #: Where the project-scoped fields go, stripped; ``None`` when not named.
+    project: str | None
+    add: list[str]
+    remove: list[str]
+
+
+def check_write(
+    conn: sqlite3.Connection,
+    doc_id: str,
+    *,
+    add_projects: list[str] | None = None,
+    remove_projects: list[str] | None = None,
+    fields: Mapping[str, Any] | None = None,
+    project: str | None = None,
+) -> CheckedWrite:
+    """Validate a metadata write (the arguments of :func:`set_metadata`).
+
+    Raises :class:`MetadataFieldError` for an unregistered field, a value
+    that does not fit its field's shape, a project-scoped field with no
+    ``project``, or a project-scoped value set in a project the document is
+    not in after this write. Clearing a project-scoped value needs no
+    membership: the document holds no value outside its projects. Raises
+    ``ValueError`` for a project both added and removed. Writes nothing, so
+    ingest checks a patch before work it would be a waste to throw away.
     """
-    return check_patch_for(field_shapes(conn), fields=fields)
+    project = project.strip() if project is not None and project.strip() else None
+    scopes = field_scopes(conn)
+    field_patch = check_patch_for(field_shapes(conn), scopes, fields=fields, project=project)
+    add, remove = check_project_change(add_projects, remove_projects)
+    sets_project_value = any(
+        values and scopes.get(name) == "project" for name, values in field_patch.items()
+    )
+    if project is not None and sets_project_value:
+        current = get_projects_for_docs(conn, [doc_id]).get(doc_id, [])
+        if project in remove or (project not in current and project not in add):
+            raise MetadataFieldError(
+                f"{doc_id} is not in project {project!r}; add it to the project "
+                "first (--add-project) to set its project fields there"
+            )
+    return CheckedWrite(field_patch, scopes, project, add, remove)
 
 
 def check_patch_for(
-    shapes: Mapping[str, FieldShape], *, fields: Mapping[str, Any] | None = None
+    shapes: Mapping[str, FieldShape],
+    scopes: Mapping[str, FieldScope],
+    *,
+    fields: Mapping[str, Any] | None = None,
+    project: str | None = None,
 ) -> dict[str, list[str]]:
-    """:func:`check_patch` against a registry already read (``{name: shape}``),
-    so a client can reject a bad patch before parsing a PDF."""
-    return normalize_field_patch_for(shapes, fields or {})
+    """Check ``fields`` against a registry already read, so a client can
+    reject a bad patch before parsing a PDF. Returns the normalised patch
+    (see ``store.fields.normalize_field_patch``)."""
+    patch = normalize_field_patch_for(shapes, fields or {})
+    check_patch_project(scopes, patch, project)
+    return patch
 
 
 def set_metadata(
@@ -247,67 +295,62 @@ def set_metadata(
     *,
     add_projects: list[str] | None = None,
     remove_projects: list[str] | None = None,
-    group_name: str | None = None,
-    subsystem: str | None = None,
     tags: list[str] | None = None,
     fields: Mapping[str, Any] | None = None,
+    project: str | None = None,
 ) -> DocMetadata:
     """Upsert metadata for ``doc_id`` with **partial** merge semantics.
 
     A parameter left as ``None`` (its default) means "leave the existing
-    value alone". To clear a string field, pass an empty string; to
-    clear ``tags`` pass ``[]``.
+    value alone". To clear ``tags`` pass ``[]``.
 
     Merge rules
     -----------
     * ``add_projects`` / ``remove_projects``: the document joins / leaves
       each named project; its other projects are left alone. A project in
       both lists, or an empty name, raises ``ValueError`` before anything
-      is written.
-    * Scalar fields: overwrite with the new value when not ``None``.
+      is written. Leaving a project deletes the document's project-scoped
+      values in it.
     * ``tags``: replace wholesale (not merged).
     * ``fields``: per field — a field named in the patch has its value
       replaced; ``None``, ``""`` or ``[]`` removes it; fields not named are
       left alone. Every field must be registered (``store.fields``) and its
       value must fit the field's shape, or :class:`MetadataFieldError` is
       raised before anything is written.
+    * ``project``: where the project-scoped fields in ``fields`` are
+      written. Required when ``fields`` names one. To set a value there the
+      document must be in that project after this write (an
+      ``add_projects`` in the same call counts); clearing one needs no
+      membership. Otherwise :class:`MetadataFieldError`, before anything is
+      written (see :func:`check_write`).
 
     Returns the resulting :class:`DocMetadata` after the upsert.
     """
-    field_patch = check_patch(conn, fields=fields)
-    add, remove = check_project_change(add_projects, remove_projects)
+    checked = check_write(
+        conn,
+        doc_id,
+        add_projects=add_projects,
+        remove_projects=remove_projects,
+        fields=fields,
+        project=project,
+    )
 
     existing = get_metadata(conn, doc_id)
-    if existing is None:
-        existing = DocMetadata(doc_id=doc_id)
-    merged = existing.model_copy(
-        update={
-            "group_name": group_name if group_name is not None else existing.group_name,
-            "subsystem": subsystem if subsystem is not None else existing.subsystem,
-            "tags": list(tags) if tags is not None else existing.tags,
-        }
-    )
+    merged_tags = list(tags) if tags is not None else (existing.tags if existing else [])
 
     conn.execute(
         """
-        INSERT INTO doc_metadata (
-            doc_id, group_name, subsystem, tags, updated_at
-        ) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+        INSERT INTO doc_metadata (doc_id, tags, updated_at)
+        VALUES (?, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(doc_id) DO UPDATE SET
-            group_name   = excluded.group_name,
-            subsystem    = excluded.subsystem,
             tags         = excluded.tags,
             updated_at   = CURRENT_TIMESTAMP
         """,
-        (
-            merged.doc_id,
-            merged.group_name,
-            merged.subsystem,
-            json.dumps(merged.tags),
-        ),
+        (doc_id, json.dumps(merged_tags)),
     )
-    change_projects(conn, doc_id, add=add, remove=remove)
-    write_field_values(conn, doc_id, field_patch)
+    change_projects(conn, doc_id, add=checked.add, remove=checked.remove)
+    delete_doc_project_values(conn, doc_id, checked.remove)
+    write_field_values(conn, doc_id, checked.fields, scopes=checked.scopes, project=checked.project)
     conn.commit()
 
     # Re-read so updated_at reflects the DB clock.
@@ -353,16 +396,16 @@ def list_docs(
     conn: sqlite3.Connection,
     *,
     project_id: str | None = None,
-    group_name: str | None = None,
     fields: dict[str, str] | None = None,
 ) -> list[DocMetadata]:
     """Return all sidecar rows matching the optional filters.
 
     ``project_id`` keeps documents that belong to that project (among any
     others). ``fields`` filters on registered fields, AND-ed: ``{"mpn": "INA226"}``
-    keeps documents whose mpn list contains INA226 (case-insensitive). Naming
-    an unregistered field raises :class:`MetadataFieldError` rather than
-    silently matching nothing.
+    keeps documents whose mpn list contains INA226 (case-insensitive). A
+    project-scoped field matches in ``project_id`` when one is given, else in
+    any project. Naming an unregistered field raises :class:`MetadataFieldError`
+    rather than silently matching nothing.
     """
     clauses: list[str] = []
     params: list[object] = []
@@ -370,12 +413,11 @@ def list_docs(
         clause, clause_params = project_scope_sql(project_id, doc_id_column="doc_id")
         clauses.append(clause)
         params.extend(clause_params)
-    if group_name is not None:
-        clauses.append("group_name = ?")
-        params.append(group_name)
     if fields:
         check_filter_fields(field_shapes(conn), fields)
-        field_clauses, field_params = field_filter_sql(fields, doc_id_column="doc_id")
+        field_clauses, field_params = field_filter_sql(
+            fields, doc_id_column="doc_id", project_id=project_id
+        )
         clauses.extend(field_clauses)
         params.extend(field_params)
 
@@ -388,27 +430,13 @@ def list_docs(
     wanted = [r["doc_id"] for r in rows] if clauses else None
     values = get_values_for_docs(conn, wanted)
     projects = get_projects_for_docs(conn, wanted)
-    return [_row_to_metadata(r, values.get(r["doc_id"]), projects.get(r["doc_id"])) for r in rows]
-
-
-def apply_metadata_to_chunks(conn: sqlite3.Connection, doc_id: str) -> int:
-    """Back-fill ``chunks.group_name`` from the sidecar.
-
-    No-ops (returns 0) if there is no sidecar row or its ``group_name`` is
-    unset. The chunks' other columns are not touched. Projects need no
-    back-fill: chunks are scoped through ``doc_projects``.
-
-    Returns the number of chunk rows updated.
-    """
-    md = get_metadata(conn, doc_id)
-    if md is None or md.group_name is None:
-        return 0
-
-    cur = conn.cursor()
-    cur.execute(
-        "UPDATE chunks SET group_name = ? WHERE doc_id = ?",
-        (md.group_name, doc_id),
-    )
-    updated = cur.rowcount
-    conn.commit()
-    return int(updated)
+    project_values = get_project_values_for_docs(conn, wanted)
+    return [
+        _row_to_metadata(
+            r,
+            values.get(r["doc_id"]),
+            projects.get(r["doc_id"]),
+            project_values.get(r["doc_id"]),
+        )
+        for r in rows
+    ]

@@ -54,7 +54,7 @@ from datasheet_rag.store import (
     revoke_api_key,
     stored_embedding_dim,
 )
-from datasheet_rag.store.fields import FieldShape, shapes_of
+from datasheet_rag.store.fields import FieldScope, FieldShape, scopes_of, shapes_of
 from datasheet_rag.store.metadata import check_patch_for
 
 if TYPE_CHECKING:
@@ -113,12 +113,28 @@ class TitleBody(BaseModel):
 class RegisterFieldBody(BaseModel):
     name: str
     shape: FieldShape = "single"
+    scope: FieldScope = "document"
     description: str = ""
     roles: list[str] = Field(default_factory=list)
 
 
 class NeedsReembedBody(BaseModel):
     value: bool
+
+
+def _reject_group_name(present: bool) -> None:
+    """Refuse a request that still sends ``group_name`` (removed in GH #123).
+
+    Dropping it silently would ingest a document without the label the client
+    meant to set, or return an unfiltered listing that looks filtered.
+    """
+    if present:
+        raise HTTPException(
+            422,
+            "group_name was removed (GH #123): set the project-scoped 'subsystem' "
+            "field instead (metadata.fields.subsystem, or field=subsystem:<value> "
+            "to filter)",
+        )
 
 
 def _parse_field_params(raw: list[str] | None) -> dict[str, str] | None:
@@ -411,12 +427,6 @@ def build_app() -> FastAPI:
         be.set_needs_reembed(be.resolve_doc_id(doc_id), body.value)
         return {"needs_reembed": body.value}
 
-    @app.post("/documents/{doc_id}/apply-metadata", dependencies=ingest_dep)
-    def document_apply_metadata(
-        doc_id: str, be: LocalBackend = Depends(get_backend)
-    ) -> dict[str, Any]:
-        return {"updated": be.apply_metadata_to_chunks(doc_id)}
-
     @app.delete("/documents/{doc_id}", dependencies=ingest_dep)
     def document_delete(
         doc_id: str, request: Request, be: LocalBackend = Depends(get_backend)
@@ -452,9 +462,9 @@ def build_app() -> FastAPI:
         offset: int = Query(0, ge=0),
         be: LocalBackend = Depends(get_backend),
     ) -> dict[str, Any]:
+        _reject_group_name(group_name is not None)
         page = be.list_documents(
             project_id=project_id,
-            group_name=group_name,
             fields=_parse_field_params(field),
             limit=limit,
             offset=offset,
@@ -472,9 +482,8 @@ def build_app() -> FastAPI:
         field: list[str] | None = Query(None),
         be: LocalBackend = Depends(get_backend),
     ) -> dict[str, Any]:
-        docs = be.list_docs(
-            project_id=project_id, group_name=group_name, fields=_parse_field_params(field)
-        )
+        _reject_group_name(group_name is not None)
+        docs = be.list_docs(project_id=project_id, fields=_parse_field_params(field))
         return {"documents": [d.model_dump(mode="json") for d in docs]}
 
     # -- metadata fields (GH #120) ----------------------------------------
@@ -487,7 +496,11 @@ def build_app() -> FastAPI:
         body: RegisterFieldBody, be: LocalBackend = Depends(get_backend)
     ) -> dict[str, Any]:
         spec = be.register_field(
-            body.name, shape=body.shape, description=body.description, roles=body.roles
+            body.name,
+            shape=body.shape,
+            scope=body.scope,
+            description=body.description,
+            roles=body.roles,
         )
         return {"field": spec.model_dump(mode="json")}
 
@@ -627,6 +640,7 @@ def build_app() -> FastAPI:
             name = f.filename or ""
             chunk_id, _, ext = name.rpartition(".")
             fig_uploads[chunk_id] = (await f.read(), ext or "png")
+        _reject_group_name(data.get("group_name") is not None)
         metadata = MetadataPatch.model_validate(data["metadata"]) if data.get("metadata") else None
         # A client that embedded for itself sends the vectors along (GH #43);
         # unpacking them here is what keeps this server off an embedding model.
@@ -646,7 +660,6 @@ def build_app() -> FastAPI:
                 graph,
                 figures=fig_uploads or None,
                 project_id=data.get("project_id"),
-                group_name=data.get("group_name"),
                 metadata=metadata,
                 embed=data.get("embed", True),
                 describe_figures=data.get("describe_figures", False),
@@ -723,9 +736,18 @@ def build_app() -> FastAPI:
         metadata: MetadataPatch | None = None
         try:
             check_backend_prerequisites(tmp_path, backend=backend, doc_id=doc_id, force=force)
+            if opts.get("group_name") is not None:
+                raise ValueError(
+                    "group_name was removed (GH #123): set the project-scoped "
+                    "'subsystem' field in metadata.fields instead"
+                )
             if opts.get("metadata"):
                 metadata = MetadataPatch.model_validate(opts["metadata"])
-                check_patch_for(shapes_of(be.list_fields()), fields=metadata.fields)
+                specs = be.list_fields()
+                project = metadata.project or (opts.get("project_id") or "").strip() or None
+                check_patch_for(
+                    shapes_of(specs), scopes_of(specs), fields=metadata.fields, project=project
+                )
         except (BackendUnavailableError, ValueError) as exc:
             tmp_path.unlink(missing_ok=True)
             audit(
@@ -768,7 +790,6 @@ def build_app() -> FastAPI:
                 result = be.ingest_chunk_graph(
                     parsed.graph,
                     project_id=opts.get("project_id"),
-                    group_name=opts.get("group_name"),
                     metadata=metadata,
                     embed=True,
                     describe_figures=not skip_figures and not skip_describe,
