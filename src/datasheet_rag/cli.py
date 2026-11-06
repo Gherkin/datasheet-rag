@@ -2971,6 +2971,9 @@ def _ingest_one(
         proj_cfg = get_project_config_for(pdf_path.parent)
     except ProjectConfigError as e:
         raise click.ClickException(str(e)) from e
+    # A blank --project-id is no project (the store treats it so): the
+    # .rag.toml project_id still applies.
+    project_id = (project_id.strip() or None) if project_id else None
     if proj_cfg is not None:
         project_id = project_id or proj_cfg.project_id
         if not tags and proj_cfg.tags:
@@ -2991,13 +2994,12 @@ def _ingest_one(
     if proj_cfg is not None and proj_cfg.fields:
         from datasheet_rag.store.fields import scopes_of
 
-        ingest_project = project_id.strip() if project_id else None
         fields = _merge_config_fields(
             proj_cfg,
             fields,
             scopes=scopes_of(field_registry.specs()) if field_registry is not None else None,
-            in_config_project=proj_cfg.project_id in (None, ingest_project),
-            why_not=f"this ingest goes to project {ingest_project!r}",
+            in_config_project=proj_cfg.project_id in (None, project_id),
+            why_not=f"this ingest goes to project {project_id!r}",
         )
     if field_registry is not None and fields:
         _check_field_patch(field_registry.specs(), fields, project=project_id)
@@ -3964,8 +3966,10 @@ def metadata_cmd(
         remove_projects = tuple(normalize_projects(remove_projects))
     except ValueError as e:
         raise click.ClickException(str(e)) from e
+    # A blank --project is no project (the store treats it so): the
+    # .rag.toml project_id below still applies.
     if fields_project is not None:
-        fields_project = fields_project.strip()
+        fields_project = fields_project.strip() or None
 
     proj_cfg = get_project_config()
     if proj_cfg is not None:
@@ -4046,7 +4050,7 @@ def metadata_cmd(
     except ValueError as e:
         raise click.ClickException(str(e)) from e
     console.print(f"[green]Saved metadata for[/] {doc_id}")
-    _note_clears_outside_project(be, meta, fields, fields_project, remove_projects, scopes)
+    _note_clears_outside_project(be, meta, fields, fields_project, remove_projects)
     console.print(meta.model_dump_json(indent=2, exclude_none=True))
 
 
@@ -4056,26 +4060,26 @@ def _note_clears_outside_project(
     fields: Mapping[str, Any],
     project: str | None,
     remove_projects: Iterable[str],
-    scopes: Mapping[str, FieldScope] | None,
 ) -> None:
     """Say so when a project-scoped field was cleared in a project the
     document is not in: the store does nothing then, and the user may have
     meant another project. Leaving that project in the same call is not
-    worth a note; its values go with the membership."""
-    # A blank or all-blank value is a clear in the store too (_coerce).
-    cleared = [
-        n
-        for n, v in fields.items()
-        if v is None
-        or (isinstance(v, str) and not v.strip())
-        or (isinstance(v, list) and not any(isinstance(x, str) and x.strip() for x in v))
-    ]
-    project = project.strip() if project else None
-    if not cleared or project is None or project in meta.projects or project in remove_projects:
+    worth a note; its values go with the membership. ``project`` is
+    already stripped."""
+    if not fields or project is None or project in meta.projects or project in remove_projects:
         return
-    from datasheet_rag.store.fields import project_scoped_names, scopes_of
+    from datasheet_rag.store.fields import (
+        normalize_field_patch_for,
+        project_scoped_names,
+        scopes_of,
+        shapes_of,
+    )
 
-    names = project_scoped_names(scopes or scopes_of(be.list_fields()), cleared)
+    specs = be.list_fields()
+    # The store's own rule for what counts as a clear: an empty normalized value.
+    patch = normalize_field_patch_for(shapes_of(specs), fields)
+    cleared = [n for n, v in patch.items() if not v]
+    names = project_scoped_names(scopes_of(specs), cleared)
     if names:
         console.print(
             f"[yellow]Note:[/] {meta.doc_id} is not in project {project!r}, so it holds "

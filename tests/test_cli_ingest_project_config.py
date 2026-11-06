@@ -95,6 +95,12 @@ def test_ingest_keeps_config_subsystem_in_the_config_project(
     assert result.exit_code == 0, result.output
     assert fake_backend.calls[2]["metadata"].fields == {"subsystem": "power", "manufacturer": "TI"}
 
+    # A blank --project-id is no project: the config's board-a applies.
+    result = _ingest(str(pdf), "--project-id", " ")
+    assert result.exit_code == 0, result.output
+    assert fake_backend.calls[3]["project_id"] == "board-a"
+    assert fake_backend.calls[3]["metadata"].fields == {"subsystem": "power", "manufacturer": "TI"}
+
 
 def test_ingest_without_fields_sends_none(tmp_path: Path, fake_backend: _FakeBackend) -> None:
     pdf = _pdf(tmp_path)

@@ -470,6 +470,11 @@ def test_project_config_checks_compare_stripped_project_names(
     assert result.exit_code == 0, result.output
     meta = _get_json(db_path, DOC_A)
     assert meta["projects"] == [] and meta["project_fields"] == {}
+    # A blank --project is no project: the config's board-a applies.
+    result = _meta(db_path, DOC_A, "--project", " ", "--tag", "y")
+    assert result.exit_code == 0, result.output
+    assert "left out" not in result.output
+    assert _get_json(db_path, DOC_A)["project_fields"] == {"board-a": {"subsystem": "power"}}
 
 
 def test_project_config_subsystem_is_left_out_with_a_note(
@@ -490,7 +495,8 @@ def test_project_config_subsystem_is_left_out_with_a_note(
     result = _meta(db_path, DOC_A, "--remove-project", "board-b")
     assert result.exit_code == 0, result.output
     # Writing in board-b: board-a's subsystem is not carried there.
-    _meta(db_path, DOC_A, "--add-project", "board-b")
+    result = _meta(db_path, DOC_A, "--add-project", "board-b")
+    assert result.exit_code == 0, result.output
     result = _meta(db_path, DOC_A, "--project", "board-b", "--mpn", "Y")
     assert result.exit_code == 0, result.output
     assert "this write goes to project 'board-b'" in " ".join(result.output.split())
