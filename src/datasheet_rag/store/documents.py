@@ -365,7 +365,8 @@ def merge_group(
         conn.execute("UPDATE revisions SET document_id = ? WHERE document_id = ?", (target, source))
         _merge_documents(conn, source, target)
     if sorted(newest_first) != sorted(revisions_of(conn, target)):
-        raise RevisionError(f"the new order of {format_document_id(target)} is incomplete")
+        # A caller bug, not a user error: never reported as a conflict.
+        raise RuntimeError(f"the new order of {format_document_id(target)} is incomplete")
     _renumber(conn, newest_first)
 
 

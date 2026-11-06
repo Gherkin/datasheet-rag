@@ -467,9 +467,7 @@ class LocalBackend(RagBackend):
                         status=g.status,
                         documents=[revs.format_document_id(d) for d in g.document_ids],
                         document_id=(
-                            revs.format_document_id(g.target)
-                            if g.target is not None and g.status == "merged"
-                            else None
+                            revs.format_document_id(g.target) if g.target is not None else None
                         ),
                         revisions=self._revision_summaries(g.order),
                         kept_order=g.kept_order,

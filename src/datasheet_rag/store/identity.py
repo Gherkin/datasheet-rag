@@ -288,7 +288,7 @@ class RuleGroup:
     status: GroupStatus
     #: The documents in the group, ascending.
     document_ids: tuple[int, ...]
-    #: The document the group was (or would be) merged into.
+    #: The document the group was (or would be) merged into; None unless merged.
     target: int | None = None
     #: The merged document's rev_ids, newest first.
     order: tuple[str, ...] = ()
@@ -406,7 +406,7 @@ def _apply_group(
     except RevisionError as e:
         conn.execute("ROLLBACK TO apply_group")
         conn.execute("RELEASE apply_group")
-        return RuleGroup("conflict", ids, target=target, detail=str(e))
+        return RuleGroup("conflict", ids, detail=str(e))
     conn.execute("RELEASE apply_group")
     return RuleGroup("merged", ids, target=target, order=order, kept_order=bool(multi))
 
