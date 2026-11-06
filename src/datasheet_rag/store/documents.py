@@ -328,6 +328,48 @@ def _delete_document_rows(conn: sqlite3.Connection, document_id: int) -> None:
     conn.execute("DELETE FROM documents WHERE id = ?", (document_id,))
 
 
+def ingest_times(conn: sqlite3.Connection, rev_ids: Iterable[str]) -> dict[str, str]:
+    """``{rev_id: time}``: when each revision's chunks were first written.
+
+    There is no ingest-time column; the oldest chunk stands in for it (the
+    same value ``rag revisions`` shows as "ingested"). Chunk upserts keep
+    ``created_at``, so a re-ingest keeps the time of the chunks it keeps.
+    A revision with no chunks is absent.
+    """
+    ids = list(dict.fromkeys(rev_ids))
+    out: dict[str, str] = {}
+    for start in range(0, len(ids), 500):
+        batch = ids[start : start + 500]
+        for rev_id, at in conn.execute(
+            "SELECT rev_id, MIN(created_at) FROM chunks "
+            f"WHERE rev_id IN ({','.join('?' * len(batch))}) GROUP BY rev_id",
+            batch,
+        ):
+            if at is not None:
+                out[rev_id] = at
+    return out
+
+
+def merge_group(
+    conn: sqlite3.Connection, target: int, sources: Sequence[int], newest_first: Sequence[str]
+) -> None:
+    """Merge every document in ``sources`` into ``target`` and set the order.
+
+    Each source's revisions move to ``target`` and its metadata is merged as
+    in :func:`add_revision` (a field with different values stops it with a
+    :class:`RevisionError`). ``newest_first`` must name every revision of the
+    merged document. Does not commit, and does not roll back on error: the
+    caller holds the transaction.
+    """
+    for source in sources:
+        conn.execute("UPDATE revisions SET document_id = ? WHERE document_id = ?", (target, source))
+        _merge_documents(conn, source, target)
+    if sorted(newest_first) != sorted(revisions_of(conn, target)):
+        # A caller bug, not a user error: never reported as a conflict.
+        raise RuntimeError(f"the new order of {format_document_id(target)} is incomplete")
+    _renumber(conn, newest_first)
+
+
 class AddResult(NamedTuple):
     document_id: int
     #: True when the revision's own document was merged into this one.

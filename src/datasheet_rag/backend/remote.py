@@ -34,6 +34,7 @@ from datasheet_rag.backend.base import (
     SearchMode,
 )
 from datasheet_rag.backend.models import (
+    ApplyRuleResult,
     ChunkPage,
     ChunkVectors,
     DocPage,
@@ -453,6 +454,10 @@ class RemoteBackend(RagBackend):
     def set_identity_rule(self, rule: str | None) -> str | None:
         stored: str | None = self._json("PUT", "/identity-rule", json={"rule": rule})["rule"]
         return stored
+
+    def apply_identity_rule(self, *, dry_run: bool = False) -> ApplyRuleResult:
+        data = self._json("POST", "/identity-rule/apply", json={"dry_run": dry_run})
+        return ApplyRuleResult.model_validate(data)
 
     def plan_ingest_link(
         self,

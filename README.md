@@ -445,7 +445,18 @@ rag revisions rule clear
 
 The rule is an expression over registered, document-scoped fields, with `AND`, `OR` and parentheses (`AND` binds tighter). When a PDF is ingested without `--new-revision-of`, the field values the ingest sets are compared with every document's values. A field matches only when both have it and the values are equal (case-insensitive); a list field must hold the same values, not just share one. One matching document: the PDF becomes its newest revision. None: a new document. Two or more: the ingest stops before parsing and names them.
 
-There is no default rule. `manufacturer + mpn + doc_type` would fold together documents that are not revisions of each other (one Intel CPU has hundreds of datasheets, errata and guides with the same values). The ingest output always says what happened (`linked to D12 as newest revision (rule: intel-id)`, `new document D14`), so a wrong link is seen at once and fixed with `rag revisions unlink`. Setting or changing the rule does not relink documents already stored.
+There is no default rule. `manufacturer + mpn + doc_type` would fold together documents that are not revisions of each other (one Intel CPU has hundreds of datasheets, errata and guides with the same values). The ingest output always says what happened (`linked to D12 as newest revision (rule: intel-id)`, `new document D14`), so a wrong link is seen at once and fixed with `rag revisions unlink`. Setting or changing the rule does not relink documents already stored on its own.
+
+To relink stored documents by the rule, run:
+
+```
+rag revisions apply-rule --dry-run   # print what would be linked
+rag revisions apply-rule
+```
+
+Matching works as at ingest. A group of matching documents is linked into one only when every pair in the group matches (a chain where A matches B and B matches C, but A does not match C, is skipped), at most one of them already has several revisions, and no field holds different values in two of them. Skipped groups are listed with the reason. A linked document holds the fields of all its members, so it can match a document none of them matched alone; matching repeats until nothing more links.
+
+**The order of a linked document is a guess.** It comes from ingest time, which is when the PDF was first ingested into this store, not when it was published. A document that already had several revisions keeps its order, and its newest stays on top. Each other PDF goes below that top, just above the highest revision ingested before it (at the bottom if there is none). A revision with no ingest time is passed over. Otherwise all PDFs are ordered by ingest time, the latest ingested as newest. The top revision is the one search shows. Every linked document is listed so you can check its order and fix it with `rag revisions move`.
 
 ## Usage
 

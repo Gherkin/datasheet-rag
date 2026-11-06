@@ -603,19 +603,7 @@ def connect(
     else:
         db_path_str = ":memory:"
 
-    conn = sqlite3.connect(db_path_str, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-
-    # sqlite-vec is a loadable extension — enable then load.
-    conn.enable_load_extension(True)
-    sqlite_vec.load(conn)
-    conn.enable_load_extension(False)
-
-    # Pragmas. WAL is a no-op on in-memory DBs and SQLite warns, so skip.
-    conn.execute("PRAGMA foreign_keys = ON")
-    if not is_memory:
-        conn.execute("PRAGMA journal_mode = WAL")
-    conn.execute("PRAGMA synchronous = NORMAL")
+    conn = _open(db_path_str, is_memory=is_memory)
 
     # Bootstrap tables if they are not present yet.
     if not _schema_initialized(conn):
@@ -640,6 +628,38 @@ def connect(
     _warn_if_fts_stale(conn)
 
     return conn
+
+
+def _open(db_path_str: str, *, is_memory: bool) -> sqlite3.Connection:
+    conn = sqlite3.connect(db_path_str, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+
+    # sqlite-vec is a loadable extension — enable then load.
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+
+    # Pragmas. WAL is a no-op on in-memory DBs and SQLite warns, so skip.
+    conn.execute("PRAGMA foreign_keys = ON")
+    if not is_memory:
+        conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA synchronous = NORMAL")
+    return conn
+
+
+def open_private(conn: sqlite3.Connection) -> sqlite3.Connection | None:
+    """A second connection to the file behind ``conn``, or None when ``conn``
+    is an in-memory store (a second connection could not see it).
+
+    For work whose uncommitted state must stay hidden from the threads that
+    share ``conn``, such as a dry run that writes and then rolls back. The
+    store is already set up by ``conn``, so nothing is bootstrapped.
+    """
+    rows = conn.execute("PRAGMA database_list").fetchall()
+    path = next((r[2] for r in rows if r[1] == "main"), "")
+    if not path:
+        return None
+    return _open(path, is_memory=False)
 
 
 def _schema_initialized(conn: sqlite3.Connection) -> bool:

@@ -212,17 +212,55 @@ def test_delete_one_revision_says_the_others_stay(db_path: Path) -> None:
     assert "one of 2 revisions of D1; the others are kept" in result.output
 
 
-def test_rule_set_warns_it_does_not_relink(db_path: Path) -> None:
+def test_rule_set_points_to_apply_rule(db_path: Path) -> None:
     assert _rag(db_path, "fields", "add", "intel-id").exit_code == 0
     result = _rag(db_path, "revisions", "rule", "set", "intel-id or doc_type")
     assert result.exit_code == 0, result.output
     assert "intel-id OR doc_type" in result.output
-    assert "not relinked" in result.output
+    assert "rag revisions apply-rule --dry-run" in result.output
     assert "intel-id OR doc_type" in _rag(db_path, "revisions", "rule", "show").output
     bad = _rag(db_path, "revisions", "rule", "set", "nope")
     assert bad.exit_code != 0 and "unregistered" in bad.output
     _rag(db_path, "revisions", "rule", "clear")
     assert "No identity rule" in _rag(db_path, "revisions", "rule", "show").output
+
+
+def test_apply_rule_dry_run_then_link(db_path: Path) -> None:
+    assert _rag(db_path, "fields", "add", "intel-id").exit_code == 0
+    for doc in (DOC_A, DOC_B):
+        _rag(db_path, "metadata", doc, "--field", "intel-id=123")
+    _rag(db_path, "metadata", DOC_C, "--field", "intel-id=999")
+
+    none = _rag(db_path, "revisions", "apply-rule")
+    assert none.exit_code != 0 and "no identity rule" in none.output
+
+    _rag(db_path, "revisions", "rule", "set", "intel-id")
+    dry = _rag(db_path, "revisions", "apply-rule", "--dry-run")
+    assert dry.exit_code == 0, dry.output
+    assert "Would link 1 group(s)" in dry.output
+    assert "D2 → D1 (ordered by ingest time; order is a guess)" in dry.output
+    assert "The order of each linked document above is a guess" in dry.output
+    assert "Dry run: nothing was changed" in dry.output
+    assert "D2" in _json(_rag(db_path, "metadata", DOC_B).output)["document_id"]
+
+    done = _rag(db_path, "revisions", "apply-rule")
+    assert done.exit_code == 0, done.output
+    assert "Linked 1 group(s)" in done.output and "Dry run" not in done.output
+    assert _json(_rag(db_path, "metadata", DOC_B).output)["document_id"] == "D1"
+    again = _rag(db_path, "revisions", "apply-rule")
+    assert "Nothing to link" in again.output
+
+
+def test_apply_rule_lists_skipped_groups(db_path: Path) -> None:
+    _rag(db_path, "fields", "add", "intel-id")
+    _rag(db_path, "metadata", DOC_A, "--field", "intel-id=1", "--manufacturer", "TI")
+    _rag(db_path, "metadata", DOC_B, "--field", "intel-id=1", "--manufacturer", "ST")
+    _rag(db_path, "revisions", "rule", "set", "intel-id")
+    result = _rag(db_path, "revisions", "apply-rule")
+    assert result.exit_code == 0, result.output
+    assert "Linked 0 group(s). Skipped 1." in result.output
+    assert "Skipped D1, D2: a field holds different values" in result.output
+    assert "is a guess" not in result.output
 
 
 # ---- rag ingest --------------------------------------------------------------

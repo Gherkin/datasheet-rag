@@ -233,6 +233,35 @@ class DocumentRevisions(BaseModel):
     revisions: list[RevisionSummary] = Field(default_factory=list)
 
 
+class RuleGroupResult(BaseModel):
+    """One group of documents the identity rule matched (GH #130).
+
+    ``status`` is ``merged`` (linked into ``document_id``), or why the group
+    was skipped: ``chain`` (not every pair matches), ``several`` (more than
+    one document already has several revisions) or ``conflict`` (a field
+    holds different values). ``revisions`` is the merged document's list,
+    newest first; its order is a guess from ingest time. ``documents`` of a
+    merged group lists every document folded in, over all matching rounds.
+    ``kept_order`` is true when one of them already had several revisions
+    whose order was kept, with the other PDFs slotted in by ingest time.
+    """
+
+    status: Literal["merged", "chain", "several", "conflict"]
+    documents: list[str] = Field(default_factory=list)
+    document_id: str | None = None
+    revisions: list[RevisionSummary] = Field(default_factory=list)
+    kept_order: bool = False
+    detail: str = ""
+
+
+class ApplyRuleResult(BaseModel):
+    """What ``rag revisions apply-rule`` did, or with ``dry_run`` would do."""
+
+    rule: str
+    dry_run: bool = False
+    groups: list[RuleGroupResult] = Field(default_factory=list)
+
+
 class IngestLink(BaseModel):
     """Which document an ingested PDF went into, and why (GH #124).
 

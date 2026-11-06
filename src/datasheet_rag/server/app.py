@@ -141,6 +141,10 @@ class IdentityRuleBody(BaseModel):
     rule: str | None = None
 
 
+class ApplyRuleBody(BaseModel):
+    dry_run: bool = False
+
+
 class LinkPlanBody(BaseModel):
     rev_id: str | None = None
     metadata: MetadataPatch | None = None
@@ -397,6 +401,13 @@ def build_app() -> FastAPI:
         body: IdentityRuleBody, be: LocalBackend = Depends(get_backend)
     ) -> dict[str, Any]:
         return {"rule": be.set_identity_rule(body.rule)}
+
+    # A dry run writes nothing, but it is the same request: one scope for both.
+    @app.post("/identity-rule/apply", dependencies=ingest_dep)
+    def identity_rule_apply(
+        body: ApplyRuleBody, be: LocalBackend = Depends(get_backend)
+    ) -> dict[str, Any]:
+        return be.apply_identity_rule(dry_run=body.dry_run).model_dump(mode="json")
 
     @app.post("/ingest/link-plan", dependencies=dep)
     def ingest_link_plan(

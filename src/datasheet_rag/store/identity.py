@@ -18,8 +18,9 @@ One matching document: the PDF joins it as its newest revision. None: it
 becomes a new document. Two or more: the ingest stops and names them, and
 nothing is merged.
 
-The rule acts at ingest only. Setting or changing it does not relink stored
-documents.
+At ingest the rule only places the new PDF. Setting or changing it does not
+relink stored documents on its own; :func:`apply_rule` (``rag revisions
+apply-rule``) does that on request (GH #130).
 """
 
 from __future__ import annotations
@@ -28,8 +29,17 @@ import re
 import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Literal
 
-from datasheet_rag.store.documents import get_setting, set_setting
+from datasheet_rag.store.documents import (
+    RevisionError,
+    format_document_id,
+    get_setting,
+    ingest_times,
+    merge_group,
+    revisions_of,
+    set_setting,
+)
 from datasheet_rag.store.fields import (
     FieldValue,
     MetadataFieldError,
@@ -100,6 +110,24 @@ class IdentityRule:
     def matched_fields(self, a: Mapping[str, FieldValue], b: Mapping[str, FieldValue]) -> list[str]:
         """The fields that are equal on both sides (for the ingest message)."""
         return [f for f in self.fields() if _equal(a, b, f)]
+
+    def conjunctions(self) -> list[tuple[str, ...]]:
+        """The rule as an OR of ANDs: two value sets match exactly when, for
+        some conjunction, every field in it is equal on both sides."""
+
+        def dnf(n: _Node) -> list[tuple[str, ...]]:
+            if n.op == "field":
+                return [(n.name,)]
+            if n.op == "or":
+                return [c for child in n.children for c in dnf(child)]
+            out: list[tuple[str, ...]] = [()]
+            for child in n.children:
+                out = [
+                    tuple(dict.fromkeys((*left, *right))) for left in out for right in dnf(child)
+                ]
+            return out
+
+        return list(dict.fromkeys(dnf(self._root)))
 
 
 def _norm(value: FieldValue | None) -> frozenset[str]:
@@ -246,11 +274,222 @@ def match_documents(
     return out
 
 
+#: What :func:`apply_rule` did with one group of matching documents.
+#:
+#: * ``merged``   – linked into one document;
+#: * ``chain``    – not every pair in the group matches (A~B, B~C, A≁C); skipped;
+#: * ``several``  – more than one document already has several revisions; skipped;
+#: * ``conflict`` – the documents hold different values for a field; skipped.
+GroupStatus = Literal["merged", "chain", "several", "conflict"]
+
+
+@dataclass(frozen=True)
+class RuleGroup:
+    status: GroupStatus
+    #: The documents in the group, ascending.
+    document_ids: tuple[int, ...]
+    #: The document the group was (or would be) merged into; None unless merged.
+    target: int | None = None
+    #: The merged document's rev_ids, newest first.
+    order: tuple[str, ...] = ()
+    #: True when one document in the group already had several revisions
+    #: before the run. Their order was kept, with its top still on top, and
+    #: the other PDFs were slotted in below that top by ingest time.
+    kept_order: bool = False
+    detail: str = ""
+
+
+def _groups(
+    rule: IdentityRule, values: Mapping[int, Mapping[str, FieldValue]]
+) -> tuple[list[list[int]], set[tuple[int, int]]]:
+    """The connected groups of matching documents (two or more each), and
+    every matching pair. Documents are bucketed per conjunction of the rule,
+    so no pair is compared that shares no value."""
+    edges: set[tuple[int, int]] = set()
+    for conj in rule.conjunctions():
+        buckets: dict[tuple[frozenset[str], ...], list[int]] = {}
+        for document_id, vals in values.items():
+            key = tuple(_norm(vals.get(f)) for f in conj)
+            if all(key):
+                buckets.setdefault(key, []).append(document_id)
+        for members in buckets.values():
+            members.sort()
+            for i, a in enumerate(members):
+                for b in members[i + 1 :]:
+                    edges.add((a, b))
+
+    parent: dict[int, int] = {}
+
+    def find(x: int) -> int:
+        while parent.setdefault(x, x) != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for a, b in edges:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[max(ra, rb)] = min(ra, rb)
+    groups: dict[int, list[int]] = {}
+    for x in list(parent):
+        groups.setdefault(find(x), []).append(x)
+    return sorted(sorted(g) for g in groups.values()), edges
+
+
+def apply_rule(
+    conn: sqlite3.Connection, rule: IdentityRule, *, dry_run: bool = False
+) -> list[RuleGroup]:
+    """Link stored documents that ``rule`` says are the same (GH #130).
+
+    Match semantics are those of ingest: documents' own values, a missing
+    field never matches, list fields must be equal as sets. A group is
+    merged only when every pair in it matches and at most one of its
+    documents had several revisions before the run (a hand order). That
+    document is kept, with its order; otherwise the lowest-numbered document
+    is kept. The other PDFs are slotted in by ingest time (see
+    :func:`_slot_order`). A group whose documents hold different values for a
+    field is skipped.
+
+    A merged document holds the fields of all its members, so it can match a
+    document none of them matched alone. Matching is repeated until a round
+    links nothing. The result has one ``merged`` entry per kept document
+    (listing every document folded into it) and the groups the last round
+    skipped.
+
+    With ``dry_run`` the same work is done and then rolled back. Commits
+    otherwise.
+    """
+    hand_ordered = _documents_with_several_revisions(conn)
+    folded: dict[int, set[int]] = {}
+    skipped: list[RuleGroup] = []
+    conn.execute("SAVEPOINT apply_rule")
+    try:
+        while True:
+            values = get_document_values(conn, None, fields=rule.fields())
+            groups, edges = _groups(rule, values)
+            done = [_apply_group(conn, g, edges, hand_ordered) for g in groups]
+            skipped = [g for g in done if g.status != "merged"]
+            merged = [g for g in done if g.status == "merged"]
+            if not merged:
+                break
+            for g in merged:
+                assert g.target is not None
+                members: set[int] = set()
+                for d in g.document_ids:
+                    members |= folded.pop(d, {d})
+                folded[g.target] = members
+        out = [
+            RuleGroup(
+                "merged",
+                tuple(sorted(members)),
+                target=target,
+                order=tuple(revisions_of(conn, target)),
+                kept_order=bool(members & hand_ordered),
+            )
+            for target, members in folded.items()
+        ]
+    except BaseException:
+        conn.execute("ROLLBACK TO apply_rule")
+        conn.execute("RELEASE apply_rule")
+        raise
+    if dry_run:
+        conn.execute("ROLLBACK TO apply_rule")
+    conn.execute("RELEASE apply_rule")
+    if not dry_run and conn.in_transaction:
+        conn.commit()
+    return sorted([*out, *skipped], key=lambda g: g.document_ids)
+
+
+def _documents_with_several_revisions(conn: sqlite3.Connection) -> set[int]:
+    return {
+        int(r[0])
+        for r in conn.execute(
+            "SELECT document_id FROM revisions GROUP BY document_id HAVING COUNT(*) > 1"
+        )
+    }
+
+
+def _slot_order(base: list[str], newcomers: list[str], times: Mapping[str, str]) -> list[str]:
+    """``base`` (newest first, kept as is) with ``newcomers`` slotted in.
+
+    The top of ``base`` stays on top: the user chose it as the newest, and it
+    is the revision search shows. Each PDF is placed just above the highest
+    revision below that top that was ingested before it, or at the bottom
+    when there is none. A revision with no ingest time (no chunks) is passed
+    over, not taken as oldest. Ties go by rev_id, so the result does not
+    depend on input order. With no ``base`` this is all PDFs by ingest time,
+    the latest ingested as newest. Ingest time is when a PDF was first
+    ingested into this store, not when it was published, so the result is a
+    guess for the user to check.
+    """
+
+    def key(rev_id: str) -> tuple[str, str]:
+        return (times.get(rev_id, ""), rev_id)
+
+    order = list(base)
+    start = 1 if base else 0
+    for rev_id in sorted(newcomers, key=key):
+        at = next(
+            (
+                i
+                for i in range(start, len(order))
+                if (order[i] in times or rev_id not in times) and key(order[i]) < key(rev_id)
+            ),
+            len(order),
+        )
+        order.insert(at, rev_id)
+    return order
+
+
+def _apply_group(
+    conn: sqlite3.Connection,
+    group: list[int],
+    edges: set[tuple[int, int]],
+    hand_ordered: set[int],
+) -> RuleGroup:
+    ids = tuple(group)
+    missing = [(a, b) for i, a in enumerate(group) for b in group[i + 1 :] if (a, b) not in edges]
+    if missing:
+        a, b = missing[0]
+        more = f" (and {len(missing) - 1} more pair(s))" if len(missing) > 1 else ""
+        return RuleGroup(
+            "chain",
+            ids,
+            detail=f"{format_document_id(a)} and {format_document_id(b)} do not match "
+            f"each other{more}",
+        )
+    multi = [d for d in group if d in hand_ordered]
+    if len(multi) > 1:
+        return RuleGroup(
+            "several",
+            ids,
+            detail=f"{', '.join(format_document_id(d) for d in multi)} each have several revisions",
+        )
+    revisions = {d: revisions_of(conn, d) for d in group}
+    target = multi[0] if multi else group[0]
+    base = revisions[target] if multi else []
+    newcomers = [r for d in group if not (multi and d == target) for r in revisions[d]]
+    order = tuple(_slot_order(base, newcomers, ingest_times(conn, [*base, *newcomers])))
+    conn.execute("SAVEPOINT apply_group")
+    try:
+        merge_group(conn, target, [d for d in group if d != target], order)
+    except RevisionError as e:
+        conn.execute("ROLLBACK TO apply_group")
+        conn.execute("RELEASE apply_group")
+        return RuleGroup("conflict", ids, detail=str(e))
+    conn.execute("RELEASE apply_group")
+    # apply_rule builds the final order and kept_order once all rounds are done.
+    return RuleGroup("merged", ids, target=target)
+
+
 __all__ = [
+    "GroupStatus",
     "IdentityRule",
     "IdentityRuleError",
     "MetadataFieldError",
+    "RuleGroup",
     "RuleMatch",
+    "apply_rule",
     "check_rule_fields",
     "get_identity_rule",
     "match_documents",

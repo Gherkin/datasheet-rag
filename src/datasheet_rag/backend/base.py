@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Literal
 
 from datasheet_rag.backend.models import (
+    ApplyRuleResult,
     ChunkPage,
     DocPage,
     DocSummary,
@@ -227,6 +228,16 @@ class RagBackend(ABC):
     @abstractmethod
     def set_identity_rule(self, rule: str | None) -> str | None:
         """Set (or with None clear) the identity rule; returns it as stored."""
+
+    @abstractmethod
+    def apply_identity_rule(self, *, dry_run: bool = False) -> ApplyRuleResult:
+        """Link stored documents the identity rule says are the same (GH #130).
+
+        A group is merged only when every pair in it matches, at most one of
+        its documents already has several revisions, and no field holds
+        different values; other groups are reported, not merged. With
+        ``dry_run`` nothing is written. Raises ``ValueError`` without a rule.
+        """
 
     @abstractmethod
     def plan_ingest_link(
