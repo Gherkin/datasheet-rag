@@ -456,7 +456,7 @@ rag revisions apply-rule
 
 Matching works as at ingest. A group of matching documents is linked into one only when every pair in the group matches (a chain where A matches B and B matches C, but A does not match C, is skipped), at most one of them already has several revisions, and no field holds different values in two of them. Skipped groups are listed with the reason. A linked document holds the fields of all its members, so it can match a document none of them matched alone; matching repeats until nothing more links.
 
-**The order of a linked document is a guess.** It comes from ingest time, which is when the PDF was first ingested into this store, not when it was published. A document that already had several revisions keeps its order, and each other PDF goes just above the highest revision ingested before it (at the bottom if there is none). Otherwise all PDFs are ordered by ingest time, the latest ingested as newest. The top revision is the one search shows. Every linked document is listed so you can check its order and fix it with `rag revisions move`.
+**The order of a linked document is a guess.** It comes from ingest time, which is when the PDF was first ingested into this store, not when it was published. A document that already had several revisions keeps its order, and its newest stays on top. Each other PDF goes below that top, just above the highest revision ingested before it (at the bottom if there is none). A revision with no ingest time is passed over. Otherwise all PDFs are ordered by ingest time, the latest ingested as newest. The top revision is the one search shows. Every linked document is listed so you can check its order and fix it with `rag revisions move`.
 
 ## Usage
 

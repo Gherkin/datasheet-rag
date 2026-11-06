@@ -18,6 +18,7 @@ from datasheet_rag.store.fields import (
 from datasheet_rag.store.identity import (
     IdentityRule,
     IdentityRuleError,
+    _slot_order,
     apply_rule,
     get_identity_rule,
     match_documents,
@@ -196,9 +197,25 @@ def test_apply_rule_keeps_the_order_set_by_hand(conn: sqlite3.Connection) -> Non
 
     (group,) = apply_rule(conn, IdentityRule("intel-id"))
     assert group.status == "merged" and group.target == d1 and group.kept_order
-    # rev-0 is older than every revision, so it goes to the bottom, and
-    # search keeps showing the newest by hand order (now rev-c).
-    assert revisions_of(conn, d1) == ["rev-c", "rev-b", "rev-a", "rev-0"]
+    # rev-b stays on top, so search keeps showing it. rev-c is the latest
+    # ingested, so it goes just below; rev-0 is older than every revision,
+    # so it goes to the bottom.
+    assert revisions_of(conn, d1) == ["rev-b", "rev-c", "rev-a", "rev-0"]
+
+
+def test_slot_order_keeps_the_hand_top_and_passes_over_no_time() -> None:
+    times = {"c": "2026-01-01", "b": "2026-03-01", "a": "2026-02-01", "x": "2026-01-15"}
+    # x is ingested after c, but c was put on top by hand and stays there.
+    assert _slot_order(["c", "b", "a"], ["x"], times) == ["c", "b", "a", "x"]
+    # n has no chunks; x goes above a, not above n.
+    assert _slot_order(["c", "n", "a"], ["x"], {**times, "a": "2026-01-10"}) == [
+        "c",
+        "n",
+        "x",
+        "a",
+    ]
+    # Without a base, everything is by ingest time.
+    assert _slot_order([], ["c", "x", "b"], times) == ["b", "x", "c"]
 
 
 def test_apply_rule_slots_an_older_pdf_into_the_hand_order(conn: sqlite3.Connection) -> None:

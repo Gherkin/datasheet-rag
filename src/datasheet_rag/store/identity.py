@@ -293,8 +293,8 @@ class RuleGroup:
     #: The merged document's rev_ids, newest first.
     order: tuple[str, ...] = ()
     #: True when one document in the group already had several revisions
-    #: before the run. Their order was kept and the other PDFs were slotted
-    #: into it by ingest time.
+    #: before the run. Their order was kept, with its top still on top, and
+    #: the other PDFs were slotted in below that top by ingest time.
     kept_order: bool = False
     detail: str = ""
 
@@ -412,20 +412,31 @@ def _documents_with_several_revisions(conn: sqlite3.Connection) -> set[int]:
 def _slot_order(base: list[str], newcomers: list[str], times: Mapping[str, str]) -> list[str]:
     """``base`` (newest first, kept as is) with ``newcomers`` slotted in.
 
-    Each PDF is placed just above the highest revision that was ingested
-    before it, or at the bottom when there is none. Ties go by rev_id, so the
-    result does not depend on input order. With no ``base`` this is all
-    PDFs by ingest time, the latest ingested as newest. Ingest time is when a
-    PDF was first ingested into this store, not when it was published, so
-    the result is a guess for the user to check.
+    The top of ``base`` stays on top: the user chose it as the newest, and it
+    is the revision search shows. Each PDF is placed just above the highest
+    revision below that top that was ingested before it, or at the bottom
+    when there is none. A revision with no ingest time (no chunks) is passed
+    over, not taken as oldest. Ties go by rev_id, so the result does not
+    depend on input order. With no ``base`` this is all PDFs by ingest time,
+    the latest ingested as newest. Ingest time is when a PDF was first
+    ingested into this store, not when it was published, so the result is a
+    guess for the user to check.
     """
 
     def key(rev_id: str) -> tuple[str, str]:
         return (times.get(rev_id, ""), rev_id)
 
     order = list(base)
+    start = 1 if base else 0
     for rev_id in sorted(newcomers, key=key):
-        at = next((i for i, r in enumerate(order) if key(r) < key(rev_id)), len(order))
+        at = next(
+            (
+                i
+                for i in range(start, len(order))
+                if (order[i] in times or rev_id not in times) and key(order[i]) < key(rev_id)
+            ),
+            len(order),
+        )
         order.insert(at, rev_id)
     return order
 

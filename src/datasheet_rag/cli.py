@@ -1727,8 +1727,9 @@ def revisions_apply_rule_cmd(dry_run: bool, db_path: Path | None) -> None:
 
     The new order is a GUESS from ingest time, which is when a PDF was first
     ingested into this store, not when it was published. A document that
-    already had several revisions keeps its order, and each other PDF goes
-    just above the highest revision ingested before it. Otherwise all PDFs
+    already had several revisions keeps its order and its newest stays on
+    top; each other PDF goes below that, just above the highest revision
+    ingested before it. Otherwise all PDFs
     are ordered by ingest time. Matching repeats until nothing more links,
     since a linked document holds the fields of all its members. Every linked
     document is listed so you can check its order and fix it with rag
