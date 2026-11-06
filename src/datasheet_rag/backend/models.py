@@ -240,8 +240,10 @@ class RuleGroupResult(BaseModel):
     was skipped: ``chain`` (not every pair matches), ``several`` (more than
     one document already has several revisions) or ``conflict`` (a field
     holds different values). ``revisions`` is the merged document's list,
-    newest first. ``kept_order`` is true when ``document_id`` already had
-    several revisions whose order was kept, with the other PDFs on top.
+    newest first; its order is a guess from ingest time. ``documents`` of a
+    merged group lists every document folded in, over all matching rounds.
+    ``kept_order`` is true when one of them already had several revisions
+    whose order was kept, with the other PDFs slotted in by ingest time.
     """
 
     status: Literal["merged", "chain", "several", "conflict"]

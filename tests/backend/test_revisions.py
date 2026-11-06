@@ -363,3 +363,37 @@ def test_remote_backend_round_trips_every_revision_call(
 
     with pytest.raises(RagServerError, match="no identity rule"):
         rb.apply_identity_rule()
+
+
+def test_a_dry_run_is_hidden_from_the_shared_connection(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Other server threads use the shared connection; while a dry run has
+    merged (not yet rolled back), they must still see the stored state."""
+    from datasheet_rag.store import identity
+    from datasheet_rag.store.documents import document_of
+
+    shared = connect(tmp_path / "store.sqlite", embedding_dim=EMBED_DIM)
+    be = LocalBackend(conn=shared)
+    register_field(shared, "intel-id")
+    seven = MetadataPatch(fields={"intel-id": "7"})
+    a = _ingest(be, "rev_a", metadata=seven).document_id
+    b = _ingest(be, "rev_b", metadata=seven).document_id
+    assert a != b
+    be.set_identity_rule("intel-id")
+    b_id = document_of(shared, "rev_b")
+
+    seen: list[int | None] = []
+    real_merge = identity.merge_group
+
+    def merge_and_look(conn: sqlite3.Connection, *args: Any) -> None:
+        real_merge(conn, *args)
+        assert conn is not shared
+        seen.append(document_of(shared, "rev_b"))
+
+    monkeypatch.setattr(identity, "merge_group", merge_and_look)
+    dry = be.apply_identity_rule(dry_run=True)
+    assert [(g.status, g.document_id) for g in dry.groups] == [("merged", a)]
+    assert seen == [b_id]
+    assert document_of(shared, "rev_b") == b_id
+    shared.close()

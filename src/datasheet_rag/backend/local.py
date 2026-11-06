@@ -97,6 +97,7 @@ from datasheet_rag.store.metadata import (
     set_title_hints,
 )
 from datasheet_rag.store.projects import project_scope_sql
+from datasheet_rag.store.schema import open_private
 
 if TYPE_CHECKING:
     from datasheet_rag.ingest_pipeline import ProgressCallback
@@ -458,7 +459,15 @@ class LocalBackend(RagBackend):
                 raise revs.RevisionError(
                     "the store has no identity rule; set one with rag revisions rule set"
                 )
-            groups = apply_rule(conn, rule, dry_run=dry_run)
+            # A dry run does the real merges and rolls them back. On its own
+            # connection the other threads never see them. An in-memory store
+            # (tests) has no file to reopen, so it uses the shared one.
+            private = open_private(conn) if dry_run else None
+            try:
+                groups = apply_rule(private or conn, rule, dry_run=dry_run)
+            finally:
+                if private is not None:
+                    private.close()
             return ApplyRuleResult(
                 rule=str(rule),
                 dry_run=dry_run,

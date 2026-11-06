@@ -1725,10 +1725,14 @@ def revisions_apply_rule_cmd(dry_run: bool, db_path: Path | None) -> None:
     several revisions, and no field holds different values in two of them.
     Other groups are listed and left as they are.
 
-    The new order is a guess: a document that already had several revisions
-    keeps its order, and the other PDFs go on top of it, the latest ingested
-    as newest. Every linked document is listed so you can check it, and fix
-    it with rag revisions move.
+    The new order is a GUESS from ingest time, which is when a PDF was first
+    ingested into this store, not when it was published. A document that
+    already had several revisions keeps its order, and each other PDF goes
+    just above the highest revision ingested before it. Otherwise all PDFs
+    are ordered by ingest time. Matching repeats until nothing more links,
+    since a linked document holds the fields of all its members. Every linked
+    document is listed so you can check its order and fix it with rag
+    revisions move.
     """
     from datasheet_rag.backend.models import DocumentRevisions
 
@@ -1747,8 +1751,12 @@ def revisions_apply_rule_cmd(dry_run: bool, db_path: Path | None) -> None:
     for g in merged:
         assert g.document_id is not None
         others = [d for d in g.documents if d != g.document_id]
-        how = "keeps its order, the others on top" if g.kept_order else "ordered by ingest time"
-        console.print(f"\n{', '.join(others)} → {g.document_id} ({how})")
+        how = (
+            "your order kept, the others slotted in by ingest time"
+            if g.kept_order
+            else "ordered by ingest time"
+        )
+        console.print(f"\n{', '.join(others)} → {g.document_id} ({how}; order is a guess)")
         _print_revisions(DocumentRevisions(document_id=g.document_id, revisions=g.revisions))
     for g in skipped:
         console.print(
@@ -1756,9 +1764,10 @@ def revisions_apply_rule_cmd(dry_run: bool, db_path: Path | None) -> None:
         )
     if merged:
         console.print(
-            "\n[yellow]Check the order of each linked document above.[/] It comes from "
-            "ingest time, which is when a PDF was first ingested here, "
-            "not when it was published. Fix it with rag revisions move <rev_id> --below <rev_id>."
+            "\n[yellow]The order of each linked document above is a guess. Check it.[/] "
+            "It comes from ingest time, which is when a PDF was first ingested here, "
+            "not when it was published. The top revision is the one search shows. "
+            "Fix the order with rag revisions move <rev_id> --below <rev_id>."
         )
     if dry_run:
         console.print("\nDry run: nothing was changed. Run without --dry-run to link.")

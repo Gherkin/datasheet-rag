@@ -238,8 +238,8 @@ def test_apply_rule_dry_run_then_link(db_path: Path) -> None:
     dry = _rag(db_path, "revisions", "apply-rule", "--dry-run")
     assert dry.exit_code == 0, dry.output
     assert "Would link 1 group(s)" in dry.output
-    assert "D2 → D1 (ordered by ingest time)" in dry.output
-    assert "Check the order of each linked document" in dry.output
+    assert "D2 → D1 (ordered by ingest time; order is a guess)" in dry.output
+    assert "The order of each linked document above is a guess" in dry.output
     assert "Dry run: nothing was changed" in dry.output
     assert "D2" in _json(_rag(db_path, "metadata", DOC_B).output)["document_id"]
 
@@ -260,7 +260,7 @@ def test_apply_rule_lists_skipped_groups(db_path: Path) -> None:
     assert result.exit_code == 0, result.output
     assert "Linked 0 group(s). Skipped 1." in result.output
     assert "Skipped D1, D2: a field holds different values" in result.output
-    assert "Check the order" not in result.output
+    assert "is a guess" not in result.output
 
 
 # ---- rag ingest --------------------------------------------------------------

@@ -292,8 +292,9 @@ class RuleGroup:
     target: int | None = None
     #: The merged document's rev_ids, newest first.
     order: tuple[str, ...] = ()
-    #: True when ``target`` already had several revisions and their order
-    #: was kept, with the other PDFs put on top.
+    #: True when one document in the group already had several revisions
+    #: before the run. Their order was kept and the other PDFs were slotted
+    #: into it by ingest time.
     kept_order: bool = False
     detail: str = ""
 
@@ -343,23 +344,50 @@ def apply_rule(
     Match semantics are those of ingest: documents' own values, a missing
     field never matches, list fields must be equal as sets. A group is
     merged only when every pair in it matches and at most one of its
-    documents already has several revisions. That document is kept, with its
-    order; otherwise the lowest-numbered document is kept. The other PDFs go
-    on top, oldest ingest first. A group whose documents hold different values
-    for a field is skipped.
+    documents had several revisions before the run (a hand order). That
+    document is kept, with its order; otherwise the lowest-numbered document
+    is kept. The other PDFs are slotted in by ingest time (see
+    :func:`_slot_order`). A group whose documents hold different values for a
+    field is skipped.
+
+    A merged document holds the fields of all its members, so it can match a
+    document none of them matched alone. Matching is repeated until a round
+    links nothing. The result has one ``merged`` entry per kept document
+    (listing every document folded into it) and the groups the last round
+    skipped.
 
     With ``dry_run`` the same work is done and then rolled back. Commits
     otherwise.
     """
-    values = get_document_values(conn, None, fields=rule.fields())
-    groups, edges = _groups(rule, values)
-    out: list[RuleGroup] = []
-    if not groups:
-        return out
+    hand_ordered = _documents_with_several_revisions(conn)
+    folded: dict[int, set[int]] = {}
+    skipped: list[RuleGroup] = []
     conn.execute("SAVEPOINT apply_rule")
     try:
-        for group in groups:
-            out.append(_apply_group(conn, group, edges))
+        while True:
+            values = get_document_values(conn, None, fields=rule.fields())
+            groups, edges = _groups(rule, values)
+            done = [_apply_group(conn, g, edges, hand_ordered) for g in groups]
+            skipped = [g for g in done if g.status != "merged"]
+            merged = [g for g in done if g.status == "merged"]
+            if not merged:
+                break
+            for g in merged:
+                assert g.target is not None
+                members: set[int] = set()
+                for d in g.document_ids:
+                    members |= folded.pop(d, {d})
+                folded[g.target] = members
+        out = [
+            RuleGroup(
+                "merged",
+                tuple(sorted(members)),
+                target=target,
+                order=tuple(revisions_of(conn, target)),
+                kept_order=bool(members & hand_ordered),
+            )
+            for target, members in folded.items()
+        ]
     except BaseException:
         conn.execute("ROLLBACK TO apply_rule")
         conn.execute("RELEASE apply_rule")
@@ -369,11 +397,44 @@ def apply_rule(
     conn.execute("RELEASE apply_rule")
     if not dry_run and conn.in_transaction:
         conn.commit()
-    return out
+    return sorted([*out, *skipped], key=lambda g: g.document_ids)
+
+
+def _documents_with_several_revisions(conn: sqlite3.Connection) -> set[int]:
+    return {
+        int(r[0])
+        for r in conn.execute(
+            "SELECT document_id FROM revisions GROUP BY document_id HAVING COUNT(*) > 1"
+        )
+    }
+
+
+def _slot_order(base: list[str], newcomers: list[str], times: Mapping[str, str]) -> list[str]:
+    """``base`` (newest first, kept as is) with ``newcomers`` slotted in.
+
+    Each PDF is placed just above the highest revision that was ingested
+    before it, or at the bottom when there is none. Ties go by rev_id, so the
+    result does not depend on input order. With no ``base`` this is all
+    PDFs by ingest time, the latest ingested as newest. Ingest time is when a
+    PDF was first ingested into this store, not when it was published, so
+    the result is a guess for the user to check.
+    """
+
+    def key(rev_id: str) -> tuple[str, str]:
+        return (times.get(rev_id, ""), rev_id)
+
+    order = list(base)
+    for rev_id in sorted(newcomers, key=key):
+        at = next((i for i, r in enumerate(order) if key(r) < key(rev_id)), len(order))
+        order.insert(at, rev_id)
+    return order
 
 
 def _apply_group(
-    conn: sqlite3.Connection, group: list[int], edges: set[tuple[int, int]]
+    conn: sqlite3.Connection,
+    group: list[int],
+    edges: set[tuple[int, int]],
+    hand_ordered: set[int],
 ) -> RuleGroup:
     ids = tuple(group)
     missing = [(a, b) for i, a in enumerate(group) for b in group[i + 1 :] if (a, b) not in edges]
@@ -386,20 +447,18 @@ def _apply_group(
             detail=f"{format_document_id(a)} and {format_document_id(b)} do not match "
             f"each other{more}",
         )
-    revisions = {d: revisions_of(conn, d) for d in group}
-    multi = [d for d in group if len(revisions[d]) > 1]
+    multi = [d for d in group if d in hand_ordered]
     if len(multi) > 1:
         return RuleGroup(
             "several",
             ids,
             detail=f"{', '.join(format_document_id(d) for d in multi)} each have several revisions",
         )
+    revisions = {d: revisions_of(conn, d) for d in group}
     target = multi[0] if multi else group[0]
     base = revisions[target] if multi else []
     newcomers = [r for d in group if not (multi and d == target) for r in revisions[d]]
-    times = ingest_times(conn, newcomers)
-    newcomers.sort(key=lambda r: (times.get(r, ""), r))
-    order = (*reversed(newcomers), *base)
+    order = tuple(_slot_order(base, newcomers, ingest_times(conn, [*base, *newcomers])))
     conn.execute("SAVEPOINT apply_group")
     try:
         merge_group(conn, target, [d for d in group if d != target], order)

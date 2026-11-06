@@ -196,7 +196,36 @@ def test_apply_rule_keeps_the_order_set_by_hand(conn: sqlite3.Connection) -> Non
 
     (group,) = apply_rule(conn, IdentityRule("intel-id"))
     assert group.status == "merged" and group.target == d1 and group.kept_order
-    assert revisions_of(conn, d1) == ["rev-c", "rev-0", "rev-b", "rev-a"]
+    # rev-0 is older than every revision, so it goes to the bottom, and
+    # search keeps showing the newest by hand order (now rev-c).
+    assert revisions_of(conn, d1) == ["rev-c", "rev-b", "rev-a", "rev-0"]
+
+
+def test_apply_rule_slots_an_older_pdf_into_the_hand_order(conn: sqlite3.Connection) -> None:
+    d1 = _ingest(conn, "rev-a", "2026-03-01", **{"intel-id": "1"})
+    _ingest(conn, "rev-b", "2026-05-01")
+    add_revision(conn, d1, "rev-b")
+    _ingest(conn, "rev-x", "2026-04-01", **{"intel-id": "1"})
+
+    (group,) = apply_rule(conn, IdentityRule("intel-id"))
+    assert group.kept_order and group.order == ("rev-b", "rev-x", "rev-a")
+
+
+def test_apply_rule_repeats_until_nothing_more_links(conn: sqlite3.Connection) -> None:
+    # X matches neither A nor B, only the document they merge into.
+    a = _ingest(conn, "a", "2026-01-01", **{"intel-id": "1", "acme-pn": ["P"]})
+    b = _ingest(conn, "b", "2026-01-02", **{"intel-id": "1", "doc_type": "datasheet"})
+    x = _ingest(conn, "x", "2026-01-03", **{"acme-pn": ["P"], "doc_type": "datasheet"})
+    rule = IdentityRule("intel-id OR (acme-pn AND doc_type)")
+
+    planned = apply_rule(conn, rule, dry_run=True)
+    assert [(g.status, g.document_ids, g.target) for g in planned] == [("merged", (a, b, x), a)]
+    assert planned[0].order == ("x", "b", "a")
+    assert document_of(conn, "x") == x
+
+    assert apply_rule(conn, rule) == planned
+    assert revisions_of(conn, a) == ["x", "b", "a"]
+    assert apply_rule(conn, rule) == []
 
 
 def test_apply_rule_skips_a_chain(conn: sqlite3.Connection) -> None:
