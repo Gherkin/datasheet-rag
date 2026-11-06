@@ -402,6 +402,47 @@ A write goes to the project named with `--project`. Without it, the `.rag.toml` 
 
 `rag ingest --subsystem` writes to the ingest project. `rag list --subsystem` and `rag search --subsystem` match the value in the listed or searched project, or in any project with `--global`. The MCP `fields` filter does the same.
 
+### Documents and revisions
+
+A datasheet often comes in several revisions: Rev A, Rev B, Rev C. Each PDF is a *revision* with its own `doc_id` (the SHA-256 of the file). Revisions of one datasheet are grouped in a *document*, named `D12`. Every command that takes a document accepts either the `D12` or any of its revisions' `doc_id`s.
+
+Metadata belongs to the document: projects, tags and field values are set once and every revision has them. A revision has its own label (`--revision "Rev C"`, free text), title and chunks.
+
+Search, `rag list` and the MCP tools show only the newest revision of each document. Pass `--all-revisions` (MCP: `all_revisions=true`) to include the older ones. Commands that work on one PDF (`rag get page`, `show_pdf`, …) use the newest revision when given a `D12`.
+
+```
+rag ingest rev-c.pdf --new-revision-of D12 --revision "Rev C"   # newest revision of D12
+rag revisions D12                          # list, newest first
+rag revisions add D12 <doc_id>             # a stored PDF becomes D12's newest revision
+rag revisions move <doc_id> --below <doc_id>
+rag revisions unlink <doc_id>              # back into a document of its own
+```
+
+The order is the one you set; labels are never parsed. A new revision goes on top. `rag revisions add` merges the PDF's own document into `D12`: projects and tags are joined, and if both hold different values for a field it stops and names the field. `unlink` gives the PDF a new document with a copy of the old one's metadata. `rag delete <doc_id>` deletes one revision; `rag delete D12` deletes all of them. A document's metadata goes with its last revision.
+
+To give one revision a different value, write it on that revision only. Listings mark such values with `*`:
+
+```
+rag metadata <doc_id> --this-revision --field doc_type=errata
+rag metadata <doc_id> --this-revision --unset-field doc_type   # inherit again
+```
+
+Projects and per-project fields are always set on the whole document.
+
+#### The identity rule
+
+Without help nothing links on its own: an ingested PDF becomes a new document unless `--new-revision-of` names one. A store can hold one *identity rule* that does the linking at ingest:
+
+```
+rag revisions rule set "intel-id OR ti-id OR (acme-pn AND doc_type)"
+rag revisions rule show
+rag revisions rule clear
+```
+
+The rule is an expression over registered, document-scoped fields, with `AND`, `OR` and parentheses (`AND` binds tighter). When a PDF is ingested without `--new-revision-of`, the field values the ingest sets are compared with every document's values. A field matches only when both have it and the values are equal (case-insensitive); a list field must hold the same values, not just share one. One matching document: the PDF becomes its newest revision. None: a new document. Two or more: the ingest stops before parsing and names them.
+
+There is no default rule. `manufacturer + mpn + doc_type` would fold together documents that are not revisions of each other (one Intel CPU has hundreds of datasheets, errata and guides with the same values). The ingest output always says what happened (`linked to D12 as newest revision (rule: intel-id)`, `new document D14`), so a wrong link is seen at once and fixed with `rag revisions unlink`. Setting or changing the rule does not relink documents already stored.
+
 ## Usage
 
 ### Ingestation

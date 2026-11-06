@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 from click.testing import CliRunner
 
-from datasheet_rag.backend.models import IngestResult
+from datasheet_rag.backend.models import IngestLink, IngestResult
 from datasheet_rag.cli import cli
 from datasheet_rag.store.fields import BUILTIN_FIELDS, FieldSpec
 
@@ -22,10 +22,15 @@ class _FakeBackend:
         self.calls: list[dict[str, Any]] = []
         self.fields: list[FieldSpec] = list(BUILTIN_FIELDS)
         self.list_fields_calls = 0
+        self.link_plans: list[dict[str, Any]] = []
 
     def list_fields(self) -> list[FieldSpec]:
         self.list_fields_calls += 1
         return self.fields
+
+    def plan_ingest_link(self, **kwargs: Any) -> IngestLink:
+        self.link_plans.append(kwargs)
+        return IngestLink(action="new")
 
     def ingest_pdf(self, pdf_path: Path, **kwargs: Any) -> IngestResult:
         self.calls.append({"pdf_path": pdf_path, **kwargs})
@@ -55,19 +60,19 @@ def _ingest(*args: str):
 
 
 def test_ingest_applies_fields_from_config(tmp_path: Path, fake_backend: _FakeBackend) -> None:
-    fake_backend.fields += [FieldSpec(name="revision"), FieldSpec(name="owner")]
+    fake_backend.fields += [FieldSpec(name="drawing"), FieldSpec(name="owner")]
     (tmp_path / ".rag.toml").write_text(
-        '[fields]\ndoc_type = "technical-manual"\nrevision = "A"\nowner = "hw"\n'
+        '[fields]\ndoc_type = "technical-manual"\ndrawing = "A"\nowner = "hw"\n'
     )
     pdf = _pdf(tmp_path / "V700")
-    (pdf.parent / ".rag.toml").write_text('[fields]\nrevision = "B"\n')
+    (pdf.parent / ".rag.toml").write_text('[fields]\ndrawing = "B"\n')
 
     result = _ingest(str(pdf), "--field", "owner=fw")
 
     assert result.exit_code == 0, result.output
     patch = fake_backend.calls[0]["metadata"]
-    # Nearest file wins for revision; the CLI flag wins for owner.
-    assert patch.fields == {"doc_type": "technical-manual", "revision": "B", "owner": "fw"}
+    # Nearest file wins for drawing; the CLI flag wins for owner.
+    assert patch.fields == {"doc_type": "technical-manual", "drawing": "B", "owner": "fw"}
 
 
 def test_ingest_keeps_config_subsystem_in_the_config_project(
@@ -133,7 +138,7 @@ def test_ingest_rejects_bad_config_without_traceback(
 
 
 def test_ingest_rejects_an_old_attributes_table(tmp_path: Path, fake_backend: _FakeBackend) -> None:
-    (tmp_path / ".rag.toml").write_text('[attributes]\nrevision = "B"\n')
+    (tmp_path / ".rag.toml").write_text('[attributes]\ndrawing = "B"\n')
 
     result = _ingest(str(_pdf(tmp_path)))
 
@@ -170,18 +175,18 @@ def test_unregistered_field_fails_before_the_pdf_is_sent(
 def test_unregistered_config_field_fails_before_the_pdf_is_sent(
     tmp_path: Path, fake_backend: _FakeBackend
 ) -> None:
-    (tmp_path / ".rag.toml").write_text('[fields]\nrevision = "B"\n')
+    (tmp_path / ".rag.toml").write_text('[fields]\ndrawing = "B"\n')
 
     result = _ingest(str(_pdf(tmp_path)))
 
     assert result.exit_code == 1
-    assert "unregistered field(s) revision" in result.output
+    assert "unregistered field(s) drawing" in result.output
     assert fake_backend.calls == []
 
 
 def test_bulk_ingest_reads_the_registry_once(tmp_path: Path, fake_backend: _FakeBackend) -> None:
-    fake_backend.fields.append(FieldSpec(name="revision"))
-    (tmp_path / ".rag.toml").write_text('[fields]\nrevision = "B"\n')
+    fake_backend.fields.append(FieldSpec(name="drawing"))
+    (tmp_path / ".rag.toml").write_text('[fields]\ndrawing = "B"\n')
     _pdf(tmp_path / "a")
     (tmp_path / "b").mkdir()
     (tmp_path / "b" / "doc.pdf").write_bytes(b"%PDF-1.4\nb\n")

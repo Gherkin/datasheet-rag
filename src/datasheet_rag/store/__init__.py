@@ -6,8 +6,10 @@ This package owns the local persistence layer:
                doc_metadata, schema_version).
 * `sqlite`   – CRUD helpers for chunks and vectors.
 * `search`   – vector / keyword / hybrid retrieval.
-* `metadata` – document-level metadata sidecar (independent of chunks).
+* `documents` – documents (`D12`) and the order of their revisions (PDFs).
+* `metadata` – document metadata and the per-revision sidecar.
 * `fields`   – registry of typed, filterable metadata fields and their values.
+* `identity` – the optional rule that links a new PDF to a stored document.
 
 The store is intentionally small: module-level functions rather than
 classes, mirroring the style of `datasheet_rag.storage` and `datasheet_rag.aws`.

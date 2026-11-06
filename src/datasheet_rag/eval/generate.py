@@ -24,6 +24,7 @@ from rich.console import Console
 from datasheet_rag.config import get_settings
 from datasheet_rag.eval.dataset import CATEGORIES, Category, EvalSet, GoldenItem
 from datasheet_rag.models.chunk import Chunk
+from datasheet_rag.store.documents import older_revisions_sql
 from datasheet_rag.store.projects import project_scope_sql
 from datasheet_rag.store.sqlite import _row_to_chunk
 
@@ -126,6 +127,10 @@ def _sample_chunks(
     if doc_id:
         clauses.append("doc_id = ?")
         params.append(doc_id)
+    else:
+        # Questions are drawn from what search covers by default: the newest
+        # revision of each document (GH #124). A named doc_id is used as given.
+        clauses.append(older_revisions_sql("doc_id"))
     if project_id:
         clause, clause_params = project_scope_sql(project_id, doc_id_column="doc_id")
         clauses.append(clause)

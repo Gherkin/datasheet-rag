@@ -17,13 +17,14 @@ from rich.console import Console
 from rich.table import Table
 
 from datasheet_rag.config import get_settings
+from datasheet_rag.store.documents import parse_document_ref
 
 if TYPE_CHECKING:
     import sqlite3
 
     from datasheet_rag.backend import RagBackend
     from datasheet_rag.backend.base import RagServerError, SearchMode
-    from datasheet_rag.backend.models import IngestedDoc
+    from datasheet_rag.backend.models import DocumentRevisions, IngestedDoc, IngestResult
     from datasheet_rag.chunking.layout_parser import DocumentOutline
     from datasheet_rag.costs import CostEstimate
     from datasheet_rag.eval.ablation import IndexVariant
@@ -733,6 +734,9 @@ _DOC_COLUMNS: dict[str, Callable[[IngestedDoc], Any]] = {
 }
 
 _META_COLUMNS: dict[str, Callable[[DocMetadata], Any]] = {
+    "document": lambda m: m.document_id,
+    "revision": lambda m: m.revision,
+    "revisions": lambda m: len(m.revisions) or None,
     "projects": lambda m: m.projects,
     "tags": lambda m: m.tags,
     "updated": lambda m: m.updated_at,
@@ -753,13 +757,19 @@ _LIST_COLUMN_ALIASES = {
     "updated_at": "updated",
 }
 
-_LIST_RIGHT_ALIGNED = {"chunks", "pages"}
+_LIST_RIGHT_ALIGNED = {"chunks", "pages", "revisions"}
+
+#: Shown after a table that marks values set on one revision only (GH #124).
+_OVERRIDE_NOTE = (
+    "  * set on this revision only (rag metadata <doc_id> --this-revision ...); "
+    "the document's other revisions hold the document's value"
+)
 
 # The two built-in views. They answer different questions — ingest health vs.
 # cataloguing — so --wide swaps the store-stat columns for the sidecar ones
 # rather than appending them. Showing all eleven at once is unreadable on an
 # 80-column terminal, where Rich squeezes every cell down to nothing.
-_LIST_DEFAULT_COLUMNS = ("title", "chunks", "pages", "ingested")
+_LIST_DEFAULT_COLUMNS = ("revision", "revisions", "title", "chunks", "pages", "ingested")
 _LIST_WIDE_COLUMNS = ("projects", "mpn", "manufacturer", "subsystem", "tags")
 
 
@@ -858,9 +868,10 @@ def _fmt_list_cell(value: Any) -> str:
     multiple=True,
     metavar="COL,COL,...",
     help="Choose the columns to show (comma-separated, repeatable). "
-    "Built-ins: title, chunks, pages, ingested, projects, mpn, "
-    "manufacturer, subsystem, doc_type, tags, updated, stale, and any "
-    "registered field (`rag fields list`). doc_id is always shown.",
+    "Built-ins: revision, revisions, title, chunks, pages, ingested, "
+    "projects, mpn, manufacturer, subsystem, doc_type, tags, updated, stale, "
+    "and any registered field (`rag fields list`). document and doc_id are "
+    "always shown.",
 )
 @click.option(
     "--wide",
@@ -869,6 +880,13 @@ def _fmt_list_cell(value: Any) -> str:
     help="Show the sidecar columns (projects, mpn, manufacturer, "
     "subsystem, tags, then each user-registered field) in place of the "
     "chunk/page/ingest columns. Implied whenever a filter is given.",
+)
+@click.option(
+    "--all-revisions",
+    "-a",
+    "all_revisions",
+    is_flag=True,
+    help="One row per revision (PDF), not just each document's newest.",
 )
 @click.option(
     "--s3",
@@ -886,9 +904,13 @@ def list_docs(
     tags: tuple[str, ...],
     columns: tuple[str, ...],
     wide: bool,
+    all_revisions: bool,
     show_s3: bool,
 ) -> None:
     """List ingested documents (searchable in the store).
+
+    One row per document (D12), showing its newest revision; --all-revisions
+    shows every revision. `rag revisions D12` lists one document's revisions.
 
     Shows the store's own view — title, chunk and page counts, ingest time.
     Pass --wide, or any sidecar filter, to swap those for the metadata columns
@@ -979,14 +1001,17 @@ def list_docs(
 
     # The sidecar is a separate table from the chunk store, so join by doc_id
     # rather than assuming every ingested document has a row in it.
-    # Always fetched, not just when filtering: the stale marker lives in the
-    # sidecar and belongs in the default view.
-    try:
-        meta_by_id = {
-            m.doc_id: m for m in be.list_docs(project_id=project_id, fields=field_filters or None)
-        }
-    except Exception:
-        meta_by_id = {}
+    # Always fetched, not just when filtering: the stale marker and the
+    # document a revision belongs to live there. Every revision is read, so a
+    # PDF missing here is one without a sidecar row, not an older revision.
+    meta_by_id = {
+        m.doc_id: m
+        for m in be.list_docs(
+            project_id=project_id, fields=field_filters or None, all_revisions=True
+        )
+    }
+    if not all_revisions:
+        docs = [d for d in docs if (m := meta_by_id.get(d.doc_id)) is None or m.is_newest]
 
     if filtering:
         wanted_tags = set(tags)
@@ -1016,27 +1041,51 @@ def list_docs(
         shown = list(_LIST_WIDE_COLUMNS if (wide or filtering) else _LIST_DEFAULT_COLUMNS)
         if wide or filtering:
             shown.extend(f.name for f in registered if not f.builtin)
+        # Revision columns only earn their width when a row has something in
+        # them: most stores hold one unlabelled PDF per document.
+        metas = [m for d in docs if (m := meta_by_id.get(d.doc_id)) is not None]
+        if not any(m.revision for m in metas) and "revision" in shown:
+            shown.remove("revision")
+        if not any(len(m.revisions) > 1 for m in metas) and "revisions" in shown:
+            shown.remove("revisions")
     # doc_id is the handle every other `rag` command takes, so a listing
-    # without it is a dead end; the stale marker is a health flag rather than
-    # metadata, and is worth showing whatever view was asked for.
+    # without it is a dead end; the document id names what metadata is set
+    # on. The stale marker is a health flag rather than metadata, and is
+    # worth showing whatever view was asked for.
     if "doc_id" not in shown:
         shown.insert(0, "doc_id")
+    if "document" not in shown:
+        shown.insert(0, "document")
     if stale_ids and "stale" not in shown:
         shown.insert(shown.index("doc_id") + 1, "stale")
 
     table = Table(title="Ingested Documents")
     for name in shown:
+        # The two handles every other command takes are never squeezed.
+        handle = name in ("doc_id", "document")
         table.add_column(
             name,
             style="cyan" if name == "doc_id" else None,
             justify="right" if name in _LIST_RIGHT_ALIGNED else "left",
+            no_wrap=handle,
+            min_width=SHORT_DOC_ID_LEN if name == "doc_id" else None,
         )
 
+    marked = False
     for doc in docs:
         meta = meta_by_id.get(doc.doc_id)
-        table.add_row(*(_fmt_list_cell(_list_cell(name, doc, meta, project_id)) for name in shown))
+        cells = []
+        for name in shown:
+            cell = _fmt_list_cell(_list_cell(name, doc, meta, project_id))
+            if meta is not None and name in meta.overrides:
+                cell += "*"
+                marked = True
+            cells.append(cell)
+        table.add_row(*cells)
 
     console.print(table)
+    if marked:
+        console.print(_OVERRIDE_NOTE)
     if stale_ids:
         console.print(
             f"  [yellow]{len(stale_ids)} document(s) were repaired since they were "
@@ -1367,7 +1416,7 @@ def get_page_cmd(
 # ---------------------------------------------------------------------------
 
 
-@cli.command("delete", short_help="Permanently delete a document.")
+@cli.command("delete", short_help="Permanently delete a revision or a document.")
 @click.argument("doc_id", type=str)
 @_db_option
 @click.option(
@@ -1375,27 +1424,45 @@ def get_page_cmd(
 )
 @click.option("-y", "--yes", "assume_yes", is_flag=True, help="Skip the confirmation prompt.")
 def delete_doc_cmd(doc_id: str, db_path: Path | None, dry_run: bool, assume_yes: bool) -> None:
-    """Permanently delete a document.
+    """Permanently delete one revision (a doc_id) or a whole document (D12).
 
-    Removes its chunks, vectors and metadata from the store, its local PDF
-    and figure-crop files, cached pipeline artifacts, and (if S3 is
-    configured) the matching S3 objects. There is no undo — the document
-    must be re-ingested from the source PDF to get it back.
+    Removes the chunks, vectors and revision metadata from the store, the
+    local PDF and figure-crop files, cached pipeline artifacts, and (if S3
+    is configured) the matching S3 objects. A document's own metadata
+    (projects, tags, fields) goes with its last revision. There is no undo —
+    a revision must be re-ingested from the source PDF to get it back.
     """
     be = _backend_for(db_path)
-    doc_id = _backend_resolve(be, doc_id)
-    title = be.get_doc_titles().get(doc_id)
-    chunk_count = be.count_chunks(doc_id=doc_id)
-    label = f"{title!r} ({doc_id[:SHORT_DOC_ID_LEN]})" if title else doc_id[:SHORT_DOC_ID_LEN]
+    if parse_document_ref(doc_id) is not None:
+        targets = [r.doc_id for r in _list_revisions(be, doc_id).revisions]
+        document = doc_id
+    else:
+        targets = [_backend_resolve(be, doc_id)]
+        document = None
+    titles = be.get_doc_titles()
+    chunk_count = sum(be.count_chunks(doc_id=d) for d in targets)
+    if document is not None:
+        label = f"{document} ({len(targets)} revision(s))"
+    else:
+        did = targets[0]
+        title = titles.get(did)
+        label = f"{title!r} ({did[:SHORT_DOC_ID_LEN]})" if title else did[:SHORT_DOC_ID_LEN]
+        meta = be.get_metadata(did)
+        if meta is not None and len(meta.revisions) > 1:
+            label += (
+                f", one of {len(meta.revisions)} revisions of {meta.document_id}; "
+                "the others are kept"
+            )
 
     if dry_run:
         console.print(f"[yellow]--dry-run:[/] would delete {chunk_count} chunk(s) for {label}")
-        console.print(
-            "  Also removes: local PDF, figure-crop directory, cached pipeline "
-            "artifacts, and any S3 objects under "
-            f"[cyan]{get_settings().s3_pdf_prefix}{doc_id}/[/] and "
-            f"[cyan]figures/{doc_id}/[/] (if S3 is configured)."
-        )
+        for did in targets:
+            console.print(
+                "  Also removes: local PDF, figure-crop directory, cached pipeline "
+                "artifacts, and any S3 objects under "
+                f"[cyan]{get_settings().s3_pdf_prefix}{did}/[/] and "
+                f"[cyan]figures/{did}/[/] (if S3 is configured)."
+            )
         return
 
     if not assume_yes:
@@ -1407,9 +1474,227 @@ def delete_doc_cmd(doc_id: str, db_path: Path | None, dry_run: bool, assume_yes:
             console.print("[yellow]Aborted.[/]")
             return
 
-    deleted = be.delete_doc(doc_id)
+    deleted = sum(be.delete_doc(did) for did in targets)
 
     console.print(f"[green]Deleted[/] {deleted} chunk(s) for {label}.")
+
+
+# ---------------------------------------------------------------------------
+# revisions (GH #124)
+# ---------------------------------------------------------------------------
+
+
+def _list_revisions(be: RagBackend, ref: str) -> DocumentRevisions:
+    try:
+        return be.list_revisions(ref if parse_document_ref(ref) else _backend_resolve(be, ref))
+    except ValueError as e:
+        raise click.ClickException(str(e)) from e
+
+
+def _print_revisions(revs: DocumentRevisions) -> None:
+    table = Table(title=f"{revs.document_id} · {len(revs.revisions)} revision(s), newest first")
+    for name in ("", "doc_id", "revision", "ingested", "chunks", "title"):
+        table.add_column(
+            name,
+            style="cyan" if name == "doc_id" else None,
+            justify="right" if name == "chunks" else "left",
+        )
+    marked = False
+    for r in revs.revisions:
+        doc = r.doc_id[:SHORT_DOC_ID_LEN]
+        if r.overrides:
+            doc += "*"
+            marked = True
+        table.add_row(
+            "newest" if r.newest else "",
+            doc,
+            _fmt_list_cell(r.revision),
+            _fmt_list_cell(r.ingested_at),
+            str(r.chunk_count),
+            _fmt_list_cell(r.doc_title),
+        )
+    console.print(table)
+    if marked:
+        console.print(
+            "  * has values set on this revision only; `rag metadata <doc_id>` shows them"
+        )
+
+
+class _RevisionsGroup(click.Group):
+    """`rag revisions D12` lists; `rag revisions <command> ...` runs a command."""
+
+    def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
+        if args and not args[0].startswith("-") and args[0] not in self.commands:
+            args = ["list", *args]
+        return super().parse_args(ctx, args)
+
+
+@cli.group(
+    "revisions",
+    cls=_RevisionsGroup,
+    short_help="List and arrange the revisions of a document.",
+)
+def revisions_group() -> None:
+    """List and arrange the revisions of a document.
+
+    A document (D12) groups the revisions of one datasheet; each revision is
+    one PDF with its own doc_id. Metadata belongs to the document. Search and
+    `rag list` show the newest revision unless asked for all. The order is
+    the one you set; revision labels ("Rev C") are never parsed:
+
+    \b
+        rag revisions D12                       # list, newest first
+        rag ingest new.pdf --new-revision-of D12
+        rag revisions add D12 <doc_id>          # an already stored PDF on top
+        rag revisions move <doc_id> --below <doc_id>
+        rag revisions unlink <doc_id>           # into a document of its own
+        rag revisions rule set "intel-id OR (acme-pn AND doc_type)"
+    """
+
+
+@revisions_group.command("list", short_help="List a document's revisions.")
+@click.argument("ref", type=str)
+@_db_option
+def revisions_list_cmd(ref: str, db_path: Path | None) -> None:
+    """List the revisions of REF (a D12 or any revision's doc_id), newest first."""
+    _print_revisions(_list_revisions(_backend_for(db_path), ref))
+
+
+@revisions_group.command("add", short_help="Make a stored PDF the newest revision of a document.")
+@click.argument("document", type=str)
+@click.argument("doc_id", type=str)
+@_db_option
+def revisions_add_cmd(document: str, doc_id: str, db_path: Path | None) -> None:
+    """Put stored PDF DOC_ID on top of DOCUMENT's revisions, as its newest.
+
+    DOCUMENT is a D12 or any of its revisions' doc_ids. A PDF that is alone
+    in its own document is merged in: projects and tags are joined, and the
+    two documents must not hold different values for a field. A PDF that is
+    one of several revisions of another document must be unlinked first.
+    To ingest a new PDF as a revision, use `rag ingest --new-revision-of`.
+    """
+    be = _backend_for(db_path)
+    try:
+        revs = be.add_revision(document, _backend_resolve(be, doc_id))
+    except ValueError as e:
+        raise click.ClickException(str(e)) from e
+    console.print(
+        f"[green]{doc_id[:SHORT_DOC_ID_LEN]} is the newest revision of[/] {revs.document_id}"
+    )
+    _print_revisions(revs)
+
+
+@revisions_group.command("move", short_help="Change a revision's place in its document.")
+@click.argument("doc_id", type=str)
+@click.option(
+    "--above",
+    default=None,
+    metavar="DOC_ID",
+    help="Put it directly above (newer than) this revision.",
+)
+@click.option(
+    "--below",
+    default=None,
+    metavar="DOC_ID",
+    help="Put it directly below (older than) this revision.",
+)
+@_db_option
+def revisions_move_cmd(
+    doc_id: str, above: str | None, below: str | None, db_path: Path | None
+) -> None:
+    """Move revision DOC_ID directly above or below another revision of the
+    same document. The top one is the newest: the one search uses."""
+    if (above is None) == (below is None):
+        raise click.UsageError("give exactly one of --above / --below")
+    be = _backend_for(db_path)
+    try:
+        revs = be.move_revision(
+            _backend_resolve(be, doc_id),
+            above=_backend_resolve(be, above) if above else None,
+            below=_backend_resolve(be, below) if below else None,
+        )
+    except ValueError as e:
+        raise click.ClickException(str(e)) from e
+    _print_revisions(revs)
+
+
+@revisions_group.command("unlink", short_help="Take a revision out into a document of its own.")
+@click.argument("doc_id", type=str)
+@_db_option
+def revisions_unlink_cmd(doc_id: str, db_path: Path | None) -> None:
+    """Take revision DOC_ID out of its document into a new one.
+
+    The new document starts with a copy of the old one's projects, tags and
+    field values, so the PDF stays where it was in every listing and filter.
+    """
+    be = _backend_for(db_path)
+    full = _backend_resolve(be, doc_id)
+    try:
+        before = be.get_metadata(full)
+        revs = be.unlink_revision(full)
+    except ValueError as e:
+        raise click.ClickException(str(e)) from e
+    old = before.document_id if before is not None else "its document"
+    console.print(
+        f"[green]{full[:SHORT_DOC_ID_LEN]} is now[/] {revs.document_id} "
+        f"[green](was a revision of[/] {old}[green])[/]"
+    )
+    _print_revisions(revs)
+
+
+@revisions_group.group("rule", short_help="Show or set the identity rule.")
+def revisions_rule_group() -> None:
+    """The identity rule links a newly ingested PDF to a stored document.
+
+    It is an expression over registered fields, with AND, OR and
+    parentheses (AND binds tighter):
+
+        rag revisions rule set "intel-id OR ti-id OR (acme-pn AND doc_type)"
+
+    When a PDF is ingested without --new-revision-of, the rule is checked
+    against every document using the field values the ingest sets. A field
+    matches only when both have it and the values are equal; for a list
+    field, equal as a set. One match: the PDF becomes that document's newest
+    revision. None: a new document. More than one: the ingest stops and
+    names them. Without a rule nothing links on its own.
+    """
+
+
+@revisions_rule_group.command("show")
+@_db_option
+def revisions_rule_show_cmd(db_path: Path | None) -> None:
+    """Print the identity rule."""
+    rule = _backend_for(db_path).get_identity_rule()
+    if rule is None:
+        console.print(
+            "No identity rule: revisions link only by hand (--new-revision-of, rag revisions add)."
+        )
+    else:
+        console.print(rule)
+
+
+@revisions_rule_group.command("set")
+@click.argument("expression", type=str)
+@_db_option
+def revisions_rule_set_cmd(expression: str, db_path: Path | None) -> None:
+    """Set the identity rule to EXPRESSION."""
+    try:
+        rule = _backend_for(db_path).set_identity_rule(expression)
+    except ValueError as e:
+        raise click.ClickException(str(e)) from e
+    console.print(f"[green]Identity rule set:[/] {rule}")
+    console.print(
+        "  It applies to PDFs ingested from now on. Documents already stored are "
+        "not relinked; arrange those with rag revisions add / unlink."
+    )
+
+
+@revisions_rule_group.command("clear")
+@_db_option
+def revisions_rule_clear_cmd(db_path: Path | None) -> None:
+    """Remove the identity rule. Stored links are kept."""
+    _backend_for(db_path).set_identity_rule(None)
+    console.print("[green]Identity rule cleared.[/] Revisions now link only by hand.")
 
 
 @get_group.command("text", short_help="Dump a document's extracted text.")
@@ -1889,7 +2174,13 @@ def embed(
     help="Restrict to documents with this subsystem in the searched project "
     "(in any project with --global).",
 )
-@click.option("--doc-id", "doc_ids", multiple=True, help="Restrict to one or more doc IDs.")
+@click.option(
+    "--doc-id",
+    "doc_ids",
+    multiple=True,
+    help="Restrict to one or more revisions (doc_ids) or documents (D12: its "
+    "newest revision, or every one with --all-revisions).",
+)
 @click.option(
     "--level",
     type=click.Choice(["macro", "meso", "micro"]),
@@ -1900,6 +2191,13 @@ def embed(
     "--show-context/--no-show-context",
     default=False,
     help="Show context_text (full embedding-ready blob) instead of raw text.",
+)
+@click.option(
+    "--all-revisions",
+    "-a",
+    "all_revisions",
+    is_flag=True,
+    help="Search every revision of each document, not just the newest.",
 )
 def search(
     query: str,
@@ -1912,9 +2210,13 @@ def search(
     doc_ids: tuple[str, ...],
     level: str | None,
     show_context: bool,
+    all_revisions: bool,
 ) -> None:
     """Search the RAG store (local sqlite or remote server) with hybrid /
-    vector / keyword retrieval. The query is embedded by the backend."""
+    vector / keyword retrieval. The query is embedded by the backend.
+
+    Only the newest revision of each document is searched unless you pass
+    --all-revisions (see `rag revisions`)."""
     from datasheet_rag.backend import SEARCH_POOL
     from datasheet_rag.models.chunk import ChunkLevel
 
@@ -1926,7 +2228,12 @@ def search(
     project_id = resolve_cli_project_id(project_id, is_global=is_global)
     be = _backend_for(db_path)
 
-    resolved_doc_ids = [_backend_resolve(be, d) for d in doc_ids]
+    resolved_doc_ids: list[str] = []
+    for d in doc_ids:
+        if all_revisions and parse_document_ref(d) is not None:
+            resolved_doc_ids.extend(r.doc_id for r in _list_revisions(be, d).revisions)
+        else:
+            resolved_doc_ids.append(_backend_resolve(be, d))
 
     level_enum = None
     if level:
@@ -1938,6 +2245,7 @@ def search(
 
     filters = SearchFilters(
         doc_ids=resolved_doc_ids if resolved_doc_ids else None,
+        all_revisions=all_revisions,
         project_id=project_id,
         fields={"subsystem": subsystem} if subsystem is not None else None,
         level=level_enum,
@@ -2685,6 +2993,22 @@ def _print_cost_table(cost: CostEstimate, heading: str = "Estimated AWS cost") -
     "from .rag.toml, field by field.",
 )
 @click.option(
+    "--new-revision-of",
+    "new_revision_of",
+    default=None,
+    metavar="DOC",
+    help="Make the PDF the newest revision of this document (a D12 or any of "
+    "its revisions' doc_ids). Without it the identity rule decides, if the "
+    "store has one (`rag revisions rule`); else the PDF is a new document.",
+)
+@click.option(
+    "--revision",
+    "revision_label",
+    default=None,
+    metavar="LABEL",
+    help="The PDF's revision label, e.g. 'Rev C' (free text, never parsed).",
+)
+@click.option(
     "--skip-figures",
     is_flag=True,
     help="Skip figure extraction and description. Figures still "
@@ -2795,8 +3119,15 @@ def ingest(
     local_parse: bool,
     backend: str,
     accurate_tables: bool | None,
+    new_revision_of: str | None,
+    revision_label: str | None,
 ) -> None:
     """Full ingestion pipeline: parse → figures → chunk → embed.
+
+    A new PDF becomes a revision of a document (D12): of the one named by
+    --new-revision-of, else of the one the identity rule matches, else of a
+    new document of its own. The output says which. Metadata given here is
+    set on that document, so it applies to all its revisions.
 
     Defaults to Docling (free, fast, handles tables/formulas/figures on
     native PDFs) and fails verbosely on scanned PDFs rather than silently
@@ -2844,6 +3175,8 @@ def ingest(
         local_parse=local_parse,
         backend=backend,
         accurate_tables=accurate_tables,
+        new_revision_of=new_revision_of,
+        revision_label=revision_label,
     )
 
     if not pdf_path.is_dir():
@@ -2854,6 +3187,11 @@ def ingest(
         raise click.ClickException(
             "--doc-id can't be used with a directory — each PDF gets its own "
             "content-hash doc_id. Drop --doc-id for bulk ingestion."
+        )
+    if new_revision_of is not None or revision_label is not None:
+        raise click.ClickException(
+            "--new-revision-of and --revision name one PDF's place; ingest the "
+            "revisions one file at a time, oldest first."
         )
 
     from datasheet_rag.costs import CostEstimate, CostLineItem
@@ -2952,6 +3290,8 @@ def _ingest_one(
     local_parse: bool,
     backend: str,
     accurate_tables: bool | None,
+    new_revision_of: str | None = None,
+    revision_label: str | None = None,
 ) -> CostEstimate | None:
     """Ingest a single PDF; returns the cost estimate when --show-cost is set."""
     import time
@@ -3004,6 +3344,29 @@ def _ingest_one(
     if field_registry is not None and fields:
         _check_field_patch(field_registry.specs(), fields, project=project_id)
 
+    from datasheet_rag.backend import MetadataPatch
+
+    meta_patch = MetadataPatch(
+        tags=list(tags) if tags else None,
+        fields=fields or None,
+        revision=revision_label,
+    )
+    # Which document the PDF goes into, decided now so an unknown
+    # --new-revision-of or an ambiguous rule match fails before the parse.
+    if backend_obj is not None:
+        from datasheet_rag.docling_parser import content_hash
+
+        try:
+            planned = backend_obj.plan_ingest_link(
+                doc_id=doc_id or content_hash(pdf_path),
+                metadata=meta_patch,
+                new_revision_of=new_revision_of,
+            )
+        except ValueError as e:
+            raise click.ClickException(str(e)) from e
+        if planned.action in ("explicit", "rule"):
+            console.print(f"  [cyan]Revision:[/] {planned.describe()}")
+
     settings = get_settings()
     if accurate_tables is None:
         accurate_tables = settings.table_structure_mode == "accurate"
@@ -3046,13 +3409,9 @@ def _ingest_one(
         and not dry_run
         and not show_cost
     ):
-        from datasheet_rag.backend import MetadataPatch, RagServerError
+        from datasheet_rag.backend import RagServerError
 
         assert backend_obj is not None  # built above for every non-dry run
-        meta_patch = MetadataPatch(
-            tags=list(tags) if tags else None,
-            fields=fields or None,
-        )
         try:
             result = backend_obj.ingest_pdf(
                 pdf_path,
@@ -3070,18 +3429,11 @@ def _ingest_one(
                 accurate_tables=accurate_tables,
                 force=force,
                 progress=_progress,
+                new_revision_of=new_revision_of,
             )
         except RagServerError as e:
             raise _friendly_server_error(e) from e
-        console.print(f"  [green]Upserted[/] {result.inserted} chunks")
-        _report_pruned(result.pruned)
-        if result.described:
-            console.print(f"  [green]{result.described}[/] figure descriptions generated")
-        if result.title:
-            console.print(f"  [green]Inferred title:[/] {result.title}")
-        elapsed = time.monotonic() - t0
-        console.rule(f"[bold green]Done[/] — {elapsed:.0f}s")
-        console.print(f"  doc_id = [cyan]{result.doc_id}[/]")
+        _report_ingest(result, t0)
         return None
 
     # ── Local parse (local mode, --local-parse, --dry-run, --show-cost) ──────
@@ -3151,8 +3503,6 @@ def _ingest_one(
     step_state["n"] += 1
     where = "here" if backend_mode() == "local" or compute_mode() == "client" else "on the server"
     console.rule(f"[bold cyan]Step {step_state['n']} — Embed & store ({where})[/]")
-    from datasheet_rag.backend import MetadataPatch
-
     assert backend_obj is not None  # built above for every non-dry run
 
     # In remote mode the cropped figure images live only on this client —
@@ -3163,10 +3513,6 @@ def _ingest_one(
         figures_upload, missing = collect_figure_uploads(graph)
         _warn_missing_figure_crops(missing, len(figures_upload))
 
-    meta_patch = MetadataPatch(
-        tags=list(tags) if tags else None,
-        fields=fields or None,
-    )
     from datasheet_rag.backend import RagServerError
 
     try:
@@ -3184,20 +3530,31 @@ def _ingest_one(
             # never seen the file and uploads it; a local one already has it
             # from the parse and ignores this (GH #43).
             source_pdf=pdf_path,
+            new_revision_of=new_revision_of,
         )
     except RagServerError as e:
         raise _friendly_server_error(e) from e
+    except ValueError as e:
+        raise click.ClickException(str(e)) from e
+    _report_ingest(result, t0)
+    return None
+
+
+def _report_ingest(result: IngestResult, t0: float) -> None:
+    """The lines every successful ingest ends with."""
+    import time
+
     console.print(f"  [green]Upserted[/] {result.inserted} chunks")
     _report_pruned(result.pruned)
     if result.described:
         console.print(f"  [green]{result.described}[/] figure descriptions generated")
     if result.title:
         console.print(f"  [green]Inferred title:[/] {result.title}")
-
     elapsed = time.monotonic() - t0
     console.rule(f"[bold green]Done[/] — {elapsed:.0f}s")
-    console.print(f"  doc_id = [cyan]{did}[/]")
-    return None
+    console.print(f"  doc_id = [cyan]{result.doc_id}[/]")
+    if result.link is not None:
+        console.print(f"  {result.link.describe()}")
 
 
 def _report_pruned(pruned: int, indent: str = "  ") -> None:
@@ -3774,7 +4131,7 @@ def repair_tables_cmd(
 # ---------------------------------------------------------------------------
 
 
-@cli.command("metadata", short_help="Show or set doc-level metadata.")
+@cli.command("metadata", short_help="Show or set a document's metadata.")
 @click.argument("doc_id", type=str)
 @click.option(
     "--title",
@@ -3859,6 +4216,21 @@ def repair_tables_cmd(
     metavar="NAME",
     help="Remove a field's value from the document (repeatable).",
 )
+@click.option(
+    "--this-revision",
+    is_flag=True,
+    help="Write --tag/--clear-tags and the fields on this one revision (a doc_id) "
+    "instead of on its document. Clearing a field or the tags then removes the "
+    "override, so the revision holds the document's value again.",
+)
+@click.option(
+    "--revision",
+    "revision_label",
+    default=None,
+    metavar="LABEL",
+    help="Set this revision's label, e.g. 'Rev C' (free text; '' clears it). "
+    "Needs a doc_id, not a D12.",
+)
 @_db_option
 def metadata_cmd(
     doc_id: str,
@@ -3875,16 +4247,27 @@ def metadata_cmd(
     clear_tags: bool,
     field_items: tuple[str, ...],
     unset_fields: tuple[str, ...],
+    this_revision: bool,
+    revision_label: str | None,
     db_path: Path | None,
 ) -> None:
-    """Show a document's metadata sidecar row, or update it.
+    """Show a document's metadata, or update it.
 
-    With no options this prints the document's current metadata. Pass any
-    option to update instead — only what you pass is touched:
+    DOC_ID is a document (D12) or any of its revisions' doc_ids (prefix ok).
+    Metadata belongs to the document, so a write through any revision's
+    doc_id changes it for every revision. With no options this prints the
+    current metadata. Pass any option to update instead — only what you pass
+    is touched:
 
     \b
-        rag metadata <doc_id>                 # show
-        rag metadata <doc_id> --mpn INA226    # set
+        rag metadata D12                      # show
+        rag metadata D12 --mpn INA226         # set, on every revision
+        rag metadata <doc_id> --revision 'Rev C'
+
+    To give one revision a different value, write it with --this-revision.
+    Listings mark such values with *:
+
+        rag metadata <doc_id> --this-revision --field doc_type=errata
 
     A document's mpn is a list (variants/aliases). --mpn replaces the list,
     --mpn-alias appends to it:
@@ -3918,7 +4301,7 @@ def metadata_cmd(
     # would silently turn every `rag metadata <doc>` into a write. The scalar
     # options are tested against None, not truthiness: `--title ''` is an
     # explicit request to clear the field, not an absent option.
-    scalars = (doc_title, manufacturer, subsystem, doc_type)
+    scalars = (doc_title, manufacturer, subsystem, doc_type, revision_label)
     is_read = all(v is None for v in scalars) and not any(
         (
             add_projects,
@@ -3934,13 +4317,20 @@ def metadata_cmd(
     if is_read:
         if fields_project is not None:
             raise click.UsageError("--project names where to write a per-project field; set one")
+        if this_revision:
+            raise click.UsageError("--this-revision says where a write goes; give something to set")
         be = _backend_for(db_path)
-        existing = be.get_metadata(_backend_resolve(be, doc_id))
+        existing = be.get_metadata(_metadata_target(be, doc_id))
         if existing is None:
             console.print(f"[yellow]No metadata recorded for[/] {doc_id}")
             return
         console.print(existing.model_dump_json(indent=2, exclude_none=True))
+        _note_overrides(existing)
         return
+    if this_revision and (add_projects or remove_projects):
+        raise click.UsageError(
+            "projects belong to the whole document; drop --this-revision to change them"
+        )
 
     fields: dict[str, Any] = _merge_shortcuts(
         _parse_field_items(field_items),
@@ -3971,7 +4361,9 @@ def metadata_cmd(
     if fields_project is not None:
         fields_project = fields_project.strip() or None
 
-    proj_cfg = get_project_config()
+    # A per-revision write is an exception to the document's values; the
+    # .rag.toml defaults describe the document and stay out of it.
+    proj_cfg = None if this_revision else get_project_config()
     if proj_cfg is not None:
         if proj_cfg.project_id and not (add_projects or remove_projects):
             add_projects = (proj_cfg.project_id,)
@@ -3981,7 +4373,25 @@ def metadata_cmd(
             tags = tuple(proj_cfg.tags)
 
     be = _backend_for(db_path)
-    doc_id = _backend_resolve(be, doc_id)
+    doc_id = _metadata_target(be, doc_id)
+    if parse_document_ref(doc_id) is not None:
+        what = next(
+            (
+                flag
+                for flag, given in (
+                    ("--this-revision", this_revision),
+                    ("--revision", revision_label is not None),
+                    ("--title", doc_title is not None),
+                )
+                if given
+            ),
+            None,
+        )
+        if what is not None:
+            raise click.UsageError(
+                f"{doc_id} is a whole document; {what} needs one revision's doc_id "
+                f"(see rag revisions {doc_id})"
+            )
 
     scopes: dict[str, FieldScope] | None = None
     if proj_cfg is not None and proj_cfg.fields:
@@ -4045,13 +4455,42 @@ def metadata_cmd(
                 tags=new_tags,
                 fields=fields or None,
                 project=fields_project,
+                this_revision=this_revision or None,
+                revision=revision_label,
             ),
         )
     except ValueError as e:
         raise click.ClickException(str(e)) from e
-    console.print(f"[green]Saved metadata for[/] {doc_id}")
+    if this_revision:
+        where = f"revision {doc_id[:SHORT_DOC_ID_LEN]} only"
+    elif len(meta.revisions) > 1:
+        where = f"{meta.document_id} (all {len(meta.revisions)} revisions)"
+    else:
+        where = meta.document_id or doc_id
+    console.print(f"[green]Saved metadata for[/] {where}")
     _note_clears_outside_project(be, meta, fields, fields_project, remove_projects)
     console.print(meta.model_dump_json(indent=2, exclude_none=True))
+    _note_overrides(meta)
+
+
+def _metadata_target(be: RagBackend, ref: str) -> str:
+    """What `rag metadata` reads or writes: a D12 stays a document (after
+    checking it exists); anything else resolves to a full revision doc_id."""
+    if parse_document_ref(ref) is not None:
+        try:
+            return be.resolve_document(ref)
+        except ValueError as e:
+            raise click.ClickException(str(e)) from e
+    return _backend_resolve(be, ref)
+
+
+def _note_overrides(meta: DocMetadata) -> None:
+    """Name the values set on this one revision, after a metadata print."""
+    if meta.overrides:
+        console.print(
+            f"  * set on this revision only: {', '.join(meta.overrides)} "
+            f"(the other revisions of {meta.document_id} hold the document's value)"
+        )
 
 
 def _note_clears_outside_project(
