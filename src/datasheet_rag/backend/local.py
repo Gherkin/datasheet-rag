@@ -380,24 +380,23 @@ class LocalBackend(RagBackend):
             return DocumentRevisions(document_id=revs.format_document_id(document_id))
         metas = {m.doc_id: m for m in (get_metadata(conn, d) for d in ids) if m is not None}
         counts = {
-            r[0]: (int(r[1]), r[2])
+            r[0]: (int(r[1]), r[2], r[3])
             for r in conn.execute(
-                "SELECT doc_id, COUNT(*), MIN(created_at) FROM chunks "
+                "SELECT doc_id, COUNT(*), MIN(created_at), MAX(doc_title) FROM chunks "
                 f"WHERE doc_id IN ({','.join('?' * len(ids))}) GROUP BY doc_id",
                 ids,
             )
         }
-        titles = get_doc_titles(conn)
         out = []
         for i, d in enumerate(ids):
             m = metas.get(d)
-            n, at = counts.get(d, (0, None))
+            n, at, title = counts.get(d, (0, None, None))
             out.append(
                 RevisionSummary(
                     doc_id=d,
                     revision=m.revision if m else None,
                     newest=i == 0,
-                    doc_title=titles.get(d),
+                    doc_title=title,
                     chunk_count=n,
                     ingested_at=at,
                     overrides=m.overrides if m else [],
@@ -462,10 +461,12 @@ class LocalBackend(RagBackend):
         existing = revs.document_of(conn, doc_id) if doc_id else None
         if existing is not None:
             ref = revs.format_document_id(existing)
-            if new_revision_of is not None and self._document_id(new_revision_of) != existing:
+            wanted = self._document_id(new_revision_of) if new_revision_of is not None else None
+            if wanted is not None and wanted != existing:
+                short = (doc_id or "")[:12]
                 raise revs.RevisionError(
-                    f"{doc_id[:12] if doc_id else ''} is already stored, as a revision of "
-                    f"{ref}; move it with rag revisions unlink / add"
+                    f"{short} is already stored, as a revision of {ref}; move it with "
+                    f"rag revisions add {revs.format_document_id(wanted)} {short}"
                 )
             return IngestLink(action="kept", document_id=ref)
         if new_revision_of is not None:
@@ -826,12 +827,21 @@ class LocalBackend(RagBackend):
             # by new_revision_of, else the one the identity rule matches, else
             # a new one. An ambiguous match raises here, before any write.
             link = self._plan_link(did, patch, new_revision_of)
-            try:
-                if link.action in ("explicit", "rule"):
-                    target = revs.parse_document_ref(link.document_id or "")
-                    assert target is not None
-                    # Uncommitted: it lands with the first chunk insert below.
+            target: int | None = None
+            if link.action in ("explicit", "rule"):
+                target = revs.parse_document_ref(link.document_id or "")
+                assert target is not None
+
+            def place_revision() -> None:
+                # Uncommitted: it lands with the chunk insert that follows.
+                if target is not None:
                     revs.ensure_revision(conn, did, document_id=target)
+
+            try:
+                # The revision row is in place for check_write only, and
+                # rolled back after it: no write stays open across an embed
+                # (GH #124 review).
+                place_revision()
                 # Reject an unregistered or mis-shaped field, or a project-scoped
                 # one with no project or in a project the document will not be
                 # in, before any chunk is written, not after the whole ingest has
@@ -846,9 +856,8 @@ class LocalBackend(RagBackend):
                     this_revision=bool(patch.this_revision),
                     revision=patch.revision,
                 )
-            except BaseException:
+            finally:
                 conn.rollback()
-                raise
             # The projects are joined right before each chunk insert, which
             # commits them with the chunks: no stored state has chunks without
             # their projects (a stopped describe) or projects without chunks
@@ -873,6 +882,7 @@ class LocalBackend(RagBackend):
                 vectors_tmp = (
                     embed_chunk_graph(graph, embedder=self._get_embedder()) if embed else vectors
                 )
+                place_revision()
                 join_projects(conn, did, join)
                 pruned += insert_chunk_graph(conn, graph, vectors=vectors_tmp).pruned
                 conn.commit()
@@ -904,6 +914,7 @@ class LocalBackend(RagBackend):
             # graph does not carry (descriptions, a curated title, a relinked
             # figure path) for every id that survives, which is why this is not
             # a delete-then-insert.
+            place_revision()
             join_projects(conn, did, join)
             stats = insert_chunk_graph(conn, graph, vectors=vectors)
             pruned += stats.pruned

@@ -4428,6 +4428,15 @@ def metadata_cmd(
             base = fields["mpn"]
         else:
             existing_meta = be.get_metadata(doc_id)
+            # A whole-document write builds on the document's list, not on
+            # one revision's override of it.
+            if (
+                existing_meta is not None
+                and not this_revision
+                and "mpn" in existing_meta.overrides
+                and existing_meta.document_id
+            ):
+                existing_meta = be.get_metadata(existing_meta.document_id)
             base = existing_meta.fields.get("mpn") if existing_meta else None
         all_mpns: list[str] = [base] if isinstance(base, str) else list(base or [])
         for alias in mpn_aliases:

@@ -101,8 +101,29 @@ def test_reingest_keeps_the_document(backend: LocalBackend) -> None:
     assert again.link is not None and again.link.action == "kept"
     assert again.document_id == first.document_id
     other = _ingest(backend, "other")
-    with pytest.raises(RevisionError, match="already stored"):
+    with pytest.raises(RevisionError, match=f"rag revisions add {other.document_id} rev_a"):
         _ingest(backend, "rev_a", new_revision_of=other.document_id)
+
+
+def test_a_failed_embed_leaves_no_revision_behind(
+    backend: LocalBackend, conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import datasheet_rag.embedding as embedding
+
+    first = _ingest(backend, "rev_a")
+
+    def boom(*_: Any, **__: Any) -> Any:
+        # The write lock is held here: nothing may be pending on the connection.
+        assert not conn.in_transaction
+        raise RuntimeError("embed failed")
+
+    monkeypatch.setattr(embedding, "embed_chunk_graph", boom)
+    monkeypatch.setattr(backend, "_get_embedder", lambda: None)
+    with pytest.raises(RuntimeError, match="embed failed"):
+        backend.ingest_chunk_graph(_graph("rev_b"), new_revision_of=first.document_id)
+    conn.commit()  # what a later, unrelated write on this connection would do
+    revs = backend.list_revisions(first.document_id)
+    assert [r.doc_id for r in revs.revisions] == ["rev_a"]
 
 
 def test_the_rule_links_one_match(backend: LocalBackend, conn: sqlite3.Connection) -> None:

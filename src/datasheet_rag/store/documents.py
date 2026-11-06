@@ -153,11 +153,6 @@ def newest_revision(conn: sqlite3.Connection, document_id: int) -> str | None:
     return revs[0] if revs else None
 
 
-def is_newest(conn: sqlite3.Connection, doc_id: str) -> bool:
-    document_id = document_of(conn, doc_id)
-    return document_id is None or newest_revision(conn, document_id) == doc_id
-
-
 def older_revisions_sql(doc_id_column: str) -> str:
     """A WHERE clause dropping rows of revisions that have a newer sibling.
 

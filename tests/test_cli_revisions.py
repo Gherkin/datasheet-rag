@@ -129,6 +129,15 @@ def test_this_revision_is_marked_everywhere(db_path: Path) -> None:
     assert "set on this revision only" in listed.output
 
 
+def test_mpn_alias_on_a_document_builds_on_the_documents_list(db_path: Path) -> None:
+    _rag(db_path, "revisions", "add", "D1", DOC_B)
+    _rag(db_path, "metadata", "D1", "--mpn", "C")
+    _rag(db_path, "metadata", DOC_A, "--this-revision", "--mpn", "A")
+    result = _rag(db_path, "metadata", DOC_A, "--mpn-alias", "D")
+    assert result.exit_code == 0, result.output
+    assert _json(_rag(db_path, "metadata", "D1").output)["fields"]["mpn"] == ["C", "D"]
+
+
 def test_metadata_refuses_per_revision_options_on_a_document(db_path: Path) -> None:
     for args in (
         ("--this-revision", "--tag", "x"),
