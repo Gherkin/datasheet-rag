@@ -27,6 +27,7 @@ from datasheet_rag.models.chunk import (
     ChunkMetadata,
     LayoutType,
 )
+from datasheet_rag.store.documents import add_revision, document_of
 from datasheet_rag.store.fields import MetadataFieldError
 from datasheet_rag.store.metadata import (
     delete_metadata,
@@ -622,7 +623,16 @@ def test_vector_filter_applies_before_the_k_cut(conn: sqlite3.Connection) -> Non
 
     # Hybrid keeps the vector half: "target" is not a keyword in the query.
     hyb = hybrid_search(conn, query, "unrelated", k=3, filters=SearchFilters(rev_ids=["far"]))
-    assert len(hyb) == 3
+    assert sorted(r.chunk_id for r in hyb) == ["far:0", "far:1", "far:2"]
+
+    # The default filter hides older revisions (GH #124): with "far" as the
+    # newest revision of the decoys' document, a plain search must still
+    # reach its chunks past the 60 nearer, hidden ones.
+    near_doc = document_of(conn, "near")
+    assert near_doc is not None
+    add_revision(conn, near_doc, "far")
+    hits = vector_search(conn, query, k=3)
+    assert sorted(r.chunk_id for r in hits) == ["far:0", "far:1", "far:2"]
 
 
 # ---------------------------------------------------------------------------
