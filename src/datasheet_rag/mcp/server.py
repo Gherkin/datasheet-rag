@@ -500,11 +500,7 @@ def _search_impl(
 
     doc_ids: list[str] | None = None
     if doc_id and parse_document_ref(doc_id) is not None:
-        doc_ids = (
-            [r.doc_id for r in be.list_revisions(doc_id).revisions]
-            if all_revisions
-            else [be.resolve_doc_id(doc_id)]
-        )
+        doc_ids = be.doc_ids_for(doc_id, all_revisions=all_revisions)
     elif doc_id:
         doc_ids = [doc_id]
     filters = SearchFilters(

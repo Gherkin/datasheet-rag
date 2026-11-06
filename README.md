@@ -429,6 +429,8 @@ rag metadata <doc_id> --this-revision --unset-field doc_type   # inherit again
 
 Projects and per-project fields are always set on the whole document.
 
+To change the whole document, name it by its `D12`. `rag metadata <doc_id>` without `--this-revision` stops with an error when the document has more than one revision, because a `doc_id` may mean only that PDF. For a document with one revision, the `doc_id` and the `D12` mean the same thing.
+
 #### The identity rule
 
 Without help nothing links on its own: an ingested PDF becomes a new document unless `--new-revision-of` names one. A store can hold one *identity rule* that does the linking at ingest:

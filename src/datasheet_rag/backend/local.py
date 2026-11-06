@@ -342,15 +342,11 @@ class LocalBackend(RagBackend):
     def _document_id(self, ref: str) -> int:
         """The document a ``D12`` or a revision doc_id (prefix ok) names."""
         conn = self._get_conn()
-        n = revs.parse_document_ref(ref)
-        if n is not None:
-            if not revs.document_exists(conn, n):
-                raise revs.RevisionError(f"no document {revs.format_document_id(n)}")
-            return n
-        doc_id = resolve_doc_id(conn, ref)
-        found = revs.document_of(conn, doc_id)
+        if revs.parse_document_ref(ref) is None:
+            ref = resolve_doc_id(conn, ref)
+        found = revs.lookup(conn, ref).document_id
         if found is None:
-            raise revs.RevisionError(f"{doc_id[:12]} is not a known revision")
+            raise revs.RevisionError(f"{ref[:12]} is not a known revision")
         return found
 
     # -- metadata ------------------------------------------------------
@@ -831,33 +827,30 @@ class LocalBackend(RagBackend):
             if link.action in ("explicit", "rule"):
                 target = revs.parse_document_ref(link.document_id or "")
                 assert target is not None
+            # Reject an unregistered or mis-shaped field, or a project-scoped
+            # one with no project or in a project the document will not be
+            # in, before any chunk is written, not after the whole ingest has
+            # run (GH #120, #123). It checks against the target document, so
+            # nothing is written before the chunks: no write is open while
+            # the embed runs.
+            check_write(
+                conn,
+                did,
+                add_projects=patch.add_projects,
+                remove_projects=patch.remove_projects,
+                fields=patch.fields,
+                project=patch.project,
+                this_revision=bool(patch.this_revision),
+                revision=patch.revision,
+                into=target,
+            )
 
             def place_revision() -> None:
-                # Uncommitted: it lands with the chunk insert that follows.
+                # Uncommitted: it lands with the chunk insert that follows. A
+                # second call (after the provisional insert) finds the row.
                 if target is not None:
                     revs.ensure_revision(conn, did, document_id=target)
 
-            try:
-                # The revision row is in place for check_write only, and
-                # rolled back after it: no write stays open across an embed
-                # (GH #124 review).
-                place_revision()
-                # Reject an unregistered or mis-shaped field, or a project-scoped
-                # one with no project or in a project the document will not be
-                # in, before any chunk is written, not after the whole ingest has
-                # run (GH #120, #123).
-                check_write(
-                    conn,
-                    did,
-                    add_projects=patch.add_projects,
-                    remove_projects=patch.remove_projects,
-                    fields=patch.fields,
-                    project=patch.project,
-                    this_revision=bool(patch.this_revision),
-                    revision=patch.revision,
-                )
-            finally:
-                conn.rollback()
             # The projects are joined right before each chunk insert, which
             # commits them with the chunks: no stored state has chunks without
             # their projects (a stopped describe) or projects without chunks

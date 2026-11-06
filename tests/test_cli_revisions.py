@@ -129,13 +129,30 @@ def test_this_revision_is_marked_everywhere(db_path: Path) -> None:
     assert "set on this revision only" in listed.output
 
 
-def test_mpn_alias_on_a_document_builds_on_the_documents_list(db_path: Path) -> None:
+def test_a_doc_id_write_to_a_document_with_revisions_needs_the_d12(db_path: Path) -> None:
+    # One revision: the doc_id and the document are the same thing.
+    assert _rag(db_path, "metadata", DOC_A, "--tag", "mcu").exit_code == 0
     _rag(db_path, "revisions", "add", "D1", DOC_B)
-    _rag(db_path, "metadata", "D1", "--mpn", "C")
+    for args in (("--tag", "x"), ("--mpn", "A"), ("--add-project", "p")):
+        result = _rag(db_path, "metadata", DOC_A, *args)
+        assert result.exit_code == 2, (args, result.output)
+        assert "is one of 2 revisions of D1" in result.output
+        assert "Use D1 to change all of them" in result.output
+    # The label and the title are the revision's own: no question to ask.
+    assert _rag(db_path, "metadata", DOC_A, "--revision", "Rev A").exit_code == 0
+    assert _rag(db_path, "metadata", DOC_A, "--this-revision", "--tag", "x").exit_code == 0
+    assert _rag(db_path, "metadata", "D1", "--tag", "y").exit_code == 0
+
+
+def test_mpn_alias_on_a_document_builds_on_the_documents_list(db_path: Path) -> None:
+    _rag(db_path, "metadata", DOC_A, "--mpn", "C")
     _rag(db_path, "metadata", DOC_A, "--this-revision", "--mpn", "A")
-    result = _rag(db_path, "metadata", DOC_A, "--mpn-alias", "D")
+    result = _rag(db_path, "metadata", "D1", "--mpn-alias", "D")
     assert result.exit_code == 0, result.output
     assert _json(_rag(db_path, "metadata", "D1").output)["fields"]["mpn"] == ["C", "D"]
+    result = _rag(db_path, "metadata", DOC_A, "--mpn-alias", "E")
+    assert result.exit_code == 0, result.output
+    assert _json(_rag(db_path, "metadata", "D1").output)["fields"]["mpn"] == ["C", "D", "E"]
 
 
 def test_metadata_refuses_per_revision_options_on_a_document(db_path: Path) -> None:

@@ -32,12 +32,13 @@ from datasheet_rag.store.documents import (
     RevisionError,
     delete_revision,
     document_exists,
-    documents_of,
     ensure_revision,
     format_document_id,
+    lookup,
     newest_revision,
     older_revisions_sql,
     parse_document_ref,
+    require_document,
     resolve_target,
 )
 from datasheet_rag.store.fields import (
@@ -370,19 +371,6 @@ class CheckedWrite(NamedTuple):
     remove: list[str]
 
 
-def _lookup(conn: sqlite3.Connection, ref: str) -> tuple[int | None, str | None]:
-    """``(document_id, doc_id)`` for a ref, without creating anything.
-
-    A ``D12`` that does not exist raises; an unknown doc_id gives ``(None, doc_id)``.
-    """
-    n = parse_document_ref(ref)
-    if n is not None:
-        if not document_exists(conn, n):
-            raise RevisionError(f"no document {format_document_id(n)}")
-        return n, None
-    return documents_of(conn, [ref]).get(ref), ref
-
-
 def check_write(
     conn: sqlite3.Connection,
     ref: str,
@@ -394,6 +382,7 @@ def check_write(
     project: str | None = None,
     this_revision: bool = False,
     revision: str | None = None,
+    into: int | None = None,
 ) -> CheckedWrite:
     """Validate a metadata write (the arguments of :func:`set_metadata`).
 
@@ -405,9 +394,13 @@ def check_write(
     :class:`RevisionError` for ``this_revision`` or ``revision`` on a ``D12``
     ref, or ``this_revision`` with project changes. Raises ``ValueError``
     for a project both added and removed. Writes nothing, so ingest checks a
-    patch before work it would be a waste to throw away.
+    patch before work it would be a waste to throw away. ``into`` is the
+    document a doc_id not stored yet will join (an ingest with a link): the
+    check runs against it, so nothing is written before the chunks are.
     """
-    document_id, doc_id = _lookup(conn, ref)
+    document_id, doc_id = lookup(conn, ref)
+    if document_id is None and into is not None:
+        document_id = require_document(conn, into)
     if doc_id is None and (this_revision or revision is not None):
         what = "--this-revision" if this_revision else "a revision label"
         raise RevisionError(
@@ -516,13 +509,12 @@ def set_metadata(
         revision=revision,
     )
     try:
-        target = resolve_target(conn, ref)
-        document_id = target.document_id
+        document_id, rev = resolve_target(conn, ref)
         if tags is not None:
             if this_revision:
                 conn.execute(
                     "UPDATE doc_metadata SET tags = ? WHERE doc_id = ?",
-                    (json.dumps(list(tags)) if tags else None, target.doc_id),
+                    (json.dumps(list(tags)) if tags else None, rev),
                 )
             else:
                 conn.execute(
@@ -532,7 +524,7 @@ def set_metadata(
         if revision is not None:
             conn.execute(
                 "UPDATE doc_metadata SET revision = ? WHERE doc_id = ?",
-                (revision.strip() or None, target.doc_id),
+                (revision.strip() or None, rev),
             )
         change_projects(conn, document_id, add=checked.add, remove=checked.remove)
         delete_document_project_values(conn, document_id, checked.remove)
@@ -542,12 +534,12 @@ def set_metadata(
             checked.fields,
             scopes=checked.scopes,
             project=checked.project,
-            revision=target.doc_id if this_revision else None,
+            revision=rev if this_revision else None,
         )
-        if target.doc_id is not None:
+        if rev is not None:
             conn.execute(
                 "UPDATE doc_metadata SET updated_at = CURRENT_TIMESTAMP WHERE doc_id = ?",
-                (target.doc_id,),
+                (rev,),
             )
         conn.commit()
     except BaseException:

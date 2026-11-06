@@ -154,6 +154,27 @@ class RagBackend(ABC):
         """The document (``"D12"``) a ref names: a ``D12`` itself, or a
         revision's doc_id (prefix ok). Raises ``ValueError`` when unknown."""
 
+    # The two ref resolvers every caller above the store goes through (GH #124).
+    def resolve_ref(self, ref: str) -> str:
+        """A ref as read and written by metadata: a ``D12`` stays a document
+        (after checking it exists), a doc_id prefix becomes the full doc_id.
+        Resolving first means a prefix or an unknown id never creates a
+        revision row. Raises ``ValueError`` when unknown."""
+        from datasheet_rag.store.documents import parse_document_ref
+
+        if parse_document_ref(ref) is not None:
+            return self.resolve_document(ref)
+        return self.resolve_doc_id(ref)
+
+    def doc_ids_for(self, ref: str, *, all_revisions: bool) -> list[str]:
+        """The revisions a ref covers: for a ``D12`` all of them (newest
+        first) or only the newest; for a doc_id (prefix ok) that one."""
+        from datasheet_rag.store.documents import parse_document_ref
+
+        if all_revisions and parse_document_ref(ref) is not None:
+            return [r.doc_id for r in self.list_revisions(ref).revisions]
+        return [self.resolve_doc_id(ref)]
+
     # ---- metadata sidecar ----
     @abstractmethod
     def get_metadata(self, doc_id: str) -> DocMetadata | None:

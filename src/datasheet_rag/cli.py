@@ -1433,12 +1433,8 @@ def delete_doc_cmd(doc_id: str, db_path: Path | None, dry_run: bool, assume_yes:
     a revision must be re-ingested from the source PDF to get it back.
     """
     be = _backend_for(db_path)
-    if parse_document_ref(doc_id) is not None:
-        targets = [r.doc_id for r in _list_revisions(be, doc_id).revisions]
-        document = doc_id
-    else:
-        targets = [_backend_resolve(be, doc_id)]
-        document = None
+    targets = _doc_ids_for(be, doc_id, all_revisions=True)
+    document = doc_id if parse_document_ref(doc_id) is not None else None
     titles = be.get_doc_titles()
     chunk_count = sum(be.count_chunks(doc_id=d) for d in targets)
     if document is not None:
@@ -1484,9 +1480,17 @@ def delete_doc_cmd(doc_id: str, db_path: Path | None, dry_run: bool, assume_yes:
 # ---------------------------------------------------------------------------
 
 
+def _doc_ids_for(be: RagBackend, ref: str, *, all_revisions: bool) -> list[str]:
+    """``RagBackend.doc_ids_for``, a miss turned into a ClickException."""
+    try:
+        return be.doc_ids_for(ref, all_revisions=all_revisions)
+    except ValueError as e:
+        raise click.ClickException(str(e)) from e
+
+
 def _list_revisions(be: RagBackend, ref: str) -> DocumentRevisions:
     try:
-        return be.list_revisions(ref if parse_document_ref(ref) else _backend_resolve(be, ref))
+        return be.list_revisions(be.resolve_ref(ref))
     except ValueError as e:
         raise click.ClickException(str(e)) from e
 
@@ -2230,10 +2234,7 @@ def search(
 
     resolved_doc_ids: list[str] = []
     for d in doc_ids:
-        if all_revisions and parse_document_ref(d) is not None:
-            resolved_doc_ids.extend(r.doc_id for r in _list_revisions(be, d).revisions)
-        else:
-            resolved_doc_ids.append(_backend_resolve(be, d))
+        resolved_doc_ids.extend(_doc_ids_for(be, d, all_revisions=all_revisions))
 
     level_enum = None
     if level:
@@ -4331,6 +4332,24 @@ def metadata_cmd(
         raise click.UsageError(
             "projects belong to the whole document; drop --this-revision to change them"
         )
+    # What the user typed that lands on the whole document unless
+    # --this-revision says otherwise (the title and the revision label are
+    # always the revision's own). Read before .rag.toml fills anything in.
+    document_write = any(
+        (
+            add_projects,
+            remove_projects,
+            mpn,
+            mpn_aliases,
+            tags,
+            clear_tags,
+            field_items,
+            unset_fields,
+            manufacturer is not None,
+            subsystem is not None,
+            doc_type is not None,
+        )
+    )
 
     fields: dict[str, Any] = _merge_shortcuts(
         _parse_field_items(field_items),
@@ -4391,6 +4410,16 @@ def metadata_cmd(
             raise click.UsageError(
                 f"{doc_id} is a whole document; {what} needs one revision's doc_id "
                 f"(see rag revisions {doc_id})"
+            )
+    elif document_write and not this_revision:
+        # A doc_id may mean just that PDF; writing to every revision of its
+        # document needs the D12 (GH #124).
+        current = be.get_metadata(doc_id)
+        if current is not None and len(current.revisions) > 1:
+            raise click.UsageError(
+                f"{doc_id[:SHORT_DOC_ID_LEN]} is one of {len(current.revisions)} revisions "
+                f"of {current.document_id}. Use {current.document_id} to change all of them, "
+                "or --this-revision for this one (fields and tags only)."
             )
 
     scopes: dict[str, FieldScope] | None = None
@@ -4483,14 +4512,11 @@ def metadata_cmd(
 
 
 def _metadata_target(be: RagBackend, ref: str) -> str:
-    """What `rag metadata` reads or writes: a D12 stays a document (after
-    checking it exists); anything else resolves to a full revision doc_id."""
-    if parse_document_ref(ref) is not None:
-        try:
-            return be.resolve_document(ref)
-        except ValueError as e:
-            raise click.ClickException(str(e)) from e
-    return _backend_resolve(be, ref)
+    """What `rag metadata` reads or writes (see ``RagBackend.resolve_ref``)."""
+    try:
+        return be.resolve_ref(ref)
+    except ValueError as e:
+        raise click.ClickException(str(e)) from e
 
 
 def _note_overrides(meta: DocMetadata) -> None:

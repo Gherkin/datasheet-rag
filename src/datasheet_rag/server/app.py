@@ -54,7 +54,6 @@ from datasheet_rag.store import (
     revoke_api_key,
     stored_embedding_dim,
 )
-from datasheet_rag.store.documents import parse_document_ref
 from datasheet_rag.store.fields import FieldScope, FieldShape, scopes_of, shapes_of
 from datasheet_rag.store.metadata import check_patch_for
 
@@ -146,16 +145,6 @@ class LinkPlanBody(BaseModel):
     doc_id: str | None = None
     metadata: MetadataPatch | None = None
     new_revision_of: str | None = None
-
-
-def _metadata_ref(be: LocalBackend, ref: str) -> str:
-    """A metadata target: a ``D12`` stays a document (after checking it
-    exists), anything else resolves to a full revision doc_id. Resolving
-    first means a prefix or an unknown id never creates a revision row."""
-    if parse_document_ref(ref) is not None:
-        be.resolve_document(ref)
-        return ref
-    return be.resolve_doc_id(ref)
 
 
 def _reject_group_name(present: bool) -> None:
@@ -481,7 +470,7 @@ def build_app() -> FastAPI:
     @app.get("/documents/{doc_id}/metadata", dependencies=dep)
     def document_metadata(doc_id: str, be: LocalBackend = Depends(get_backend)) -> Response:
         try:
-            ref = _metadata_ref(be, doc_id)
+            ref = be.resolve_ref(doc_id)
         except ValueError:
             return Response(status_code=204)
         md = be.get_metadata(ref)
@@ -493,7 +482,7 @@ def build_app() -> FastAPI:
     def document_set_metadata(
         doc_id: str, patch: MetadataPatch, be: LocalBackend = Depends(get_backend)
     ) -> dict[str, Any]:
-        return be.set_metadata(_metadata_ref(be, doc_id), patch).model_dump(mode="json")
+        return be.set_metadata(be.resolve_ref(doc_id), patch).model_dump(mode="json")
 
     @app.put("/documents/{doc_id}/title", dependencies=ingest_dep)
     def document_set_title(

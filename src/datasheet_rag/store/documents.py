@@ -90,25 +90,43 @@ def document_exists(conn: sqlite3.Connection, document_id: int) -> bool:
 class Target(NamedTuple):
     """What a reference names: a document, and the revision when it named one."""
 
-    document_id: int
+    #: ``None`` for a doc_id that has no revision row (yet).
+    document_id: int | None
     #: The revision's doc_id, or ``None`` when the reference was a ``D12``.
     doc_id: str | None
 
 
-def resolve_target(conn: sqlite3.Connection, ref: str) -> Target:
-    """Resolve ``D12`` or an exact doc_id to its document.
+def require_document(conn: sqlite3.Connection, document_id: int) -> int:
+    """``document_id`` itself; raises :class:`RevisionError` when it does not exist."""
+    if not document_exists(conn, document_id):
+        raise RevisionError(f"no document {format_document_id(document_id)}")
+    return document_id
 
-    A doc_id with no revision row yet gets one (and a new document): metadata
-    may be written before a PDF is ingested. A ``D12`` that does not exist
-    raises :class:`RevisionError`. Prefix resolution of doc_ids happens in the
-    backend (``resolve_doc_id``), before this is called.
+
+def lookup(conn: sqlite3.Connection, ref: str) -> Target:
+    """Resolve ``D12`` or an exact doc_id to its document, without creating
+    anything. Every store and backend path that turns a ref into a document
+    goes through here.
+
+    A ``D12`` that does not exist raises :class:`RevisionError`. A doc_id with
+    no revision row gives ``document_id=None``. Prefix resolution of doc_ids
+    happens in the backend (``resolve_doc_id``), before this is called.
     """
     n = parse_document_ref(ref)
     if n is not None:
-        if not document_exists(conn, n):
-            raise RevisionError(f"no document {format_document_id(n)}")
-        return Target(n, None)
-    return Target(ensure_revision(conn, ref), ref)
+        return Target(require_document(conn, n), None)
+    return Target(document_of(conn, ref), ref)
+
+
+def resolve_target(conn: sqlite3.Connection, ref: str) -> tuple[int, str | None]:
+    """:func:`lookup` for a write: a doc_id with no revision row yet gets one,
+    in a new document of its own (metadata may be written before a PDF is
+    ingested). Does not commit. Returns ``(document_id, doc_id)``."""
+    target = lookup(conn, ref)
+    if target.document_id is not None:
+        return target.document_id, target.doc_id
+    assert target.doc_id is not None
+    return ensure_revision(conn, target.doc_id), target.doc_id
 
 
 def document_of(conn: sqlite3.Connection, doc_id: str) -> int | None:

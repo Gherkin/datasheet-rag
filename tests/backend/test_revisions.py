@@ -105,6 +105,33 @@ def test_reingest_keeps_the_document(backend: LocalBackend) -> None:
         _ingest(backend, "rev_a", new_revision_of=other.document_id)
 
 
+def test_new_revision_is_checked_against_its_document_before_any_write(
+    backend: LocalBackend, conn: sqlite3.Connection
+) -> None:
+    register_field(conn, "refdes", scope="project")
+    first = _ingest(backend, "rev_a", project_id="board")
+    # The new PDF is in no project yet; its document is in "board".
+    second = _ingest(
+        backend,
+        "rev_b",
+        new_revision_of=first.document_id,
+        metadata=MetadataPatch(fields={"refdes": "U3"}, project="board"),
+    )
+    assert second.document_id == first.document_id
+    with pytest.raises(ValueError, match="not in project 'other'"):
+        _ingest(
+            backend,
+            "rev_c",
+            new_revision_of=first.document_id,
+            metadata=MetadataPatch(fields={"refdes": "U4"}, project="other"),
+        )
+    assert not conn.in_transaction
+    assert [r.doc_id for r in backend.list_revisions(first.document_id).revisions] == [
+        "rev_b",
+        "rev_a",
+    ]
+
+
 def test_a_failed_embed_leaves_no_revision_behind(
     backend: LocalBackend, conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
 ) -> None:
