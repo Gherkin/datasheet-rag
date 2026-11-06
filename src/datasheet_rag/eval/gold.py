@@ -57,13 +57,13 @@ def tokens(text: str) -> set[str]:
 
 
 def resolve_gold_chunk_ids(conn: sqlite3.Connection, item: GoldenItem) -> list[str]:
-    """The MESO/MICRO chunks of ``item.doc_id`` that hold an evidence quote.
+    """The MESO/MICRO chunks of ``item.rev_id`` that hold an evidence quote.
 
     Empty when the store lost the text (e.g. a table the parser dropped): the
     item then scores zero, which is the store's failure to report, not a
     labelling error.
     """
-    if not item.evidence or item.doc_id is None:
+    if not item.evidence or item.rev_id is None:
         return []
     gold: list[str] = []
     for ev in item.evidence:
@@ -75,10 +75,10 @@ def resolve_gold_chunk_ids(conn: sqlite3.Connection, item: GoldenItem) -> list[s
         # its caption and vision description, so those count as its content.
         rows = conn.execute(
             "SELECT id, text, figure_caption, figure_description FROM chunks "
-            "WHERE doc_id = ? AND level != ? "
+            "WHERE rev_id = ? AND level != ? "
             "AND EXISTS (SELECT 1 FROM json_each(page_numbers) WHERE value = ?) "
             "ORDER BY rowid",
-            (item.doc_id, ChunkLevel.MACRO.value, ev.page),
+            (item.rev_id, ChunkLevel.MACRO.value, ev.page),
         ).fetchall()
         for chunk_id, text, caption, description in rows:
             if chunk_id in gold:

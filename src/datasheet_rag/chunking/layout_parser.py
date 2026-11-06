@@ -156,7 +156,7 @@ class DocumentOutline:
     """The full parsed document structure."""
 
     title: str = ""
-    doc_id: str = ""
+    rev_id: str = ""
     total_pages: int = 0
     running_header: str = ""
     pdf_meta_title: str = ""
@@ -188,7 +188,7 @@ class DocumentOutline:
         without re-running it)."""
         return {
             "title": self.title,
-            "doc_id": self.doc_id,
+            "rev_id": self.rev_id,
             "total_pages": self.total_pages,
             "running_header": self.running_header,
             "pdf_meta_title": self.pdf_meta_title,
@@ -199,7 +199,7 @@ class DocumentOutline:
     def from_dict(cls, data: dict[str, Any]) -> DocumentOutline:
         return cls(
             title=data.get("title", ""),
-            doc_id=data.get("doc_id", ""),
+            rev_id=data.get("rev_id", ""),
             total_pages=data.get("total_pages", 0),
             running_header=data.get("running_header", ""),
             pdf_meta_title=data.get("pdf_meta_title", ""),
@@ -314,7 +314,7 @@ def _section_from_dict(data: dict[str, Any]) -> DocumentSection:
 def parse_textract_blocks(
     blocks: list[dict[str, Any]],
     *,
-    doc_id: str = "",
+    rev_id: str = "",
 ) -> DocumentOutline:
     """Parse Textract blocks into a structured DocumentOutline.
 
@@ -484,7 +484,7 @@ def parse_textract_blocks(
 
     return DocumentOutline(
         title=doc_title,
-        doc_id=doc_id,
+        rev_id=rev_id,
         total_pages=total_pages,
         sections=sections,
     )

@@ -21,6 +21,7 @@ import numpy as np
 from pydantic import BaseModel, ConfigDict
 
 from datasheet_rag.models.chunk import Chunk, ChunkLevel, LayoutType
+from datasheet_rag.store.documents import older_revisions_sql
 from datasheet_rag.store.fields import field_filter_sql
 from datasheet_rag.store.projects import project_scope_sql
 from datasheet_rag.store.sqlite import get_chunk
@@ -35,7 +36,12 @@ class SearchFilters(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    doc_ids: list[str] | None = None
+    #: Revisions (PDF rev_ids) to search. Named revisions are always
+    #: searched, newest or not; a caller expands a D12 first.
+    rev_ids: list[str] | None = None
+    #: Search every revision of each document, not just the newest (GH #124).
+    #: Has no effect with rev_ids.
+    all_revisions: bool = False
     #: Keep chunks of documents that belong to this project (among others).
     project_id: str | None = None
     #: Registered-field filters, AND-ed: ``{"mpn": "INA226"}`` keeps chunks
@@ -61,19 +67,21 @@ class SearchFilters(BaseModel):
         clauses: list[str] = []
         params: list[object] = []
 
-        if self.doc_ids:
-            placeholders = ",".join(["?"] * len(self.doc_ids))
-            clauses.append(f"c.doc_id IN ({placeholders})")
-            params.extend(self.doc_ids)
+        if self.rev_ids:
+            placeholders = ",".join(["?"] * len(self.rev_ids))
+            clauses.append(f"c.rev_id IN ({placeholders})")
+            params.extend(self.rev_ids)
+        elif not self.all_revisions:
+            clauses.append(older_revisions_sql("c.rev_id"))
 
         if self.project_id is not None:
-            clause, clause_params = project_scope_sql(self.project_id, doc_id_column="c.doc_id")
+            clause, clause_params = project_scope_sql(self.project_id, rev_id_column="c.rev_id")
             clauses.append(clause)
             params.extend(clause_params)
 
         if self.fields:
             field_clauses, field_params = field_filter_sql(
-                self.fields, doc_id_column="c.doc_id", project_id=self.project_id
+                self.fields, rev_id_column="c.rev_id", project_id=self.project_id
             )
             clauses.extend(field_clauses)
             params.extend(field_params)
@@ -143,8 +151,10 @@ def vector_search(
     truncate after JOINing on ``chunks`` with the WHERE filter applied.
     """
     embedding_bytes = _vector_to_bytes(query_embedding)
+    # No filters still means "newest revision of each document" (GH #124).
+    where_sql, where_params = (filters or SearchFilters())._where_clause()
 
-    if filters is None:
+    if not where_sql:
         rows = conn.execute(
             """
             SELECT chunk_id, distance
@@ -156,7 +166,6 @@ def vector_search(
         ).fetchall()
     else:
         over_fetch = max(k * 5, 50)
-        where_sql, where_params = filters._where_clause()
         # NOTE: vec0 doesn't support metadata pre-filtering, so we
         # over-fetch from the vector index then post-filter on chunks.
         sql = f"""
@@ -252,10 +261,7 @@ def keyword_search(
     # Late import to avoid a cycle (sqlite.py imports nothing from here).
     from datasheet_rag.store.sqlite import _row_to_chunk
 
-    where_sql = ""
-    extra_params: list[object] = []
-    if filters is not None:
-        where_sql, extra_params = filters._where_clause()
+    where_sql, extra_params = (filters or SearchFilters())._where_clause()
 
     # chunk_id → (bm25_sum, hit_count, last_row)
     accumulator: dict[str, tuple[float, int, sqlite3.Row]] = {}

@@ -24,11 +24,11 @@ EMBED_DIM = 8
 def _chunk(cid: str, *, level: ChunkLevel, page: int, text: str) -> Chunk:
     return Chunk(
         id=cid,
-        doc_id="doc1",
+        rev_id="doc1",
         level=level,
         text=text,
         context_text=text,
-        metadata=ChunkMetadata(doc_id="doc1", page_numbers=[page], layout_type=LayoutType.TEXT),
+        metadata=ChunkMetadata(rev_id="doc1", page_numbers=[page], layout_type=LayoutType.TEXT),
     )
 
 
@@ -62,7 +62,7 @@ def test_chunks_on_pages_empty_pages(conn) -> None:
 
 def test_apply_update_edits_fields() -> None:
     item = GoldenItem(
-        question="old", category="identifier", doc_id="doc1", gold_pages=[1], source="auto"
+        question="old", category="identifier", rev_id="doc1", gold_pages=[1], source="auto"
     )
     updated = apply_update(
         item,
@@ -83,7 +83,7 @@ def test_apply_update_edits_fields() -> None:
 
 def test_apply_update_partial_keeps_other_fields() -> None:
     item = GoldenItem(
-        question="q", category="identifier", doc_id="doc1", gold_pages=[3], answer_notes="keep me"
+        question="q", category="identifier", rev_id="doc1", gold_pages=[3], answer_notes="keep me"
     )
     updated = apply_update(item, {"gold_pages": [7]})
     assert updated.gold_pages == [7]
@@ -95,8 +95,8 @@ def test_review_state_save_roundtrip(conn, tmp_path: Path) -> None:
     set_path = tmp_path / "golden.jsonl"
     EvalSet(
         items=[
-            GoldenItem(question="q1", category="identifier", doc_id="doc1", gold_pages=[14]),
-            GoldenItem(question="q2", category="figure", doc_id="doc1", gold_pages=[99]),
+            GoldenItem(question="q1", category="identifier", rev_id="doc1", gold_pages=[14]),
+            GoldenItem(question="q2", category="figure", rev_id="doc1", gold_pages=[99]),
         ]
     ).save(set_path)
 

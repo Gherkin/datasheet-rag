@@ -11,18 +11,19 @@ from datasheet_rag.models.chunk import Chunk, ChunkLevel, ChunkMetadata
 from datasheet_rag.store.metadata import get_metadata, list_docs
 from datasheet_rag.store.schema import SCHEMA_VERSION, MigrationError, _migrate_to_v4, connect
 from datasheet_rag.store.sqlite import count_chunks, insert_chunks
+from tests.store._legacy import to_v5_layout
 
 EMBED_DIM = 4
 
 
-def _chunk(doc_id: str, i: int) -> Chunk:
+def _chunk(rev_id: str, i: int) -> Chunk:
     return Chunk(
-        id=f"{doc_id}:L2:{i}",
-        doc_id=doc_id,
+        id=f"{rev_id}:L2:{i}",
+        rev_id=rev_id,
         level=ChunkLevel.MICRO,
         text=f"text {i}",
         context_text=f"text {i}",
-        metadata=ChunkMetadata(doc_id=doc_id, page_numbers=[1]),
+        metadata=ChunkMetadata(rev_id=rev_id, page_numbers=[1]),
     )
 
 
@@ -37,6 +38,8 @@ def _make_v3_store(path: Path) -> None:
     c = connect(path, embedding_dim=EMBED_DIM)
     for doc in ("d1", "d2", "d3", "d4"):
         insert_chunks(c, [_chunk(doc, 0), _chunk(doc, 1)])
+    to_v5_layout(c)
+    c.execute("DELETE FROM doc_metadata")  # v3 kept no sidecar row for d3
     c.execute("DROP TABLE doc_projects")
     c.execute("ALTER TABLE chunks ADD COLUMN project_id TEXT")
     c.execute("CREATE INDEX ix_chunks_project_id ON chunks(project_id)")
@@ -60,7 +63,7 @@ def test_v3_store_moves_projects_into_doc_projects(tmp_path: Path) -> None:
     c = connect(path, embedding_dim=EMBED_DIM)
     try:
         assert c.execute("SELECT version FROM schema_version").fetchone()[0] == SCHEMA_VERSION
-        for table in ("chunks", "doc_metadata"):
+        for table in ("chunks", "revisions"):
             cols = {r["name"] for r in c.execute(f"PRAGMA table_info({table})")}
             assert "project_id" not in cols, table
 
@@ -76,7 +79,7 @@ def test_v3_store_moves_projects_into_doc_projects(tmp_path: Path) -> None:
 
         assert count_chunks(c, project_id="b") == 2
         assert count_chunks(c, project_id="c") == 2
-        assert [m.doc_id for m in list_docs(c, project_id="x")] == ["d3"]
+        assert [m.rev_id for m in list_docs(c, project_id="x")] == ["d3"]
 
         # A second process that read v3 before this one migrated does nothing.
         _migrate_to_v4(c)

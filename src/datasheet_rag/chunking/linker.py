@@ -28,7 +28,7 @@ def link_chunks(graph: ChunkGraph) -> ChunkGraph:
 def _link_sequential(graph: ChunkGraph, level: ChunkLevel) -> None:
     """Link chunks at the same level in reading order via prev/next."""
     chunks = graph.by_level(level)
-    # Sort by the chunk index (extracted from ID: doc_id:L{level}:{index})
+    # Sort by the chunk index (extracted from ID: rev_id:L{level}:{index})
     chunks.sort(key=lambda c: _chunk_sort_key(c))
 
     for i, chunk in enumerate(chunks):
@@ -85,7 +85,7 @@ def _verify_links(graph: ChunkGraph) -> None:
 
 def _chunk_sort_key(chunk: Chunk) -> tuple[int, int]:
     """Extract (level, index) from a chunk ID for sorting."""
-    # ID format: doc_id:L{level}:{index}
+    # ID format: rev_id:L{level}:{index}
     parts = chunk.id.rsplit(":", 2)
     try:
         level = int(parts[-2].replace("L", ""))

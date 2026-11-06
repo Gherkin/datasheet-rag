@@ -9,7 +9,7 @@ the rest of the pipeline depends on:
 * delete cascades through FTS5 and vec0
 * vector / keyword / hybrid search produce the expected ordering
 * metadata filters apply end-to-end
-* the doc_metadata sidecar back-fills chunks correctly
+* the revisions sidecar back-fills chunks correctly
 """
 
 from __future__ import annotations
@@ -80,7 +80,7 @@ def _unit_vec(position: int, dim: int = EMBED_DIM) -> list[float]:
 def _make_chunk(
     chunk_id: str,
     *,
-    doc_id: str,
+    rev_id: str,
     level: ChunkLevel,
     text: str,
     context_text: str | None = None,
@@ -94,8 +94,8 @@ def _make_chunk(
     chapter_root_id: str | None = None,
 ) -> Chunk:
     md = ChunkMetadata(
-        doc_id=doc_id,
-        doc_title=f"Doc {doc_id}",
+        rev_id=rev_id,
+        doc_title=f"Doc {rev_id}",
         chapter_title=chapter,
         section_title=section,
         page_numbers=[page],
@@ -104,7 +104,7 @@ def _make_chunk(
     )
     return Chunk(
         id=chunk_id,
-        doc_id=doc_id,
+        rev_id=rev_id,
         level=level,
         text=text,
         context_text=context_text or text,
@@ -122,7 +122,7 @@ def _seed_chunks() -> list[Chunk]:
     return [
         _make_chunk(
             "doc1:0:0",
-            doc_id="doc1",
+            rev_id="doc1",
             level=ChunkLevel.MACRO,
             text="I2C interface specification overview chapter.",
             page=1,
@@ -130,7 +130,7 @@ def _seed_chunks() -> list[Chunk]:
         ),
         _make_chunk(
             "doc1:2:0",
-            doc_id="doc1",
+            rev_id="doc1",
             level=ChunkLevel.MICRO,
             text="The SCL line may be held low to indicate clock stretching by the slave device.",
             page=2,
@@ -141,7 +141,7 @@ def _seed_chunks() -> list[Chunk]:
         ),
         _make_chunk(
             "doc1:2:1",
-            doc_id="doc1",
+            rev_id="doc1",
             level=ChunkLevel.MICRO,
             text="ESD HBM rating is 2 kV minimum per JEDEC JS-001.",
             page=3,
@@ -154,7 +154,7 @@ def _seed_chunks() -> list[Chunk]:
         ),
         _make_chunk(
             "doc1:2:2",
-            doc_id="doc1",
+            rev_id="doc1",
             level=ChunkLevel.MICRO,
             text="Dropout voltage curve at full load current versus temperature.",
             page=4,
@@ -167,7 +167,7 @@ def _seed_chunks() -> list[Chunk]:
         ),
         _make_chunk(
             "doc1:2:3",
-            doc_id="doc1",
+            rev_id="doc1",
             level=ChunkLevel.MICRO,
             text="Quiescent current is 50 microamps typical at 25 degrees Celsius.",
             page=5,
@@ -178,7 +178,7 @@ def _seed_chunks() -> list[Chunk]:
         ),
         _make_chunk(
             "doc2:0:0",
-            doc_id="doc2",
+            rev_id="doc2",
             level=ChunkLevel.MACRO,
             text="Buck converter reference design and bill of materials.",
             page=1,
@@ -186,7 +186,7 @@ def _seed_chunks() -> list[Chunk]:
         ),
         _make_chunk(
             "doc2:2:0",
-            doc_id="doc2",
+            rev_id="doc2",
             level=ChunkLevel.MICRO,
             text="Switching frequency is selectable between 500 kHz and 2 MHz via the FSEL pin.",
             page=2,
@@ -197,7 +197,7 @@ def _seed_chunks() -> list[Chunk]:
         ),
         _make_chunk(
             "doc2:2:1",
-            doc_id="doc2",
+            rev_id="doc2",
             level=ChunkLevel.MICRO,
             text="Thermal shutdown engages at 150 degrees Celsius junction temperature.",
             page=3,
@@ -227,7 +227,7 @@ def test_schema_tables_created(conn: sqlite3.Connection) -> None:
             "SELECT name FROM sqlite_master WHERE type IN ('table','view')"
         ).fetchall()
     }
-    for required in {"chunks", "chunk_vecs", "chunk_fts", "doc_metadata", "schema_version"}:
+    for required in {"chunks", "chunk_vecs", "chunk_fts", "revisions", "schema_version"}:
         assert required in names, f"missing table: {required}"
 
 
@@ -275,9 +275,9 @@ def test_insert_chunks_and_round_trip(conn: sqlite3.Connection) -> None:
         set_metadata(conn, doc, add_projects=["proj-A"])
     assert n == len(chunks)
     assert count_chunks(conn) == len(chunks)
-    assert count_chunks(conn, doc_id="doc1") == 5
+    assert count_chunks(conn, rev_id="doc1") == 5
     assert count_chunks(conn, project_id="proj-A") == len(chunks)
-    assert count_chunks(conn, doc_id="doc2", project_id="proj-A") == 3
+    assert count_chunks(conn, rev_id="doc2", project_id="proj-A") == 3
 
     # Round-trip a chunk with non-default fields.
     fetched = get_chunk(conn, "doc1:2:1")
@@ -311,7 +311,7 @@ def test_delete_doc_cascades(conn: sqlite3.Connection) -> None:
 
     deleted = delete_doc(conn, "doc1")
     assert deleted == 5
-    assert count_chunks(conn, doc_id="doc1") == 0
+    assert count_chunks(conn, rev_id="doc1") == 0
     assert count_chunks(conn) == 3  # only doc2 left
 
     # vec0 should have lost the doc1 rows via the AFTER DELETE trigger.
@@ -320,11 +320,11 @@ def test_delete_doc_cascades(conn: sqlite3.Connection) -> None:
 
     # FTS5 must no longer return doc1 results.
     kw_hits = keyword_search(conn, "clock stretching", k=10)
-    assert all(r.chunk.doc_id != "doc1" for r in kw_hits)
+    assert all(r.chunk.rev_id != "doc1" for r in kw_hits)
 
 
 def test_delete_metadata(conn: sqlite3.Connection) -> None:
-    # doc_metadata is a sidecar (not FK'd to chunks), so it needs its own
+    # revisions is a sidecar (not FK'd to chunks), so it needs its own
     # delete — this covers the gap `delete_doc`'s cascade doesn't reach.
     set_metadata(conn, "doc1", fields={"mpn": ["M1"], "manufacturer": "Acme"})
     assert get_metadata(conn, "doc1") is not None
@@ -333,9 +333,9 @@ def test_delete_metadata(conn: sqlite3.Connection) -> None:
     assert deleted == 1
     assert get_metadata(conn, "doc1") is None
     # Field values go with the row, or a re-created row would inherit them.
-    assert conn.execute("SELECT COUNT(*) FROM doc_field_values").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM revision_field_values").fetchone()[0] == 0
 
-    # No-op (returns 0) when there's no sidecar row for that doc_id.
+    # No-op (returns 0) when there's no sidecar row for that rev_id.
     assert delete_metadata(conn, "doc1") == 0
 
 
@@ -351,9 +351,9 @@ def _shorter_doc1_graph() -> ChunkGraph:
     figure or changing --micro-tokens renumbers everything after it and the
     tail of the previous graph has no counterpart in the new one.
     """
-    graph = ChunkGraph(doc_id="doc1")
+    graph = ChunkGraph(rev_id="doc1")
     for chunk in _seed_chunks():
-        if chunk.doc_id == "doc1" and chunk.id not in ("doc1:2:2", "doc1:2:3"):
+        if chunk.rev_id == "doc1" and chunk.id not in ("doc1:2:2", "doc1:2:3"):
             graph.add(chunk)
     return graph
 
@@ -363,14 +363,14 @@ def test_prune_drops_chunks_the_new_graph_does_not_carry(
 ) -> None:
     chunks = _seed_chunks()
     insert_chunks(conn, chunks, vectors=_seed_vectors(chunks))
-    assert count_chunks(conn, doc_id="doc1") == 5
+    assert count_chunks(conn, rev_id="doc1") == 5
 
     graph = _shorter_doc1_graph()
     stats = insert_chunk_graph(conn, graph)
     assert stats.inserted == 3
     assert stats.pruned == 2
 
-    assert count_chunks(conn, doc_id="doc1") == 3
+    assert count_chunks(conn, rev_id="doc1") == 3
     assert get_chunk(conn, "doc1:2:2") is None
     assert get_chunk(conn, "doc1:2:3") is None
 
@@ -387,8 +387,8 @@ def test_prune_leaves_other_documents_alone(conn: sqlite3.Connection) -> None:
 
     insert_chunk_graph(conn, _shorter_doc1_graph())
 
-    # Only the doc_ids the incoming chunks cover are pruned.
-    assert count_chunks(conn, doc_id="doc2") == 3
+    # Only the rev_ids the incoming chunks cover are pruned.
+    assert count_chunks(conn, rev_id="doc2") == 3
     assert get_chunk(conn, "doc2:2:1") is not None
 
 
@@ -401,7 +401,7 @@ def test_insert_chunks_does_not_prune_by_default(conn: sqlite3.Connection) -> No
     survivors = [c for c in chunks if c.id not in ("doc1:2:2", "doc1:2:3")]
     stats = insert_chunks_stats(conn, survivors)
     assert stats.pruned == 0
-    assert count_chunks(conn, doc_id="doc1") == 5
+    assert count_chunks(conn, rev_id="doc1") == 5
 
 
 def test_insert_chunk_graph_prunes_without_being_asked(
@@ -414,7 +414,7 @@ def test_insert_chunk_graph_prunes_without_being_asked(
 
     stats = insert_chunk_graph(conn, _shorter_doc1_graph())
     assert stats.pruned == 2
-    assert count_chunks(conn, doc_id="doc1") == 3
+    assert count_chunks(conn, rev_id="doc1") == 3
 
 
 def test_prune_keeps_curated_fields_on_surviving_chunks(
@@ -493,11 +493,11 @@ def test_keyword_search_keeps_the_best_matches_not_the_oldest(conn: sqlite3.Conn
     strongest match is inserted last, beyond the limit a small k gets."""
     filler = "unrelated filler words about layout " * 8
     chunks = [
-        _make_chunk(f"doc1:2:{i}", doc_id="doc1", level=ChunkLevel.MICRO, text=f"vref {filler}")
+        _make_chunk(f"doc1:2:{i}", rev_id="doc1", level=ChunkLevel.MICRO, text=f"vref {filler}")
         for i in range(60)
     ]
     chunks.append(
-        _make_chunk("doc9:2:0", doc_id="doc9", level=ChunkLevel.MICRO, text="vref vref vref")
+        _make_chunk("doc9:2:0", rev_id="doc9", level=ChunkLevel.MICRO, text="vref vref vref")
     )
     insert_chunks(conn, chunks, vectors={c.id: _unit_vec(0) for c in chunks})
 
@@ -545,8 +545,8 @@ def test_hybrid_search_promotes_dual_match(conn: sqlite3.Connection) -> None:
 def test_filters_restrict_searches(conn: sqlite3.Connection) -> None:
     chunks = _seed_chunks()
     vectors = _seed_vectors(chunks)
-    doc1_chunks = [c for c in chunks if c.doc_id == "doc1"]
-    doc2_chunks = [c for c in chunks if c.doc_id == "doc2"]
+    doc1_chunks = [c for c in chunks if c.rev_id == "doc1"]
+    doc2_chunks = [c for c in chunks if c.rev_id == "doc2"]
     insert_chunks(conn, doc1_chunks, vectors=vectors)
     insert_chunks(conn, doc2_chunks, vectors=vectors)
     set_metadata(conn, "doc1", add_projects=["alpha"])
@@ -557,17 +557,17 @@ def test_filters_restrict_searches(conn: sqlite3.Connection) -> None:
     filt = SearchFilters(project_id="alpha")
     vec_hits = vector_search(conn, vectors[target.id], k=10, filters=filt)
     assert vec_hits
-    assert all(r.chunk.doc_id == "doc1" for r in vec_hits)
+    assert all(r.chunk.rev_id == "doc1" for r in vec_hits)
 
-    # Keyword filter — restrict by doc_id.
+    # Keyword filter — restrict by rev_id.
     kw_hits = keyword_search(
         conn,
         "frequency",
         k=10,
-        filters=SearchFilters(doc_ids=["doc2"]),
+        filters=SearchFilters(rev_ids=["doc2"]),
     )
     assert kw_hits
-    assert all(r.chunk.doc_id == "doc2" for r in kw_hits)
+    assert all(r.chunk.rev_id == "doc2" for r in kw_hits)
 
     # Hybrid filter — restrict by level.
     hyb_hits = hybrid_search(
@@ -600,7 +600,7 @@ def test_filters_restrict_searches(conn: sqlite3.Connection) -> None:
 def test_metadata_set_get_update(conn: sqlite3.Connection) -> None:
     # Insert chunks for doc1 first, in no project.
     chunks = _seed_chunks()
-    doc1_chunks = [c for c in chunks if c.doc_id == "doc1"]
+    doc1_chunks = [c for c in chunks if c.rev_id == "doc1"]
     insert_chunks(conn, doc1_chunks, vectors=_seed_vectors(chunks))
     assert count_chunks(conn, project_id="proj-1") == 0
 
@@ -638,7 +638,7 @@ def test_metadata_set_get_update(conn: sqlite3.Connection) -> None:
 
     # list_docs by project includes doc1.
     listed = list_docs(conn, project_id="proj-1")
-    assert [m.doc_id for m in listed] == ["doc1"]
+    assert [m.rev_id for m in listed] == ["doc1"]
     assert list_docs(conn, project_id="non-existent") == []
 
     # And searches respect the project.
@@ -651,7 +651,7 @@ def test_metadata_set_get_update(conn: sqlite3.Connection) -> None:
         filters=SearchFilters(project_id="proj-1"),
     )
     assert hits
-    assert all(r.chunk.doc_id == "doc1" for r in hits)
+    assert all(r.chunk.rev_id == "doc1" for r in hits)
 
 
 def test_a_document_can_belong_to_several_projects(conn: sqlite3.Connection) -> None:
@@ -660,14 +660,14 @@ def test_a_document_can_belong_to_several_projects(conn: sqlite3.Connection) -> 
     insert_chunks(conn, chunks, vectors=vectors)
     set_metadata(conn, "doc1", add_projects=["board-a", "board-b"])
     set_metadata(conn, "doc2", add_projects=["board-b"])
-    n1 = count_chunks(conn, doc_id="doc1")
+    n1 = count_chunks(conn, rev_id="doc1")
 
     assert count_chunks(conn, project_id="board-a") == n1
     assert count_chunks(conn, project_id="board-b") == len(chunks)
-    assert [m.doc_id for m in list_docs(conn, project_id="board-a")] == ["doc1"]
-    assert [m.doc_id for m in list_docs(conn, project_id="board-b")] == ["doc1", "doc2"]
+    assert [m.rev_id for m in list_docs(conn, project_id="board-a")] == ["doc1"]
+    assert [m.rev_id for m in list_docs(conn, project_id="board-b")] == ["doc1", "doc2"]
     hits = keyword_search(conn, "frequency", k=10, filters=SearchFilters(project_id="board-a"))
-    assert all(r.chunk.doc_id == "doc1" for r in hits)
+    assert all(r.chunk.rev_id == "doc1" for r in hits)
 
     # Adding again is a no-op; removing one keeps the other.
     md = set_metadata(conn, "doc1", add_projects=["board-a"], remove_projects=["board-b"])
@@ -688,7 +688,9 @@ def test_project_change_is_validated_before_writing(conn: sqlite3.Connection) ->
 def test_delete_metadata_drops_project_memberships(conn: sqlite3.Connection) -> None:
     set_metadata(conn, "doc1", add_projects=["p"])
     delete_metadata(conn, "doc1")
-    assert conn.execute("SELECT COUNT(*) FROM doc_projects").fetchone()[0] == 0
+    # The document went with its only revision, and its memberships with it.
+    assert conn.execute("SELECT COUNT(*) FROM document_projects").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0] == 0
 
 
 def test_mpn_list_keeps_order_and_drops_duplicates(conn: sqlite3.Connection) -> None:
@@ -707,7 +709,7 @@ def test_list_docs_field_filter_matches_any_list_entry(conn: sqlite3.Connection)
     set_metadata(conn, "doc-e", fields={"mpn": ["OTHER"], "manufacturer": "TI"})
 
     def ids(**fields: str) -> list[str]:
-        return [m.doc_id for m in list_docs(conn, fields=fields)]
+        return [m.rev_id for m in list_docs(conn, fields=fields)]
 
     assert ids(mpn="INA226") == ["doc-a", "doc-b"]
     assert ids(mpn="INA226A") == ["doc-b", "doc-c"]
@@ -731,7 +733,7 @@ def test_chunks_carry_no_document_metadata(conn: sqlite3.Connection) -> None:
     # document's own tables.
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(chunks)")}
     assert "group_name" not in cols
-    md_cols = {r["name"] for r in conn.execute("PRAGMA table_info(doc_metadata)")}
+    md_cols = {r["name"] for r in conn.execute("PRAGMA table_info(revisions)")}
     assert not {"group_name", "subsystem"} & md_cols
 
 
@@ -748,7 +750,7 @@ def _make_figure_chunk(
     caption: str = "Figure 3-2: SPI4 timing diagram",
 ) -> Chunk:
     md = ChunkMetadata(
-        doc_id="doc-fig",
+        rev_id="doc-fig",
         doc_title="STM32H7 RM",
         chapter_title="SPI",
         section_title="Timing",
@@ -757,7 +759,7 @@ def _make_figure_chunk(
     )
     return Chunk(
         id=chunk_id,
-        doc_id="doc-fig",
+        rev_id="doc-fig",
         level=ChunkLevel.MICRO,
         text="[Figure]",
         context_text="SPI > Timing > [Figure] " + caption,
@@ -798,7 +800,7 @@ def test_list_figure_chunks_filters_and_image_required(
     fig_no_image.figure_s3_key = None
     text_chunk = _make_chunk(
         "doc-fig:2:1",
-        doc_id="doc-fig",
+        rev_id="doc-fig",
         level=ChunkLevel.MICRO,
         text="Body paragraph about SPI clock polarity.",
         layout=LayoutType.TEXT,
@@ -815,8 +817,8 @@ def test_list_figure_chunks_filters_and_image_required(
     all_figures = list_figure_chunks(conn, only_with_image=False)
     assert {c.id for c in all_figures} == {"fig:has-image", "fig:orphan"}
 
-    # doc_id filter still applies.
-    by_doc = list_figure_chunks(conn, doc_id="does-not-exist")
+    # rev_id filter still applies.
+    by_doc = list_figure_chunks(conn, rev_id="does-not-exist")
     assert by_doc == []
 
 
@@ -885,6 +887,11 @@ def test_schema_v1_database_is_migrated_to_v2() -> None:
                 k: v for k, v in schema_mod._CHUNKS_COLUMNS_BY_VERSION.items() if k > 1
             }
             c1 = connect(db_path, embedding_dim=EMBED_DIM)
+            # The tables as they were named before v6.
+            from tests.store._legacy import to_v5_layout
+
+            to_v5_layout(c1)
+            c1.execute("UPDATE schema_version SET version = 1")
             # Drop the v2 columns the new DDL bakes in, to truly emulate v1.
             c1.execute("ALTER TABLE chunks DROP COLUMN figure_image_path")
             c1.execute("ALTER TABLE chunks DROP COLUMN figure_description")
@@ -930,7 +937,7 @@ def test_figure_available_reflects_the_file_on_disk(
     s3_only = _make_figure_chunk("fig:s3", image_path=None)  # keeps its s3 key
     text = _make_chunk(
         "doc-fig:2:9",
-        doc_id="doc-fig",
+        rev_id="doc-fig",
         level=ChunkLevel.MICRO,
         text="Plain body text.",
         layout=LayoutType.TEXT,

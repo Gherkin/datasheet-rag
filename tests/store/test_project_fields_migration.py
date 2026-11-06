@@ -12,22 +12,23 @@ from datasheet_rag.store.fields import list_fields
 from datasheet_rag.store.metadata import get_metadata, list_docs, set_metadata
 from datasheet_rag.store.schema import SCHEMA_VERSION, MigrationError, _migrate_to_v5, connect
 from datasheet_rag.store.sqlite import insert_chunks
+from tests.store._legacy import to_v5_layout
 
 EMBED_DIM = 4
 
 
-def _chunk(doc_id: str, i: int) -> Chunk:
+def _chunk(rev_id: str, i: int) -> Chunk:
     return Chunk(
-        id=f"{doc_id}:L2:{i}",
-        doc_id=doc_id,
+        id=f"{rev_id}:L2:{i}",
+        rev_id=rev_id,
         level=ChunkLevel.MICRO,
         text=f"text {i}",
         context_text=f"text {i}",
-        metadata=ChunkMetadata(doc_id=doc_id, page_numbers=[1]),
+        metadata=ChunkMetadata(rev_id=rev_id, page_numbers=[1]),
     )
 
 
-#: (doc_id, projects, doc_metadata.subsystem, doc_metadata.group_name, chunks.group_name)
+#: (rev_id, projects, revisions.subsystem, revisions.group_name, chunks.group_name)
 _Row = tuple[str, list[str], str | None, str | None, str | None]
 
 _GOOD_ROWS: list[_Row] = [
@@ -46,6 +47,7 @@ def _make_v4_store(path: Path, rows: list[_Row]) -> None:
         insert_chunks(c, [_chunk(doc, 0), _chunk(doc, 1)])
         if projects:
             set_metadata(c, doc, add_projects=projects)
+    to_v5_layout(c)
     c.execute("DROP TABLE doc_project_field_values")
     c.execute("DROP TABLE doc_field_values")
     c.execute("DROP TABLE metadata_fields")
@@ -100,7 +102,7 @@ def test_v4_store_moves_subsystem_onto_each_project(tmp_path: Path) -> None:
     c = connect(path, embedding_dim=EMBED_DIM)
     try:
         assert c.execute("SELECT version FROM schema_version").fetchone()[0] == SCHEMA_VERSION
-        md_cols = {r["name"] for r in c.execute("PRAGMA table_info(doc_metadata)")}
+        md_cols = {r["name"] for r in c.execute("PRAGMA table_info(revisions)")}
         assert not {"group_name", "subsystem"} & md_cols
         chunk_cols = {r["name"] for r in c.execute("PRAGMA table_info(chunks)")}
         assert "group_name" not in chunk_cols
@@ -123,7 +125,7 @@ def test_v4_store_moves_subsystem_onto_each_project(tmp_path: Path) -> None:
         assert fields["subsystem"].scope == "project"
         assert fields["mpn"].scope == "document"  # existing rows get the default
         hits = list_docs(c, project_id="a", fields={"subsystem": "power"})
-        assert [m.doc_id for m in hits] == ["d1", "d3"]
+        assert [m.rev_id for m in hits] == ["d1", "d3"]
 
         # A second process that read v4 before this one migrated does nothing.
         _migrate_to_v5(c)

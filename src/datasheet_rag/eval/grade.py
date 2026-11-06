@@ -39,7 +39,7 @@ Grader = Literal["numeric", "set", "numeric+judge", "set+judge", "numeric->judge
 
 
 class Citation(BaseModel):
-    doc_id: str = ""
+    rev_id: str = ""
     page: int | None = None
 
 
@@ -319,11 +319,11 @@ def judge(
 def cites_gold(need: Need, citations: Sequence[Citation]) -> bool:
     """A citation names the key's document and one of its gold pages. A doc
     id may be shortened to a prefix of at least 8 characters."""
-    if need.doc_id is None:
+    if need.rev_id is None:
         return False
     for c in citations:
-        cid = c.doc_id.strip().lower()
-        if len(cid) >= 8 and need.doc_id.startswith(cid) and c.page in need.pages:
+        cid = c.rev_id.strip().lower()
+        if len(cid) >= 8 and need.rev_id.startswith(cid) and c.page in need.pages:
             return True
     return False
 

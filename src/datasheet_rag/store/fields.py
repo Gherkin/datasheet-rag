@@ -19,17 +19,23 @@ A field has a *scope* (GH #123):
                  ``aux`` on another. A document holds a value for a project only
                  while it is a member of that project.
 
-Three tables back this:
+Values belong to the *document* (``D12``), so every revision of a datasheet
+has them (GH #124). A revision may override a document-scoped field for
+itself only; its effective value is then the override.
 
-* ``metadata_fields``  – the registry: name, description, shape (``single``
-                         or ``list``), scope, roles, and whether the field is
-                         built in.
-* ``doc_field_values`` – values of document-scoped fields, one row per
-                         (document, field, value). A single-valued field has at
-                         most one row per document; a list-valued field keeps
-                         its order in ``position``.
-* ``doc_project_field_values`` – values of project-scoped fields, the same
-                         shape with the project added to the key.
+Four tables back this:
+
+* ``metadata_fields``       – the registry: name, description, shape
+                              (``single`` or ``list``), scope, roles, and
+                              whether the field is built in.
+* ``document_field_values`` – values of document-scoped fields, one row per
+                              (document, field, value). A single-valued field
+                              has at most one row per document; a list-valued
+                              field keeps its order in ``position``.
+* ``document_project_field_values`` – values of project-scoped fields, the
+                              same shape with the project added to the key.
+* ``revision_field_values``      – per-revision overrides of document-scoped
+                              fields, keyed on the revision's rev_id.
 
 Values compare case-insensitively (``COLLATE NOCASE``): part and document
 numbers are identifiers, and ``stm32h743`` should find ``STM32H743``.
@@ -66,17 +72,20 @@ FieldValue = str | list[str]
 #: in a query string without quoting.
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
-#: Names a field may not take: the ``doc_metadata`` columns (including the
-#: pipeline's bookkeeping columns), the fields planned to become fixed
-#: (``version``, GH #124), and the built-in column names of ``rag list``,
-#: which would shadow the field. A field with one of these names would be
-#: ambiguous in every listing and filter.
+#: Names a field may not take: the ``revisions`` columns (including the
+#: pipeline's bookkeeping columns and the revision columns of GH #124), and
+#: the built-in column names of ``rag list``, which would shadow the field. A
+#: field with one of these names would be ambiguous in every listing and
+#: filter. ``version`` stays reserved so it cannot be confused with
+#: ``revision``.
 RESERVED_NAMES = frozenset(
     {
-        *("doc_id", "title", "project_id", "projects", "tags"),
+        *("rev_id", "title", "project_id", "projects", "tags"),
         "updated_at",
         *("title_source", "needs_reembed", "pdf_meta_title", "running_header"),
         *("fields", "project_fields", "version"),
+        *("revision", "revisions", "document", "document_id", "newest", "overrides"),
+        "position",
         *("project", "updated", "stale", "chunks", "pages", "ingested"),
         # `rag list --columns` aliases (model attribute spellings).
         *("id", "doc_title", "chunk_count", "page_count", "ingested_at"),
@@ -96,7 +105,7 @@ class FieldSpec(BaseModel):
 
 
 #: The fields every store ships with. Their values used to be fixed columns on
-#: ``doc_metadata`` (moved here by the v3 and v5 migrations in ``store.schema``).
+#: ``revisions`` (moved here by the v3 and v5 migrations in ``store.schema``).
 BUILTIN_FIELDS: tuple[FieldSpec, ...] = (
     FieldSpec(
         name="mpn",
@@ -166,33 +175,49 @@ def ensure_field_tables(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         """
-        CREATE TABLE IF NOT EXISTS doc_field_values (
-            doc_id   TEXT NOT NULL,
+        CREATE TABLE IF NOT EXISTS revision_field_values (
+            rev_id   TEXT NOT NULL,
             field    TEXT NOT NULL REFERENCES metadata_fields(name),
             value    TEXT NOT NULL COLLATE NOCASE,
             position INTEGER NOT NULL DEFAULT 0,
-            PRIMARY KEY (doc_id, field, value)
+            PRIMARY KEY (rev_id, field, value)
         )
         """
     )
     conn.execute(
-        "CREATE INDEX IF NOT EXISTS ix_doc_field_values_fv ON doc_field_values(field, value)"
+        "CREATE INDEX IF NOT EXISTS ix_revision_field_values_fv "
+        "ON revision_field_values(field, value)"
     )
     conn.execute(
         """
-        CREATE TABLE IF NOT EXISTS doc_project_field_values (
-            doc_id     TEXT NOT NULL,
-            project_id TEXT NOT NULL,
-            field      TEXT NOT NULL REFERENCES metadata_fields(name),
-            value      TEXT NOT NULL COLLATE NOCASE,
-            position   INTEGER NOT NULL DEFAULT 0,
-            PRIMARY KEY (doc_id, project_id, field, value)
+        CREATE TABLE IF NOT EXISTS document_field_values (
+            document_id INTEGER NOT NULL,
+            field       TEXT NOT NULL REFERENCES metadata_fields(name),
+            value       TEXT NOT NULL COLLATE NOCASE,
+            position    INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (document_id, field, value)
         )
         """
     )
     conn.execute(
-        "CREATE INDEX IF NOT EXISTS ix_doc_project_field_values_fv "
-        "ON doc_project_field_values(field, value, project_id)"
+        "CREATE INDEX IF NOT EXISTS ix_document_field_values_fv "
+        "ON document_field_values(field, value)"
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS document_project_field_values (
+            document_id INTEGER NOT NULL,
+            project_id  TEXT NOT NULL,
+            field       TEXT NOT NULL REFERENCES metadata_fields(name),
+            value       TEXT NOT NULL COLLATE NOCASE,
+            position    INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (document_id, project_id, field, value)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS ix_document_project_field_values_fv "
+        "ON document_project_field_values(field, value, project_id)"
     )
     # Insert only the missing seeds: even an INSERT OR IGNORE that inserts
     # nothing takes the write lock, and this runs on every open.
@@ -316,10 +341,23 @@ def remove_field(conn: sqlite3.Connection, name: str, *, clear: bool = False) ->
             raise MetadataFieldError(f"field {name!r} is not registered")
         if spec.builtin:
             raise MetadataFieldError(f"field {name!r} is built in and cannot be removed")
-        table = _values_table(spec.scope)
+        from datasheet_rag.store.identity import get_identity_rule
+
+        rule = get_identity_rule(conn)
+        if rule is not None and name in rule.fields():
+            raise MetadataFieldError(
+                f"field {name!r} is used by the identity rule ({rule}); change or "
+                "clear the rule first (rag revisions rule set|clear)"
+            )
+        # Documents holding a value, or with a revision overriding it.
         held = int(
             conn.execute(
-                f"SELECT COUNT(DISTINCT doc_id) FROM {table} WHERE field = ?", (name,)
+                "SELECT COUNT(*) FROM ("
+                "SELECT document_id FROM document_field_values WHERE field = ? "
+                "UNION SELECT document_id FROM document_project_field_values WHERE field = ? "
+                "UNION SELECT m.document_id FROM revision_field_values o "
+                "JOIN revisions m ON m.rev_id = o.rev_id WHERE o.field = ?)",
+                (name, name, name),
             ).fetchone()[0]
         )
         if held and not clear:
@@ -327,7 +365,12 @@ def remove_field(conn: sqlite3.Connection, name: str, *, clear: bool = False) ->
                 f"field {name!r} has values on {held} document(s); pass clear to "
                 "delete them with the field"
             )
-        conn.execute(f"DELETE FROM {table} WHERE field = ?", (name,))
+        for table in (
+            "document_field_values",
+            "document_project_field_values",
+            "revision_field_values",
+        ):
+            conn.execute(f"DELETE FROM {table} WHERE field = ?", (name,))
         conn.execute("DELETE FROM metadata_fields WHERE name = ?", (name,))
         conn.commit()
     except BaseException:
@@ -413,10 +456,6 @@ def normalize_field_patch_for(
     return out
 
 
-def _values_table(scope: FieldScope) -> str:
-    return "doc_project_field_values" if scope == "project" else "doc_field_values"
-
-
 def project_scoped_names(scopes: Mapping[str, FieldScope], fields: Iterable[str]) -> list[str]:
     """The names in ``fields`` that are project-scoped, sorted."""
     return sorted(f for f in fields if scopes.get(f) == "project")
@@ -441,89 +480,149 @@ def check_patch_project(
         )
 
 
-def _write_values(conn: sqlite3.Connection, doc_id: str, field: str, values: list[str]) -> None:
-    """Replace ``doc_id``'s values for ``field``. Does not commit."""
-    conn.execute("DELETE FROM doc_field_values WHERE doc_id = ? AND field = ?", (doc_id, field))
+def _write_values(conn: sqlite3.Connection, rev_id: str, field: str, values: list[str]) -> None:
+    """Replace revision ``rev_id``'s override for ``field``. Does not commit."""
+    conn.execute(
+        "DELETE FROM revision_field_values WHERE rev_id = ? AND field = ?", (rev_id, field)
+    )
     conn.executemany(
-        "INSERT INTO doc_field_values(doc_id, field, value, position) VALUES (?, ?, ?, ?)",
-        [(doc_id, field, v, i) for i, v in enumerate(values)],
+        "INSERT INTO revision_field_values(rev_id, field, value, position) VALUES (?, ?, ?, ?)",
+        [(rev_id, field, v, i) for i, v in enumerate(values)],
+    )
+
+
+def _write_document_values(
+    conn: sqlite3.Connection, document_id: int, field: str, values: list[str]
+) -> None:
+    """Replace a document's values for ``field``. Does not commit."""
+    conn.execute(
+        "DELETE FROM document_field_values WHERE document_id = ? AND field = ?",
+        (document_id, field),
+    )
+    conn.executemany(
+        "INSERT INTO document_field_values(document_id, field, value, position) "
+        "VALUES (?, ?, ?, ?)",
+        [(document_id, field, v, i) for i, v in enumerate(values)],
     )
 
 
 def _write_project_values(
-    conn: sqlite3.Connection, doc_id: str, project: str, field: str, values: list[str]
+    conn: sqlite3.Connection, document_id: int, project: str, field: str, values: list[str]
 ) -> None:
-    """Replace ``doc_id``'s values for ``field`` in ``project``. Does not commit."""
+    """Replace a document's values for ``field`` in ``project``. Does not commit."""
     conn.execute(
-        "DELETE FROM doc_project_field_values WHERE doc_id = ? AND project_id = ? AND field = ?",
-        (doc_id, project, field),
+        "DELETE FROM document_project_field_values "
+        "WHERE document_id = ? AND project_id = ? AND field = ?",
+        (document_id, project, field),
     )
     conn.executemany(
-        "INSERT INTO doc_project_field_values(doc_id, project_id, field, value, position) "
-        "VALUES (?, ?, ?, ?, ?)",
-        [(doc_id, project, field, v, i) for i, v in enumerate(values)],
+        "INSERT INTO document_project_field_values"
+        "(document_id, project_id, field, value, position) VALUES (?, ?, ?, ?, ?)",
+        [(document_id, project, field, v, i) for i, v in enumerate(values)],
     )
 
 
 def write_field_values(
     conn: sqlite3.Connection,
-    doc_id: str,
+    document_id: int,
     patch: Mapping[str, list[str]],
     *,
     scopes: Mapping[str, FieldScope],
     project: str | None = None,
+    revision: str | None = None,
 ) -> None:
     """Apply a normalised patch (see :func:`normalize_field_patch`). Does not commit.
 
     ``scopes`` is the registry's :func:`field_scopes`, read by the caller.
-    Document-scoped fields are written on the document; project-scoped ones
-    on (``doc_id``, ``project``), which the caller has already checked and
-    stripped. A project-scoped field with no ``project`` raises
-    :class:`MetadataFieldError` (see :func:`check_patch_project`).
+    Document-scoped fields are written on the document, or as an override on
+    the revision ``revision`` when it is given (an empty value then removes
+    the override, so the revision inherits again). Project-scoped fields are
+    written on (document, ``project``), which the caller has already checked
+    and stripped; they have no per-revision form. A project-scoped field with
+    no ``project`` raises :class:`MetadataFieldError` (see
+    :func:`check_patch_project`).
     """
     check_patch_project(scopes, patch, project)
     for field, values in patch.items():
         if scopes.get(field) == "project":
+            if revision is not None:
+                raise MetadataFieldError(
+                    f"field {field!r} holds one value per project for the whole "
+                    "document; it cannot be set on one revision"
+                )
             assert project is not None  # check_patch_project raised otherwise
-            _write_project_values(conn, doc_id, project, field, values)
+            _write_project_values(conn, document_id, project, field, values)
+        elif revision is not None:
+            _write_values(conn, revision, field, values)
         else:
-            _write_values(conn, doc_id, field, values)
+            _write_document_values(conn, document_id, field, values)
 
 
-def get_values_for_docs(
+def _read_values(
     conn: sqlite3.Connection,
-    doc_ids: Iterable[str] | None,
+    table: str,
+    key: str,
+    keys: Iterable[object] | None,
     *,
     fields: Iterable[str] | None = None,
-) -> dict[str, dict[str, FieldValue]]:
-    """Return ``{doc_id: {field: value}}`` for the given documents (all if None).
-
-    Each value takes its field's shape: a string for a single field, a list
-    for a list field. Documents with no values are absent from the result.
-    """
+    project_id: str | None = None,
+) -> list[sqlite3.Row]:
+    """Value rows of ``table`` (names from code), joined to their field's shape."""
+    project_col = ", v.project_id" if "project" in table else ""
     sql = (
-        "SELECT v.doc_id, v.field, v.value, f.shape FROM doc_field_values v "
+        f"SELECT v.{key} AS k{project_col}, v.field, v.value, f.shape FROM {table} v "
         "JOIN metadata_fields f ON f.name = v.field"
     )
     clauses: list[str] = []
     params: list[object] = []
-    if doc_ids is not None:
-        ids = list(doc_ids)
+    if keys is not None:
+        ids = list(keys)
         if not ids:
-            return {}
-        clauses.append(f"v.doc_id IN ({','.join('?' * len(ids))})")
+            return []
+        clauses.append(f"v.{key} IN ({','.join('?' * len(ids))})")
         params.extend(ids)
     if fields is not None:
         names = list(fields)
         clauses.append(f"v.field IN ({','.join('?' * len(names))})")
         params.extend(names)
+    if project_id is not None:
+        clauses.append("v.project_id = ?")
+        params.append(project_id)
     if clauses:
         sql += " WHERE " + " AND ".join(clauses)
-    sql += " ORDER BY v.doc_id, v.field, v.position"
+    sql += f" ORDER BY v.{key}{project_col}, v.field, v.position"
+    return conn.execute(sql, params).fetchall()
 
+
+def get_document_values(
+    conn: sqlite3.Connection,
+    document_ids: Iterable[int] | None,
+    *,
+    fields: Iterable[str] | None = None,
+) -> dict[int, dict[str, FieldValue]]:
+    """``{document_id: {field: value}}`` of document-scoped fields (all if None).
+
+    Each value takes its field's shape: a string for a single field, a list
+    for a list field. Documents with no values are absent from the result.
+    """
+    out: dict[int, dict[str, FieldValue]] = {}
+    for row in _read_values(
+        conn, "document_field_values", "document_id", document_ids, fields=fields
+    ):
+        _add_value(out.setdefault(int(row["k"]), {}), row)
+    return out
+
+
+def get_override_values(
+    conn: sqlite3.Connection,
+    rev_ids: Iterable[str] | None,
+    *,
+    fields: Iterable[str] | None = None,
+) -> dict[str, dict[str, FieldValue]]:
+    """``{rev_id: {field: value}}`` of per-revision overrides (all if None)."""
     out: dict[str, dict[str, FieldValue]] = {}
-    for row in conn.execute(sql, params):
-        _add_value(out.setdefault(row["doc_id"], {}), row)
+    for row in _read_values(conn, "revision_field_values", "rev_id", rev_ids, fields=fields):
+        _add_value(out.setdefault(row["k"], {}), row)
     return out
 
 
@@ -537,60 +636,37 @@ def _add_value(values: dict[str, FieldValue], row: sqlite3.Row) -> None:
         values[row["field"]] = row["value"]
 
 
-def get_project_values_for_docs(
+def get_project_values(
     conn: sqlite3.Connection,
-    doc_ids: Iterable[str] | None,
+    document_ids: Iterable[int] | None,
     *,
     project_id: str | None = None,
-) -> dict[str, dict[str, dict[str, FieldValue]]]:
-    """Return ``{doc_id: {project: {field: value}}}`` of project-scoped fields.
+) -> dict[int, dict[str, dict[str, FieldValue]]]:
+    """``{document_id: {project: {field: value}}}`` of project-scoped fields.
 
-    ``doc_ids=None`` reads every document; ``project_id`` keeps only that
+    ``document_ids=None`` reads every document; ``project_id`` keeps only that
     project's values. Documents and projects with no values are absent.
     """
-    sql = (
-        "SELECT v.doc_id, v.project_id, v.field, v.value, f.shape "
-        "FROM doc_project_field_values v JOIN metadata_fields f ON f.name = v.field"
-    )
-    clauses: list[str] = []
-    params: list[object] = []
-    if doc_ids is not None:
-        ids = list(doc_ids)
-        if not ids:
-            return {}
-        clauses.append(f"v.doc_id IN ({','.join('?' * len(ids))})")
-        params.extend(ids)
-    if project_id is not None:
-        clauses.append("v.project_id = ?")
-        params.append(project_id)
-    if clauses:
-        sql += " WHERE " + " AND ".join(clauses)
-    sql += " ORDER BY v.doc_id, v.project_id, v.field, v.position"
-
-    out: dict[str, dict[str, dict[str, FieldValue]]] = {}
-    for row in conn.execute(sql, params):
-        per_project = out.setdefault(row["doc_id"], {}).setdefault(row["project_id"], {})
+    out: dict[int, dict[str, dict[str, FieldValue]]] = {}
+    for row in _read_values(
+        conn, "document_project_field_values", "document_id", document_ids, project_id=project_id
+    ):
+        per_project = out.setdefault(int(row["k"]), {}).setdefault(row["project_id"], {})
         _add_value(per_project, row)
     return out
 
 
-def delete_doc_values(conn: sqlite3.Connection, doc_id: str) -> None:
-    """Drop every field value of ``doc_id``, in every project. Does not commit."""
-    conn.execute("DELETE FROM doc_field_values WHERE doc_id = ?", (doc_id,))
-    conn.execute("DELETE FROM doc_project_field_values WHERE doc_id = ?", (doc_id,))
-
-
-def delete_doc_project_values(
-    conn: sqlite3.Connection, doc_id: str, projects: Iterable[str]
+def delete_document_project_values(
+    conn: sqlite3.Connection, document_id: int, projects: Iterable[str]
 ) -> None:
-    """Drop ``doc_id``'s project-scoped values in ``projects``. Does not commit.
+    """Drop a document's project-scoped values in ``projects``. Does not commit.
 
     Called when the document leaves those projects: a value belongs to the
     membership, so it goes with it.
     """
     conn.executemany(
-        "DELETE FROM doc_project_field_values WHERE doc_id = ? AND project_id = ?",
-        [(doc_id, p) for p in projects],
+        "DELETE FROM document_project_field_values WHERE document_id = ? AND project_id = ?",
+        [(document_id, p) for p in projects],
     )
 
 
@@ -610,30 +686,39 @@ def check_filter_fields(registered: Iterable[str], fields: Iterable[str]) -> Non
 
 
 def field_filter_sql(
-    fields: Mapping[str, str], *, doc_id_column: str, project_id: str | None = None
+    fields: Mapping[str, str], *, rev_id_column: str, project_id: str | None = None
 ) -> tuple[list[str], list[object]]:
-    """SQL clauses restricting ``doc_id_column`` to documents matching every field.
+    """SQL clauses restricting ``rev_id_column`` to documents matching every field.
 
     A list field matches when any one of its values equals the filter value.
     Comparison is case-insensitive (the column's ``NOCASE`` collation). The
     clauses are meant to be AND-ed into the caller's WHERE.
 
-    A project-scoped field matches its value in ``project_id`` when one is
-    given, and in any project otherwise. A field has one scope, so only one
-    of the two value tables can hold rows for it; the clause asks both and
-    needs no registry lookup.
+    ``rev_id_column`` holds revision rev_ids. A document-scoped field matches
+    a revision by its effective value: the revision's override when it has
+    one, else its document's value (GH #124). A project-scoped field matches
+    the document's value in ``project_id`` when one is given, and in any
+    project otherwise. A field has one scope, so only one kind of value table
+    can hold rows for it; the clause asks all three and needs no registry
+    lookup.
     """
     clauses: list[str] = []
     params: list[object] = []
-    project_sql = " AND project_id = ?" if project_id is not None else ""
+    project_sql = " AND v.project_id = ?" if project_id is not None else ""
     for field, value in fields.items():
+        v = value.strip()
         clauses.append(
-            f"{doc_id_column} IN ("
-            "SELECT doc_id FROM doc_field_values WHERE field = ? AND value = ? "
-            "UNION SELECT doc_id FROM doc_project_field_values "
-            f"WHERE field = ? AND value = ?{project_sql})"
+            f"{rev_id_column} IN ("
+            "SELECT rev_id FROM revision_field_values WHERE field = ? AND value = ? "
+            "UNION SELECT m.rev_id FROM revisions m "
+            "JOIN document_field_values v ON v.document_id = m.document_id "
+            "WHERE v.field = ? AND v.value = ? AND NOT EXISTS ("
+            "SELECT 1 FROM revision_field_values o WHERE o.rev_id = m.rev_id AND o.field = ?) "
+            "UNION SELECT m.rev_id FROM revisions m "
+            "JOIN document_project_field_values v ON v.document_id = m.document_id "
+            f"WHERE v.field = ? AND v.value = ?{project_sql})"
         )
-        params.extend([field, value.strip(), field, value.strip()])
+        params.extend([field, v, field, v, field, field, v])
         if project_id is not None:
             params.append(project_id)
     return clauses, params

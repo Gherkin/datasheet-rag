@@ -42,14 +42,14 @@ def test_progress_event_roundtrip() -> None:
 def test_iter_sse_parses_events() -> None:
     body = _sse("progress", {"kind": "step", "text": "A", "step": 1})
     body += _sse("progress", {"kind": "detail", "text": "42 chunks", "step": 1})
-    body += _sse("result", {"doc_id": "x", "inserted": 7})
+    body += _sse("result", {"rev_id": "x", "inserted": 7})
     # A keepalive comment line should be ignored.
     lines = (":keepalive\n" + body).split("\n")
 
     events = list(_iter_sse(iter(lines)))
     assert [e[0] for e in events] == ["progress", "progress", "result"]
     assert events[0][1] == {"kind": "step", "text": "A", "step": 1}
-    assert events[2][1] == {"doc_id": "x", "inserted": 7}
+    assert events[2][1] == {"rev_id": "x", "inserted": 7}
 
 
 # ---- RemoteBackend.ingest_pdf (SSE client) -------------------------------
@@ -72,7 +72,7 @@ def test_remote_ingest_pdf_streams_progress_and_result(tmp_path) -> None:
     body = _sse("progress", {"kind": "step", "text": "Docling layout analysis", "step": 1})
     body += _sse("progress", {"kind": "detail", "text": "12 chunks", "step": 1})
     body += _sse("progress", {"kind": "step", "text": "Embed & store", "step": 2})
-    body += _sse("result", {"doc_id": did, "inserted": 12, "described": 3})
+    body += _sse("result", {"rev_id": did, "inserted": 12, "described": 3})
 
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/ingest-pdf"
@@ -84,7 +84,7 @@ def test_remote_ingest_pdf_streams_progress_and_result(tmp_path) -> None:
     seen: list[ProgressEvent] = []
     result = rb.ingest_pdf(_pdf(tmp_path), project_id="p", progress=seen.append)
 
-    assert result == IngestResult(doc_id=did, inserted=12, described=3)
+    assert result == IngestResult(rev_id=did, inserted=12, described=3)
     assert [e.text for e in seen] == [
         "Docling layout analysis",
         "12 chunks",
@@ -146,14 +146,14 @@ def test_local_ingest_pdf_runs_pipeline_then_stores(conn, tmp_path, monkeypatch)
     import datasheet_rag.ingest_pipeline as ip
 
     did = "b" * 64
-    graph = ChunkGraph(doc_id=did)
+    graph = ChunkGraph(rev_id=did)
 
     def fake_parse(pdf_path, *, progress=None, **kw):
         if progress:
             progress(ProgressEvent(kind="step", text="Docling layout analysis", step=1))
         return ParseResult(
             graph=graph,
-            doc_id=did,
+            rev_id=did,
             resolved_backend="docling",
             title_hints={"running_header": "Datasheet"},
             figure_count=0,
@@ -166,7 +166,7 @@ def test_local_ingest_pdf_runs_pipeline_then_stores(conn, tmp_path, monkeypatch)
     def spy_ingest(self, g, **kw):
         captured["graph"] = g
         captured.update(kw)
-        return IngestResult(doc_id=g.doc_id, inserted=5)
+        return IngestResult(rev_id=g.rev_id, inserted=5)
 
     monkeypatch.setattr(LocalBackend, "ingest_chunk_graph", spy_ingest)
 
@@ -195,14 +195,14 @@ def test_local_ingest_pdf_describes_figures_by_default(conn, tmp_path, monkeypat
         ip,
         "parse_pdf_to_graph",
         lambda pdf_path, **kw: ParseResult(
-            graph=ChunkGraph(doc_id=did), doc_id=did, resolved_backend="docling"
+            graph=ChunkGraph(rev_id=did), rev_id=did, resolved_backend="docling"
         ),
     )
     captured: dict = {}
     monkeypatch.setattr(
         LocalBackend,
         "ingest_chunk_graph",
-        lambda self, g, **kw: captured.update(kw) or IngestResult(doc_id=did),
+        lambda self, g, **kw: captured.update(kw) or IngestResult(rev_id=did),
     )
 
     LocalBackend(conn=conn).ingest_pdf(tmp_path / "x.pdf")

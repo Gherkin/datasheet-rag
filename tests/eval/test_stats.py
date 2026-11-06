@@ -85,7 +85,7 @@ def _outcome(question: str, need: str, hit: float, category: str = "identifier")
     return QueryOutcome(
         question=question,
         category=category,  # type: ignore[arg-type]
-        doc_id="d",
+        rev_id="d",
         need_id=need,
         num_retrieved=1,
         reciprocal_rank=hit,
@@ -96,7 +96,7 @@ def _outcome(question: str, need: str, hit: float, category: str = "identifier")
 
 
 def test_outcome_carries_need_id_from_item() -> None:
-    item = GoldenItem(question="q", category="identifier", doc_id="d", need_id="N1")
+    item = GoldenItem(question="q", category="identifier", rev_id="d", need_id="N1")
     o = QueryOutcome.score(item, [], ks=(1,), ndcg_k=1)
     assert o.need_id == "N1"
     assert o.cluster == "N1"

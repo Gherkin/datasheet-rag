@@ -52,7 +52,7 @@ def _outline(*elements: ContentElement) -> DocumentOutline:
         page_end=3,
         elements=list(elements),
     )
-    return DocumentOutline(title="Regulator", doc_id="doc1", total_pages=4, sections=[section])
+    return DocumentOutline(title="Regulator", rev_id="doc1", total_pages=4, sections=[section])
 
 
 def _manifest(block_id: str, image_path: str, *, width: int = 180, height: int = 40) -> dict:

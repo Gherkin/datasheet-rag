@@ -107,8 +107,8 @@ def split_document(
     if config is None:
         config = SplitterConfig()
 
-    doc_id = outline.doc_id
-    graph = ChunkGraph(doc_id=doc_id)
+    rev_id = outline.rev_id
+    graph = ChunkGraph(rev_id=rev_id)
 
     # Build figure lookup: block_id → figure info
     figure_lookup = _build_figure_lookup(figure_manifest)
@@ -119,17 +119,17 @@ def split_document(
 
     for section in outline.sections:
         # --- MACRO chunk (Level 0) ---
-        macro_id = f"{doc_id}:L0:{macro_counter}"
+        macro_id = f"{rev_id}:L0:{macro_counter}"
         macro_counter += 1
 
         macro_chunk = Chunk(
             id=macro_id,
-            doc_id=doc_id,
+            rev_id=rev_id,
             level=ChunkLevel.MACRO,
             text="",  # Placeholder — filled by summarizer
             token_count=0,
             metadata=ChunkMetadata(
-                doc_id=doc_id,
+                rev_id=rev_id,
                 doc_title=outline.title,
                 chapter_title=section.title,
                 section_title=section.title,
@@ -145,7 +145,7 @@ def split_document(
         # --- MICRO chunks (Level 2) ---
         micro_chunks = _create_micro_chunks(
             elements=all_elements,
-            doc_id=doc_id,
+            rev_id=rev_id,
             doc_title=outline.title,
             section=section,
             config=config,
@@ -160,7 +160,7 @@ def split_document(
         # --- MESO chunks (Level 1) ---
         meso_chunks = _create_meso_chunks(
             micro_chunks=micro_chunks,
-            doc_id=doc_id,
+            rev_id=rev_id,
             doc_title=outline.title,
             section=section,
             config=config,
@@ -203,7 +203,7 @@ def _collect_section_elements(
 def _create_micro_chunks(
     *,
     elements: list[tuple[ContentElement, DocumentSection]],
-    doc_id: str,
+    rev_id: str,
     doc_title: str,
     section: DocumentSection,
     config: SplitterConfig,
@@ -230,7 +230,7 @@ def _create_micro_chunks(
                 continue  # Skip small figures (logos, icons)
 
             chunk = _make_chunk(
-                doc_id=doc_id,
+                rev_id=rev_id,
                 level=ChunkLevel.MICRO,
                 index=counter,
                 text=elem.figure_caption or "[Figure]",
@@ -262,7 +262,7 @@ def _create_micro_chunks(
             # run transcribes into LaTeX.
             fig_info = figure_lookup.get(elem.figure_block_id)
             chunk = _make_chunk(
-                doc_id=doc_id,
+                rev_id=rev_id,
                 level=ChunkLevel.MICRO,
                 index=counter,
                 text=elem.text or "[Formula]",
@@ -333,7 +333,7 @@ def _create_micro_chunks(
                 )
 
             chunk = _make_chunk(
-                doc_id=doc_id,
+                rev_id=rev_id,
                 level=ChunkLevel.MICRO,
                 index=counter,
                 text=elem.text,
@@ -349,7 +349,7 @@ def _create_micro_chunks(
 
         elif elem.element_type == ElementType.KEY_VALUE:
             chunk = _make_chunk(
-                doc_id=doc_id,
+                rev_id=rev_id,
                 level=ChunkLevel.MICRO,
                 index=counter,
                 text=f"{elem.kv_key}: {elem.kv_value}" if elem.kv_key else elem.text,
@@ -375,7 +375,7 @@ def _create_micro_chunks(
 
             for text_piece in text_chunks:
                 chunk = _make_chunk(
-                    doc_id=doc_id,
+                    rev_id=rev_id,
                     level=ChunkLevel.MICRO,
                     index=counter,
                     text=text_piece,
@@ -399,7 +399,7 @@ def _create_micro_chunks(
 def _create_meso_chunks(
     *,
     micro_chunks: list[Chunk],
-    doc_id: str,
+    rev_id: str,
     doc_title: str,
     section: DocumentSection,
     config: SplitterConfig,
@@ -435,7 +435,7 @@ def _create_meso_chunks(
         section_title = current_group[0].metadata.section_title
 
         meso = _make_chunk(
-            doc_id=doc_id,
+            rev_id=rev_id,
             level=ChunkLevel.MESO,
             index=counter,
             text=combined_text,
@@ -582,7 +582,7 @@ def _split_by_words(text: str, *, max_tokens: int) -> list[str]:
 
 def _make_chunk(
     *,
-    doc_id: str,
+    rev_id: str,
     level: ChunkLevel,
     index: int,
     text: str,
@@ -595,13 +595,13 @@ def _make_chunk(
 ) -> Chunk:
     """Create a Chunk with standard metadata."""
     return Chunk(
-        id=f"{doc_id}:L{level.value}:{index}",
-        doc_id=doc_id,
+        id=f"{rev_id}:L{level.value}:{index}",
+        rev_id=rev_id,
         level=level,
         text=text,
         token_count=_estimate_tokens(text),
         metadata=ChunkMetadata(
-            doc_id=doc_id,
+            rev_id=rev_id,
             doc_title=doc_title,
             chapter_title=chapter_title,
             section_title=section_title,

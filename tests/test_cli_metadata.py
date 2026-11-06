@@ -26,10 +26,10 @@ DOC_A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 DOC_B = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
 
-def _chunk(doc_id: str) -> Chunk:
+def _chunk(rev_id: str) -> Chunk:
     md = ChunkMetadata(
-        doc_id=doc_id,
-        doc_title=f"Doc {doc_id[:8]}",
+        rev_id=rev_id,
+        doc_title=f"Doc {rev_id[:8]}",
         chapter_title="",
         section_title="",
         page_numbers=[1],
@@ -37,8 +37,8 @@ def _chunk(doc_id: str) -> Chunk:
         context_string="",
     )
     return Chunk(
-        id=f"{doc_id}:L1:0",
-        doc_id=doc_id,
+        id=f"{rev_id}:L1:0",
+        rev_id=rev_id,
         level=ChunkLevel.MICRO,
         text="chunk 0",
         context_text="chunk 0",
@@ -67,7 +67,7 @@ def _clear_project_config_cache() -> None:
 
 
 def _meta(db_path: Path, *args: str):
-    """`rag metadata <doc_id> [options]` — shows with no options, sets with them."""
+    """`rag metadata <rev_id> [options]` — shows with no options, sets with them."""
     runner = CliRunner()
     return runner.invoke(cli, ["metadata", *args, "--db", str(db_path)])
 
@@ -76,7 +76,7 @@ def _list(db_path: Path, *args: str):
     """`rag list [filters]` — absorbed the old `metadata list` filters.
 
     Widened well past the default 80 columns: the sidecar view is eight
-    columns, and at 80 Rich squeezes doc_id down until it wraps mid-hash,
+    columns, and at 80 Rich squeezes rev_id down until it wraps mid-hash,
     which would have these tests asserting on the wrapping rather than on
     the filtering they exist to check.
     """
@@ -84,8 +84,8 @@ def _list(db_path: Path, *args: str):
     return runner.invoke(cli, ["list", *args, "--db", str(db_path)], env={"COLUMNS": "200"})
 
 
-def _get_json(db_path: Path, doc_id: str) -> dict:
-    result = _meta(db_path, doc_id)
+def _get_json(db_path: Path, rev_id: str) -> dict:
+    result = _meta(db_path, rev_id)
     assert result.exit_code == 0, result.output
     return json.loads(result.output)
 
@@ -144,7 +144,7 @@ def test_field_bad_format_rejected(db_path: Path) -> None:
 
 
 def test_attr_options_are_gone(db_path: Path) -> None:
-    result = _meta(db_path, DOC_A, "--attr", "revision=B")
+    result = _meta(db_path, DOC_A, "--attr", "drawing=B")
     assert result.exit_code == 2 and "No such option" in result.output
 
 
@@ -191,10 +191,10 @@ _SCALAR_FIELDS = [
 _OTHER_FLAG = ("--tag", "x")
 
 
-def _doc_title(db_path: Path, doc_id: str) -> str:
+def _doc_title(db_path: Path, rev_id: str) -> str:
     conn = connect(db_path, embedding_dim=get_settings().embedding_dimensions)
     try:
-        row = conn.execute("SELECT doc_title FROM chunks WHERE doc_id = ?", (doc_id,)).fetchone()
+        row = conn.execute("SELECT doc_title FROM chunks WHERE rev_id = ?", (rev_id,)).fetchone()
     finally:
         conn.close()
     return row[0]
@@ -242,32 +242,32 @@ def test_blank_scalar_beats_project_config_default(
 def test_project_config_supplies_fields(
     db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    assert _fields("add", "revision", "--db", str(db_path)).exit_code == 0
-    (tmp_path / ".rag.toml").write_text('[fields]\ndoc_type = "technical-manual"\nrevision = "A"\n')
+    assert _fields("add", "drawing", "--db", str(db_path)).exit_code == 0
+    (tmp_path / ".rag.toml").write_text('[fields]\ndoc_type = "technical-manual"\ndrawing = "A"\n')
     monkeypatch.chdir(tmp_path)
     result = _meta(db_path, DOC_A, "--mpn", "V700")
     assert result.exit_code == 0, result.output
     meta = _get_json(db_path, DOC_A)
-    assert meta["fields"] == {"mpn": ["V700"], "doc_type": "technical-manual", "revision": "A"}
+    assert meta["fields"] == {"mpn": ["V700"], "doc_type": "technical-manual", "drawing": "A"}
 
 
 def test_field_flags_beat_project_config_fields(
     db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _fields("add", "revision", "--db", str(db_path))
+    _fields("add", "drawing", "--db", str(db_path))
     _fields("add", "owner", "--db", str(db_path))
     _meta(db_path, DOC_A, "--field", "owner=seeded")
-    (tmp_path / ".rag.toml").write_text('[fields]\nrevision = "A"\nowner = "hw"\n')
+    (tmp_path / ".rag.toml").write_text('[fields]\ndrawing = "A"\nowner = "hw"\n')
     monkeypatch.chdir(tmp_path)
-    result = _meta(db_path, DOC_A, "--field", "revision=C", "--unset-field", "owner")
+    result = _meta(db_path, DOC_A, "--field", "drawing=C", "--unset-field", "owner")
     assert result.exit_code == 0, result.output
-    assert _get_json(db_path, DOC_A)["fields"] == {"revision": "C"}
+    assert _get_json(db_path, DOC_A)["fields"] == {"drawing": "C"}
 
 
 def test_old_attributes_table_is_an_unknown_key(
     db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    (tmp_path / ".rag.toml").write_text('[attributes]\nrevision = "B"\n')
+    (tmp_path / ".rag.toml").write_text('[attributes]\ndrawing = "B"\n')
     monkeypatch.chdir(tmp_path)
     result = _meta(db_path, DOC_A, "--mpn", "V700")
     assert result.exit_code == 1
@@ -369,7 +369,7 @@ def test_shared_project_skips_documents_missing_from_the_store(db_path: Path) ->
     _meta(db_path, DOC_A, "--add-project", "board-a", "--add-project", "board-b")
     _meta(db_path, DOC_B, "--add-project", "board-b")
     be = LocalBackend(conn=connect(db_path))
-    needs = [SimpleNamespace(doc_id=d) for d in (DOC_A, DOC_B, "not-in-store")]
+    needs = [SimpleNamespace(rev_id=d) for d in (DOC_A, DOC_B, "not-in-store")]
     assert _shared_project(be, needs) == "board-b"
 
 
@@ -623,7 +623,7 @@ def test_list_filters_by_field_and_shows_user_fields_in_wide_view(db_path: Path)
     result = _list(db_path, "--global", "--field", "acme-id=d-1")
     assert result.exit_code == 0, result.output
     # The wide view (implied by the filter) has a column per user field; the
-    # extra column squeezes doc_id, so check the field values instead.
+    # extra column squeezes rev_id, so check the field values instead.
     assert "acme-id" in result.output
     assert "D-1" in result.output
     assert "D-2" not in result.output

@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from datasheet_rag.cli import SHORT_DOC_ID_LEN, cli
+from datasheet_rag.cli import SHORT_REV_ID_LEN, cli
 from datasheet_rag.config import get_settings
 from datasheet_rag.models.chunk import Chunk, ChunkLevel, ChunkMetadata, LayoutType
 from datasheet_rag.project_config import get_project_config
@@ -31,7 +31,7 @@ _PNG_BYTES = base64.b64decode(
 
 
 def _chunk(
-    doc_id: str,
+    rev_id: str,
     index: int,
     text: str,
     *,
@@ -41,9 +41,9 @@ def _chunk(
     figure_image_path: str | None = None,
     figure_s3_key: str | None = None,
 ) -> Chunk:
-    chunk_id = f"{doc_id}:L2:{index}"
+    chunk_id = f"{rev_id}:L2:{index}"
     md = ChunkMetadata(
-        doc_id=doc_id,
+        rev_id=rev_id,
         doc_title="Doc A",
         chapter_title="",
         section_title="Thermal Characteristics",
@@ -53,7 +53,7 @@ def _chunk(
     )
     return Chunk(
         id=chunk_id,
-        doc_id=doc_id,
+        rev_id=rev_id,
         level=ChunkLevel.MICRO,
         text=text,
         context_text=text,
@@ -97,7 +97,7 @@ def db_path(tmp_path: Path, figure_path: Path) -> Path:
     )
 
     insert_chunks(conn, [fig, text_chunk, orphan_fig])
-    for doc in {fig.doc_id, text_chunk.doc_id, orphan_fig.doc_id}:
+    for doc in {fig.rev_id, text_chunk.rev_id, orphan_fig.rev_id}:
         set_metadata(conn, doc, add_projects=["proj-a"])
     conn.commit()
     conn.close()
@@ -122,7 +122,7 @@ def test_get_figure_saves_exact_bytes_by_full_id(
     result = CliRunner().invoke(cli, ["get", "fig", full_id, "--db", str(db_path)])
     assert result.exit_code == 0, result.output
 
-    expected_name = f"{DOC_A[:SHORT_DOC_ID_LEN]}_L2_0.png"
+    expected_name = f"{DOC_A[:SHORT_REV_ID_LEN]}_L2_0.png"
     saved = workdir / expected_name
     assert saved.exists()
     assert saved.read_bytes() == _PNG_BYTES
@@ -133,17 +133,17 @@ def test_get_figure_saves_exact_bytes_by_full_id(
     assert "section=Thermal Characteristics" in result.output
 
 
-def test_get_figure_by_abbreviated_doc_id(
+def test_get_figure_by_abbreviated_rev_id(
     tmp_path: Path, db_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    short_id = f"{DOC_A[:SHORT_DOC_ID_LEN]}:L2:0"
+    short_id = f"{DOC_A[:SHORT_REV_ID_LEN]}:L2:0"
     workdir = tmp_path / "work2"
     workdir.mkdir()
     monkeypatch.chdir(workdir)
 
     result = CliRunner().invoke(cli, ["get", "fig", short_id, "--db", str(db_path)])
     assert result.exit_code == 0, result.output
-    saved = workdir / f"{DOC_A[:SHORT_DOC_ID_LEN]}_L2_0.png"
+    saved = workdir / f"{DOC_A[:SHORT_REV_ID_LEN]}_L2_0.png"
     assert saved.exists()
     assert saved.read_bytes() == _PNG_BYTES
 
@@ -165,7 +165,7 @@ def test_get_figure_output_directory(tmp_path: Path, db_path: Path) -> None:
         cli, ["get", "fig", full_id, "--db", str(db_path), "-o", str(out_dir) + "/"]
     )
     assert result.exit_code == 0, result.output
-    expected = out_dir / f"{DOC_A[:SHORT_DOC_ID_LEN]}_L2_0.png"
+    expected = out_dir / f"{DOC_A[:SHORT_REV_ID_LEN]}_L2_0.png"
     assert expected.exists()
     assert expected.read_bytes() == _PNG_BYTES
 

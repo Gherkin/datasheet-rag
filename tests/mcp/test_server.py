@@ -52,7 +52,7 @@ def _vec(slot: int) -> list[float]:
 def _make_chunk(
     chunk_id: str,
     *,
-    doc_id: str = "docA",
+    rev_id: str = "docA",
     level: ChunkLevel = ChunkLevel.MICRO,
     text: str = "",
     section: str = "",
@@ -66,7 +66,7 @@ def _make_chunk(
     table_structure_warning: str | None = None,
 ) -> Chunk:
     md = ChunkMetadata(
-        doc_id=doc_id,
+        rev_id=rev_id,
         chapter_title=chapter,
         section_title=section,
         page_numbers=[page] if page is not None else [],
@@ -75,7 +75,7 @@ def _make_chunk(
     )
     return Chunk(
         id=chunk_id,
-        doc_id=doc_id,
+        rev_id=rev_id,
         level=level,
         text=text or f"text for {chunk_id}",
         context_text=text or f"text for {chunk_id}",
@@ -150,7 +150,7 @@ def conn() -> Any:
         ),
         _make_chunk(
             "c4",
-            doc_id="docB",
+            rev_id="docB",
             text="dropout voltage versus load current curve",
             section="LDO",
             chapter="Power",
@@ -169,12 +169,12 @@ def conn() -> Any:
     # docA is in project p1; docB in p2.
     insert_chunks(
         c,
-        [ch for ch in chunks if ch.doc_id == "docA"],
+        [ch for ch in chunks if ch.rev_id == "docA"],
         vectors={k: v for k, v in vectors.items() if k != "c4"},
     )
     insert_chunks(
         c,
-        [ch for ch in chunks if ch.doc_id == "docB"],
+        [ch for ch in chunks if ch.rev_id == "docB"],
         vectors={"c4": vectors["c4"]},
     )
     set_metadata(c, "docA", add_projects=["p1"])
@@ -262,12 +262,12 @@ def test_search_respects_project_filter(conn: Any, fake_embedder: Any) -> None:
     assert "c4" not in ids
 
 
-def test_search_doc_id_filter_narrows_to_doc(conn: Any) -> None:
+def test_search_rev_id_filter_narrows_to_doc(conn: Any) -> None:
     out = _search_impl(
         "dropout voltage",
         mode="keyword",
         limit=5,
-        doc_id="docB",
+        rev_id="docB",
         conn=conn,
     )["items"]
     assert [r["chunk_id"] for r in out] == ["c4"]
@@ -322,7 +322,7 @@ def test_get_chunk_missing_returns_none(conn: Any) -> None:
 def test_table_chunk_without_warning_is_marked_unverified(conn: Any) -> None:
     chunk = _make_chunk(
         "t1",
-        doc_id="docA",
+        rev_id="docA",
         text="Pin | Function\n88 | -",
         section="Pinout",
         chapter="Comm",
@@ -340,7 +340,7 @@ def test_table_chunk_without_warning_is_marked_unverified(conn: Any) -> None:
 def test_table_chunk_with_warning_flags_it(conn: Any) -> None:
     chunk = _make_chunk(
         "t2",
-        doc_id="docA",
+        rev_id="docA",
         text="Pin | Function\n88 | -",
         section="Pinout",
         chapter="Comm",
@@ -434,7 +434,7 @@ def test_list_documents_filters_by_project(conn: Any) -> None:
     )
 
     out = _list_documents_impl(project_id="p1", conn=conn)["items"]
-    assert [d["doc_id"] for d in out] == ["docA"]
+    assert [d["rev_id"] for d in out] == ["docA"]
     assert out[0]["fields"]["mpn"] == ["STM32H743"]
     assert out[0]["project_fields"] == {"p1": {"subsystem": "mcu"}}
     assert "group_name" not in out[0] and "subsystem" not in out[0]
@@ -445,14 +445,14 @@ def test_list_documents_filters_by_project(conn: Any) -> None:
         == []
     )
     out = _list_documents_impl(fields={"subsystem": "power"}, conn=conn)["items"]
-    assert [d["doc_id"] for d in out] == ["docB"]
+    assert [d["rev_id"] for d in out] == ["docB"]
 
 
 def test_list_documents_manufacturer_filter(conn: Any) -> None:
     set_metadata(conn, "docA", add_projects=["p1"], fields={"manufacturer": "ST"})
     set_metadata(conn, "docB", add_projects=["p2"], fields={"manufacturer": "TI"})
     out = _list_documents_impl(manufacturer="TI", conn=conn)["items"]
-    assert [d["doc_id"] for d in out] == ["docB"]
+    assert [d["rev_id"] for d in out] == ["docB"]
 
 
 def test_list_documents_generic_key_filter(conn: Any) -> None:
@@ -460,7 +460,7 @@ def test_list_documents_generic_key_filter(conn: Any) -> None:
     set_metadata(conn, "docA", fields={"acme-id": "D-1"})
     set_metadata(conn, "docB", fields={"acme-id": "D-2"})
     out = _list_documents_impl(fields={"acme-id": "d-2"}, conn=conn)["items"]
-    assert [d["doc_id"] for d in out] == ["docB"]
+    assert [d["rev_id"] for d in out] == ["docB"]
 
 
 def test_list_documents_rejects_shortcut_that_conflicts_with_keys(conn: Any) -> None:
@@ -508,7 +508,7 @@ def test_list_documents_includes_docs_without_a_sidecar_row(conn: Any) -> None:
 
     out = _list_documents_impl(conn=conn)["items"]
 
-    assert [d["doc_id"] for d in out] == ["docA", "docB"]
+    assert [d["rev_id"] for d in out] == ["docA", "docB"]
     assert out[0]["projects"] == ["p1"]
     untagged = out[1]
     assert untagged["fields"] == {}
@@ -521,13 +521,13 @@ def test_list_documents_sidecar_filter_excludes_untagged_docs(conn: Any) -> None
     # docB has no sidecar row, so it cannot match a manufacturer filter.
     delete_metadata(conn, "docB")
     out = _list_documents_impl(manufacturer="ST", conn=conn)["items"]
-    assert [d["doc_id"] for d in out] == ["docA"]
+    assert [d["rev_id"] for d in out] == ["docA"]
 
 
 def test_get_document_metadata_returns_empty_row_for_untagged_doc(conn: Any) -> None:
     out = _get_document_metadata_impl("docB", conn=conn)
     assert out is not None
-    assert out["doc_id"] == "docB"
+    assert out["rev_id"] == "docB"
     assert out["fields"] == {}
     assert out["tags"] == []
 
@@ -545,7 +545,7 @@ def test_get_document_metadata_does_not_list_the_store(
     set_metadata(conn, "docA", fields={"mpn": "STM32H743"})
 
     assert _get_document_metadata_impl("docA", conn=conn)["fields"]["mpn"] == ["STM32H743"]
-    assert _get_document_metadata_impl("docB", conn=conn)["doc_id"] == "docB"
+    assert _get_document_metadata_impl("docB", conn=conn)["rev_id"] == "docB"
     assert _get_document_metadata_impl("nope", conn=conn) is None
 
 
@@ -558,8 +558,8 @@ def test_stats_total_and_by_level(conn: Any) -> None:
     assert out["project_id"] == "p1"
 
 
-def test_stats_doc_id_scope(conn: Any) -> None:
-    out = _stats_impl(doc_id="docB", conn=conn)
+def test_stats_rev_id_scope(conn: Any) -> None:
+    out = _stats_impl(rev_id="docB", conn=conn)
     assert out["total_chunks"] == 1
     assert out["by_level"] == {"MICRO": 1}
 
@@ -582,7 +582,7 @@ def _seed_figure_chunk(
     from datasheet_rag.store import insert_chunks
 
     md = ChunkMetadata(
-        doc_id="docA",
+        rev_id="docA",
         chapter_title="Comm",
         section_title="SPI Timing",
         page_numbers=[42],
@@ -590,7 +590,7 @@ def _seed_figure_chunk(
     )
     chunk = Chunk(
         id=chunk_id,
-        doc_id="docA",
+        rev_id="docA",
         level=ChunkLevel.MICRO,
         text="[Figure]",
         context_text="SPI timing diagram",
@@ -1060,7 +1060,7 @@ def test_unshowable_figure_result_carries_no_directives(conn: Any, fake_embedder
 def test_table_result_carries_no_directives(conn: Any, warning: str | None) -> None:
     chunk = _make_chunk(
         "t3",
-        doc_id="docA",
+        rev_id="docA",
         text="Pin | Function\n88 | -",
         page=53,
         layout_type=LayoutType.TABLE,
@@ -1100,7 +1100,7 @@ def test_table_check_always_names_show_page(local_client: bool) -> None:
 
     server = mcp_server.build_server(local_client=local_client)
     description = server._tool_manager.get_tool("search").description
-    assert "To check a table, call `show_page(doc_id, page)`" in description
+    assert "To check a table, call `show_page(rev_id, page)`" in description
 
 
 def test_local_description_marks_show_pdf_as_the_user_facing_tool() -> None:
@@ -1109,7 +1109,7 @@ def test_local_description_marks_show_pdf_as_the_user_facing_tool() -> None:
 
     server = mcp_server.build_server(local_client=True)
     description = server._tool_manager.get_tool("search").description
-    assert "`show_pdf(doc_id, page)`" in description
+    assert "`show_pdf(rev_id, page)`" in description
     assert "returns no image to you" in description
 
 
@@ -1204,12 +1204,12 @@ def test_single_step_directions_are_one_final_page(conn: Any) -> None:
 
 def test_documents_come_one_page_at_a_time(conn: Any) -> None:
     first = _list_documents_impl(limit=1, conn=conn)
-    assert [d["doc_id"] for d in first["items"]] == ["docA"]
+    assert [d["rev_id"] for d in first["items"]] == ["docA"]
     assert first["total"] == 2
     assert first["next_offset"] == 1
 
     last = _list_documents_impl(limit=1, offset=1, conn=conn)
-    assert [d["doc_id"] for d in last["items"]] == ["docB"]
+    assert [d["rev_id"] for d in last["items"]] == ["docB"]
     assert last["next_offset"] is None
 
 
@@ -1263,7 +1263,7 @@ def test_search_paging_ends_at_the_pool(conn: Any) -> None:
 
 
 def test_search_says_when_the_ranking_ran_out(conn: Any) -> None:
-    out = _search_impl("dropout voltage", mode="keyword", limit=5, doc_id="docB", conn=conn)
+    out = _search_impl("dropout voltage", mode="keyword", limit=5, rev_id="docB", conn=conn)
     assert len(out["items"]) == 1
     assert out["next_offset"] is None
 

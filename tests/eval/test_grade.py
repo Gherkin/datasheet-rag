@@ -28,7 +28,7 @@ def _need(grading: dict[str, Any], **kw: Any) -> Need:
         category="table_spec",
         answer="-0.3 V to +5.25 V",
         grading=grading,
-        doc_id=DOC,
+        rev_id=DOC,
         pages=[2111],
     )
     base.update(kw)
@@ -173,12 +173,12 @@ def test_set_part_numbers() -> None:
 
 def test_cites_gold_needs_right_doc_and_page() -> None:
     need = _need(G)
-    assert cites_gold(need, [Citation(doc_id=DOC, page=2111)])
-    assert cites_gold(need, [Citation(doc_id=DOC[:10], page=2111)])
-    assert not cites_gold(need, [Citation(doc_id=DOC, page=2110)])
-    assert not cites_gold(need, [Citation(doc_id="ffff" + DOC[4:], page=2111)])
+    assert cites_gold(need, [Citation(rev_id=DOC, page=2111)])
+    assert cites_gold(need, [Citation(rev_id=DOC[:10], page=2111)])
+    assert not cites_gold(need, [Citation(rev_id=DOC, page=2110)])
+    assert not cites_gold(need, [Citation(rev_id="ffff" + DOC[4:], page=2111)])
     # Too short a prefix to name one document.
-    assert not cites_gold(need, [Citation(doc_id=DOC[:4], page=2111)])
+    assert not cites_gold(need, [Citation(rev_id=DOC[:4], page=2111)])
 
 
 # ---- whole grade ------------------------------------------------------------
@@ -254,7 +254,7 @@ def test_set_miss_fails_in_code_and_hit_goes_to_judge() -> None:
 
 def test_grade_numeric_grounded() -> None:
     final = FinalAnswer(
-        answer="5.25 V", value=5.25, unit="V", citations=[Citation(doc_id=DOC, page=2111)]
+        answer="5.25 V", value=5.25, unit="V", citations=[Citation(rev_id=DOC, page=2111)]
     )
     g = grade(_need(G), final, client=FakeJudge(), judge_model="m")
     assert g.correct and g.grounded
@@ -285,7 +285,7 @@ def test_unanswerable_correct_abstention_is_grounded() -> None:
     need = _need(
         {"type": "text", "must_mention": ["not specified"], "must_not": []},
         answerable=False,
-        doc_id=None,
+        rev_id=None,
         pages=[],
     )
     g = grade(

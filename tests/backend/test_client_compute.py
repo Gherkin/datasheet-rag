@@ -71,29 +71,29 @@ def _client_backend(handler: Any, *, embedder: Any = None) -> RemoteBackend:
 
 
 def _graph(did: str, *, figure: bool = False) -> ChunkGraph:
-    g = ChunkGraph(doc_id=did)
+    g = ChunkGraph(rev_id=did)
     g.add(
         Chunk(
             id=f"{did}:L2:0",
-            doc_id=did,
+            rev_id=did,
             level=ChunkLevel.MICRO,
             text="The regulator drops 5V to 3V3 at up to 500mA.",
             context_text="Power: The regulator drops 5V to 3V3 at up to 500mA.",
-            metadata=ChunkMetadata(doc_id=did, page_numbers=[1]),
+            metadata=ChunkMetadata(rev_id=did, page_numbers=[1]),
         )
     )
     if figure:
         g.add(
             Chunk(
                 id=f"{did}:L2:1",
-                doc_id=did,
+                rev_id=did,
                 level=ChunkLevel.MICRO,
                 text="Figure 1: functional block diagram",
                 context_text="Power: Figure 1: functional block diagram",
                 prev_id=f"{did}:L2:0",
                 figure_image_path="fig.png",
                 figure_caption="Figure 1",
-                metadata=ChunkMetadata(doc_id=did, page_numbers=[1], layout_type=LayoutType.FIGURE),
+                metadata=ChunkMetadata(rev_id=did, page_numbers=[1], layout_type=LayoutType.FIGURE),
             )
         )
     return g
@@ -223,7 +223,7 @@ def test_client_compute_ships_vectors_and_asks_the_server_not_to_embed() -> None
         start = raw.index(b"{")
         end = raw.rindex(b"}") + 1
         sent.update(json.loads(raw[start:end]))
-        return httpx.Response(200, json={"doc_id": did, "inserted": 1})
+        return httpx.Response(200, json={"rev_id": did, "inserted": 1})
 
     embedder = _StubEmbedder()
     rb = _client_backend(handler, embedder=embedder)
@@ -267,7 +267,7 @@ def test_client_compute_describes_figures_before_embedding(monkeypatch, tmp_path
             return httpx.Response(200, json={"chunks": []})
         raw = request.content
         sent.update(json.loads(raw[raw.index(b"{") : raw.rindex(b"}") + 1]))
-        return httpx.Response(200, json={"doc_id": did, "inserted": 2})
+        return httpx.Response(200, json={"rev_id": did, "inserted": 2})
 
     embedder = _StubEmbedder()
     rb = _client_backend(handler, embedder=embedder)
@@ -299,10 +299,10 @@ def test_client_compute_infers_the_title_from_the_graph(monkeypatch) -> None:
             return httpx.Response(200, json={"titles": {}})
         if request.url.path.endswith("/title-context"):
             # No hints sent, so the client infers from the stored ones.
-            return httpx.Response(200, json={"doc_id": did, "first_page_text": ""})
+            return httpx.Response(200, json={"rev_id": did, "first_page_text": ""})
         raw = request.content
         sent.update(json.loads(raw[raw.index(b"{") : raw.rindex(b"}") + 1]))
-        return httpx.Response(200, json={"doc_id": did, "inserted": 1, "title": "TPS62840"})
+        return httpx.Response(200, json={"rev_id": did, "inserted": 1, "title": "TPS62840"})
 
     rb = _client_backend(handler, embedder=_StubEmbedder())
     rb.ingest_chunk_graph(_graph(did), embed=True, infer_title=True)
@@ -326,7 +326,7 @@ def test_client_compute_does_not_infer_a_title_that_already_exists(monkeypatch) 
     def handler(request: httpx.Request) -> httpx.Response:
         raw = request.content
         sent.update(json.loads(raw[raw.index(b"{") : raw.rindex(b"}") + 1]))
-        return httpx.Response(200, json={"doc_id": did, "inserted": 1})
+        return httpx.Response(200, json={"rev_id": did, "inserted": 1})
 
     graph = _graph(did)
     graph.chunks[f"{did}:L2:0"].metadata.doc_title = "TPS62840 Datasheet"
@@ -356,12 +356,12 @@ def test_describe_figures_via_backend_reads_and_writes_over_http(monkeypatch) ->
                 200,
                 json={
                     "chunk_id": figure_chunk.id,
-                    "doc_id": did,
+                    "rev_id": did,
                     "image_b64": png,
                     "format": "png",
                     "caption": "Figure 1",
                     "description": "",
-                    "citation": {"doc_id": did},
+                    "citation": {"rev_id": did},
                     "surrounding_text": "The regulator drops 5V to 3V3.",
                 },
             )
@@ -388,7 +388,7 @@ def test_describe_figures_via_backend_reads_and_writes_over_http(monkeypatch) ->
     monkeypatch.setattr(description_pkg, "FigureDescriber", _StubDescriber)
 
     rb = _client_backend(handler)
-    descriptions, _stats = rb.describe_figures(doc_id=did)
+    descriptions, _stats = rb.describe_figures(rev_id=did)
 
     assert descriptions == {figure_chunk.id: "A block diagram."}
     assert seen_prompt["surrounding_text"] == "The regulator drops 5V to 3V3."
@@ -405,7 +405,7 @@ def test_infer_title_via_backend_respects_a_hand_set_title() -> None:
         return httpx.Response(
             200,
             json=TitleContext(
-                doc_id=did,
+                rev_id=did,
                 first_page_text="TPS62840 step-down converter",
                 title_source="manual",
             ).model_dump(mode="json"),
@@ -500,7 +500,7 @@ def test_title_context_route_serves_the_prompt_inputs(server) -> None:
     )
     ctx = server.get(f"/documents/{did}/title-context").json()
     assert "regulator drops 5V" in ctx["first_page_text"]
-    assert ctx["doc_id"] == did
+    assert ctx["rev_id"] == did
 
 
 def test_local_backend_refuses_vectors_with_describe(conn) -> None:
@@ -658,7 +658,7 @@ def test_unreachable_health_does_not_count_as_checked() -> None:
         if request.url.path == "/health":
             probes += 1
             return httpx.Response(503, json={"detail": "down"})
-        return httpx.Response(200, json={"doc_id": "7" * 64, "inserted": 1})
+        return httpx.Response(200, json={"rev_id": "7" * 64, "inserted": 1})
 
     rb = _client_backend(handler)
     rb._assert_embedding_compatible()
@@ -707,7 +707,7 @@ def test_correct_vectors_pass_even_when_this_machine_is_configured_otherwise(
     def on_ingest(request: httpx.Request) -> httpx.Response:
         raw = request.content
         sent.update(json.loads(raw[raw.index(b"{") : raw.rindex(b"}") + 1]))
-        return httpx.Response(200, json={"doc_id": did, "inserted": 1})
+        return httpx.Response(200, json={"rev_id": did, "inserted": 1})
 
     monkeypatch.setenv("RAG_EMBEDDING_DIMENSIONS", "1024")
     from datasheet_rag.config import get_settings
@@ -780,7 +780,7 @@ def test_a_supplied_title_turns_off_server_side_inference() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raw = request.content
         sent.update(json.loads(raw[raw.index(b"{") : raw.rindex(b"}") + 1]))
-        return httpx.Response(200, json={"doc_id": did, "inserted": 1})
+        return httpx.Response(200, json={"rev_id": did, "inserted": 1})
 
     rb = _client_backend(handler, embedder=_StubEmbedder())
     rb.ingest_chunk_graph(_graph(did), infer_title=True, inferred_title="TPS62840")
@@ -832,7 +832,7 @@ def test_reingest_does_not_redescribe_stored_figures(monkeypatch, tmp_path) -> N
             return httpx.Response(200, json={"chunks": [stored.model_dump(mode="json")]})
         raw = request.content
         sent.update(json.loads(raw[raw.index(b"{") : raw.rindex(b"}") + 1]))
-        return httpx.Response(200, json={"doc_id": did, "inserted": 2})
+        return httpx.Response(200, json={"rev_id": did, "inserted": 2})
 
     rb = _client_backend(handler, embedder=_StubEmbedder())
     result = rb.ingest_chunk_graph(graph, embed=True, describe_figures=True)
@@ -882,13 +882,13 @@ def test_client_compute_uploads_the_source_pdf(monkeypatch, tmp_path) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == f"/documents/{did}/pdf":
             uploaded["body"] = request.content
-            return httpx.Response(200, json={"stored": True, "doc_id": did})
-        return httpx.Response(200, json={"doc_id": did, "inserted": 1})
+            return httpx.Response(200, json={"stored": True, "rev_id": did})
+        return httpx.Response(200, json={"rev_id": did, "inserted": 1})
 
     rb = _client_backend(handler, embedder=_StubEmbedder())
-    result = rb.ingest_pdf(pdf, doc_id=did)
+    result = rb.ingest_pdf(pdf, rev_id=did)
 
-    assert result.doc_id == did
+    assert result.rev_id == did
     assert b"%PDF-1.7" in uploaded["body"]
 
 
@@ -904,8 +904,8 @@ def test_ingest_chunk_graph_uploads_the_source_pdf(tmp_path) -> None:
         order.append(request.url.path)
         if request.url.path == f"/documents/{did}/pdf":
             uploaded["body"] = request.content
-            return httpx.Response(200, json={"stored": True, "doc_id": did})
-        return httpx.Response(200, json={"doc_id": did, "inserted": 1})
+            return httpx.Response(200, json={"stored": True, "rev_id": did})
+        return httpx.Response(200, json={"rev_id": did, "inserted": 1})
 
     rb = _client_backend(handler, embedder=_StubEmbedder())
     rb.ingest_chunk_graph(_graph(did), embed=True, source_pdf=pdf)
@@ -925,7 +925,7 @@ def test_a_failed_pdf_upload_warns_but_keeps_the_ingest(tmp_path, capsys) -> Non
         if request.url.path == f"/documents/{did}/pdf":
             # A server older than this route.
             return httpx.Response(405, json={"detail": "Method Not Allowed"})
-        return httpx.Response(200, json={"doc_id": did, "inserted": 1})
+        return httpx.Response(200, json={"rev_id": did, "inserted": 1})
 
     rb = _client_backend(handler, embedder=_StubEmbedder())
     result = rb.ingest_chunk_graph(_graph(did), embed=True, source_pdf=pdf)
@@ -1019,8 +1019,8 @@ def test_pdf_upload_refuses_an_oversized_body(server, tmp_path, monkeypatch) -> 
         get_settings.cache_clear()
 
 
-def test_pdf_upload_refuses_a_doc_id_that_escapes_the_store() -> None:
+def test_pdf_upload_refuses_a_rev_id_that_escapes_the_store() -> None:
     from datasheet_rag.storage import save_pdf_bytes
 
-    with pytest.raises(ValueError, match="invalid doc_id"):
+    with pytest.raises(ValueError, match="invalid rev_id"):
         save_pdf_bytes(b"%PDF", "../../etc/passwd")

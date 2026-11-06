@@ -72,7 +72,7 @@ def run_chunking_pipeline_from_outline(
 def run_chunking_pipeline(
     blocks: list[dict[str, Any]],
     *,
-    doc_id: str,
+    rev_id: str,
     figure_manifest: dict[str, Any] | None = None,
     config: SplitterConfig | None = None,
     summarizer_mode: str = "extractive",
@@ -84,7 +84,7 @@ def run_chunking_pipeline(
     run_chunking_pipeline_from_outline for the generic steps.
     """
     console.print("[blue]Parsing Textract layout…[/]")
-    outline = parse_textract_blocks(blocks, doc_id=doc_id)
+    outline = parse_textract_blocks(blocks, rev_id=rev_id)
     summary = outline.summary()
     console.print(
         f"  {summary['top_level_sections']} chapters, "
@@ -106,7 +106,7 @@ def save_chunk_graph(graph: ChunkGraph, path: Path) -> Path:
 
     # Serialize without embeddings (they'd make the file huge)
     data: dict[str, Any] = {
-        "doc_id": graph.doc_id,
+        "rev_id": graph.rev_id,
         "title_hints": graph.title_hints,
         "stats": graph.stats(),
         "chunks": {},
@@ -124,12 +124,12 @@ def save_chunk_graph(graph: ChunkGraph, path: Path) -> Path:
 
 def load_chunk_graph(path: Path) -> ChunkGraph:
     """Load a ChunkGraph from JSON."""
+    from datasheet_rag import cache_files
     from datasheet_rag.models.chunk import Chunk
 
-    with open(path) as f:
-        data = json.load(f)
+    data = cache_files.load(path)
 
-    graph = ChunkGraph(doc_id=data["doc_id"], title_hints=data.get("title_hints"))
+    graph = ChunkGraph(rev_id=data["rev_id"], title_hints=data.get("title_hints"))
     for chunk_id, chunk_dict in data["chunks"].items():
         chunk = Chunk(**chunk_dict)
         graph.add(chunk)

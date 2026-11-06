@@ -41,7 +41,7 @@ def _outline(*elements: ContentElement) -> DocumentOutline:
         page_end=3,
         elements=list(elements),
     )
-    return DocumentOutline(title="Widget Manual", doc_id="doc1", total_pages=4, sections=[section])
+    return DocumentOutline(title="Widget Manual", rev_id="doc1", total_pages=4, sections=[section])
 
 
 def _manifest(*entries: tuple[str, str, str]) -> dict[str, Any]:

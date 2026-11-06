@@ -59,7 +59,7 @@ class ParseResult:
     """Output of :func:`parse_pdf_to_graph` — everything the store step needs."""
 
     graph: ChunkGraph
-    doc_id: str
+    rev_id: str
     resolved_backend: str
     #: What the Docling outline gave, read from the cached chunk graph on a
     #: resume. ``None`` when there is none (Textract, which has no hints, or a
@@ -102,8 +102,8 @@ class OcrRequiredError(Exception):
     to estimate from the page count instead.
     """
 
-    def __init__(self, doc_id: str, pages: int):
-        self.doc_id = doc_id
+    def __init__(self, rev_id: str, pages: int):
+        self.rev_id = rev_id
         self.pages = pages
         super().__init__(f"scanned PDF needs Textract OCR ({pages} pages)")
 
@@ -116,17 +116,17 @@ class BackendUnavailableError(Exception):
     """Raised when the requested parse backend cannot run in this process."""
 
 
-def textract_blocks_cache(pdf_path: Path, doc_id: str | None) -> tuple[str, Path]:
-    """The doc_id and the cached-blocks path a Textract run resumes from."""
+def textract_blocks_cache(pdf_path: Path, rev_id: str | None) -> tuple[str, Path]:
+    """The rev_id and the cached-blocks path a Textract run resumes from."""
     from datasheet_rag.config import get_settings
     from datasheet_rag.docling_parser import content_hash
 
-    did = doc_id or content_hash(pdf_path)
+    did = rev_id or content_hash(pdf_path)
     return did, get_settings().output_dir / f"{did}_blocks.json"
 
 
 def check_backend_prerequisites(
-    pdf_path: Path, *, backend: str, doc_id: str | None, force: bool
+    pdf_path: Path, *, backend: str, rev_id: str | None, force: bool
 ) -> None:
     """Fail before any work when *backend* cannot run here (GH #65).
 
@@ -139,7 +139,7 @@ def check_backend_prerequisites(
 
     if backend != "textract" or get_settings().s3_bucket:
         return
-    if not force and textract_blocks_cache(pdf_path, doc_id)[1].exists():
+    if not force and textract_blocks_cache(pdf_path, rev_id)[1].exists():
         return
     raise BackendUnavailableError(
         "The textract backend needs S3, but no bucket is configured — set "
@@ -151,7 +151,7 @@ def check_backend_prerequisites(
 def parse_pdf_to_graph(
     pdf_path: Path,
     *,
-    doc_id: str | None = None,
+    rev_id: str | None = None,
     backend: str = "docling",
     skip_figures: bool = False,
     upload_figures: bool = False,
@@ -167,8 +167,8 @@ def parse_pdf_to_graph(
 
     Runs the same steps as ``rag ingest`` up to (but not including) embed /
     store: detect backend, Docling/Textract layout analysis, figure cropping,
-    and multi-scale chunking. Intermediate artefacts (``{doc_id}_outline.json``,
-    ``{doc_id}_blocks.json``, ``{doc_id}_chunks.json``) are cached under
+    and multi-scale chunking. Intermediate artefacts (``{rev_id}_outline.json``,
+    ``{rev_id}_blocks.json``, ``{rev_id}_chunks.json``) are cached under
     ``settings.output_dir`` and reused unless ``force`` is set — which also
     empties the document's page render cache, so --force redoes every step
     rather than reusing pages a previous (possibly interrupted) run left.
@@ -247,8 +247,8 @@ def parse_pdf_to_graph(
         from datasheet_rag.docling_parser import convert_pdf
         from datasheet_rag.figures import FigureRegion
 
-        did = doc_id or content_hash(pdf_path)
-        _detail(f"doc_id = [cyan]{did}[/]")
+        did = rev_id or content_hash(pdf_path)
+        _detail(f"rev_id = [cyan]{did}[/]")
         save_pdf_locally(pdf_path, did)
 
         chunks_path = settings.output_dir / f"{did}_chunks.json"
@@ -268,13 +268,14 @@ def parse_pdf_to_graph(
                     f"[yellow]Resuming — loading cached layout analysis[/] → "
                     f"[cyan]{outline_path}[/]"
                 )
-                with open(outline_path) as f:
-                    cached = json.load(f)
+                from datasheet_rag import cache_files
+
+                cached = cache_files.load(outline_path)
                 outline = DocumentOutline.from_dict(cached["outline"])
                 figure_regions = [FigureRegion(**r) for r in cached["figure_regions"]]
             else:
                 outline, figure_regions = convert_pdf(
-                    pdf_path, doc_id=did, accurate_tables=accurate_tables
+                    pdf_path, rev_id=did, accurate_tables=accurate_tables
                 )
                 outline_path.parent.mkdir(parents=True, exist_ok=True)
                 with open(outline_path, "w") as f:
@@ -305,7 +306,7 @@ def parse_pdf_to_graph(
                 manifest = extract_figures_from_regions(
                     pdf_path=pdf_path,
                     regions=figure_regions,
-                    doc_id=did,
+                    rev_id=did,
                     output_dir=figures_out,
                     dpi=dpi,
                     image_format="png",
@@ -341,7 +342,7 @@ def parse_pdf_to_graph(
             wait_for_job,
         )
 
-        did_probe, blocks_path_probe = textract_blocks_cache(pdf_path, doc_id)
+        did_probe, blocks_path_probe = textract_blocks_cache(pdf_path, rev_id)
         have_cached_blocks = blocks_path_probe.exists() and not force
 
         if not allow_ocr and not have_cached_blocks:
@@ -353,7 +354,7 @@ def parse_pdf_to_graph(
             did = did_probe
             blocks_path = blocks_path_probe
             _step("Textract layout analysis (OCR)")
-            _detail(f"doc_id = [cyan]{did}[/]")
+            _detail(f"rev_id = [cyan]{did}[/]")
             _detail(f"[yellow]Resuming — loading cached blocks[/] → [cyan]{blocks_path}[/]")
             blocks = load_blocks(blocks_path)
             _detail(f"{len(blocks)} blocks (cached)")
@@ -361,8 +362,8 @@ def parse_pdf_to_graph(
             from datasheet_rag.storage import upload_pdf
 
             _step("Upload PDF to S3")
-            did, s3_key = upload_pdf(pdf_path, doc_id=doc_id)
-            _detail(f"doc_id = [cyan]{did}[/]")
+            did, s3_key = upload_pdf(pdf_path, rev_id=rev_id)
+            _detail(f"rev_id = [cyan]{did}[/]")
             _detail(f"s3_key = {s3_key}")
 
             blocks_path = settings.output_dir / f"{did}_blocks.json"
@@ -385,7 +386,7 @@ def parse_pdf_to_graph(
             manifest = extract_figures(
                 pdf_path=pdf_path,
                 blocks=blocks,
-                doc_id=did,
+                rev_id=did,
                 output_dir=figures_out,
                 dpi=dpi,
                 image_format="png",
@@ -410,7 +411,7 @@ def parse_pdf_to_graph(
             config = SplitterConfig(micro_max_tokens=micro_tokens, meso_max_tokens=meso_tokens)
             graph = run_chunking_pipeline(
                 blocks,
-                doc_id=did,
+                rev_id=did,
                 figure_manifest=figure_manifest_dict,
                 config=config,
                 summarizer_mode="extractive",
@@ -430,7 +431,7 @@ def parse_pdf_to_graph(
 
     return ParseResult(
         graph=graph,
-        doc_id=did,
+        rev_id=did,
         resolved_backend=resolved_backend,
         title_hints=title_hints,
         figure_count=figure_count,

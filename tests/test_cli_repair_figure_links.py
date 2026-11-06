@@ -26,13 +26,13 @@ DOC = "f" * 64
 def _figure_chunk(index: int, page: int, text: str = "[Figure]") -> Chunk:
     return Chunk(
         id=f"{DOC}:L2:{index}",
-        doc_id=DOC,
+        rev_id=DOC,
         level=ChunkLevel.MICRO,
         text=text,
         context_text=text,
         token_count=2,
         metadata=ChunkMetadata(
-            doc_id=DOC,
+            rev_id=DOC,
             doc_title="Widget Manual",
             page_numbers=[page],
             layout_type=LayoutType.FIGURE,

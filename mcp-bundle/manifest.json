@@ -41,7 +41,7 @@
   "tools": [
     {
       "name": "search",
-      "description": "Hybrid (BM25 + dense vector), keyword-only, or vector-only search over RAG chunks"
+      "description": "Hybrid (BM25 + dense vector), keyword-only, or vector-only search over RAG chunks, in the newest revision of each document unless all_revisions is set"
     },
     {
       "name": "get_chunk",
@@ -61,7 +61,11 @@
     },
     {
       "name": "list_documents",
-      "description": "List documents in the current project, optionally filtered by group/MPN/manufacturer or any registered metadata field"
+      "description": "List documents in the current project (one row per document, its newest revision), optionally filtered by MPN, manufacturer or any registered metadata field"
+    },
+    {
+      "name": "list_revisions",
+      "description": "List the revisions (PDFs) of a document, newest first"
     },
     {
       "name": "list_metadata_fields",
@@ -69,7 +73,7 @@
     },
     {
       "name": "get_document_metadata",
-      "description": "Fetch the metadata sidecar for a document (metadata fields such as MPN and manufacturer, tags, and per-project fields such as subsystem)"
+      "description": "Fetch a document's metadata (fields such as MPN and manufacturer, tags, per-project fields such as subsystem) and its revisions"
     },
     {
       "name": "stats",

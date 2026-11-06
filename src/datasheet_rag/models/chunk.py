@@ -38,7 +38,7 @@ IMAGE_LAYOUT_TYPES: frozenset[LayoutType] = frozenset({LayoutType.FIGURE, Layout
 class ChunkMetadata(BaseModel):
     """Metadata attached to every chunk for context-aware embedding."""
 
-    doc_id: str
+    rev_id: str
     doc_title: str = ""
     chapter_title: str = ""
     section_title: str = ""
@@ -69,8 +69,8 @@ class Chunk(BaseModel):
     (prev/next for sequential reading) and cross-links to chapter roots.
     """
 
-    id: str = Field(description="Unique chunk ID (doc_id:level:index)")
-    doc_id: str
+    id: str = Field(description="Unique chunk ID (rev_id:level:index)")
+    rev_id: str
     level: ChunkLevel
 
     # Content
@@ -114,7 +114,7 @@ class Chunk(BaseModel):
 class ChunkGraph(BaseModel):
     """The full chunk graph for a document — serializable for debugging."""
 
-    doc_id: str
+    rev_id: str
     chunks: dict[str, Chunk] = Field(default_factory=dict, description="chunk_id → Chunk")
     #: The title hints of the Docling outline this graph was chunked from.
     #: ``None`` when it was not chunked from one (Textract, or a cached graph

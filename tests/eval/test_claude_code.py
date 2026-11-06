@@ -31,7 +31,7 @@ NEED = Need(
     category="conceptual",
     answer="Yes: a hardware reset is required following power-up.",
     grading={"type": "text", "must_mention": ["required"], "must_not": []},
-    doc_id=DOC,
+    rev_id=DOC,
     pages=[33, 58],
 )
 
@@ -144,7 +144,7 @@ def test_each_condition_gets_only_its_tools(tmp_path: Path) -> None:
             assert argv[argv.index("--allowedTools") + 1] == "mcp__datasheet-rag"
 
 
-def test_b_citations_map_file_names_to_doc_ids() -> None:
+def test_b_citations_map_file_names_to_rev_ids() -> None:
     final = to_final(
         {
             "answer": "x",
@@ -156,7 +156,7 @@ def test_b_citations_map_file_names_to_doc_ids() -> None:
             ],
         }
     )
-    assert [(c.doc_id, c.page) for c in final.citations] == [
+    assert [(c.rev_id, c.page) for c in final.citations] == [
         ("6222576e", 33),
         ("6222576e", 58),
         (DOC, 59),
@@ -272,11 +272,11 @@ def test_probe_resolves_the_alias(tmp_path: Path) -> None:
 
 def test_workspace_copies_pdfs_once_and_pins_the_project(tmp_path: Path) -> None:
     ws = Workspace(tmp_path)
-    docs = [{"doc_id": DOC, "mpn": "LAN8720A", "title": None}]
+    docs = [{"rev_id": DOC, "mpn": "LAN8720A", "title": None}]
     loads: list[str] = []
 
-    def load(doc_id: str) -> bytes:
-        loads.append(doc_id)
+    def load(rev_id: str) -> bytes:
+        loads.append(rev_id)
         return b"%PDF-1.4"
 
     assert ws.prepare(docs, load, "netdaq") == 1

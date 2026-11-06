@@ -99,7 +99,7 @@ def content_hash(pdf_path: Path) -> str:
 def convert_pdf(
     pdf_path: Path,
     *,
-    doc_id: str = "",
+    rev_id: str = "",
     accurate_tables: bool = False,
     page_range: tuple[int, int] | None = None,
 ) -> tuple[DocumentOutline, list[FigureRegion]]:
@@ -164,7 +164,7 @@ def convert_pdf(
 
     regions = _build_figure_regions(doc)
     skip_figure_ids, regions = _dedup_repeating_figures(regions, pdf_path, len(doc.pages))
-    outline = _build_outline(doc, doc_id=doc_id, skip_figure_ids=skip_figure_ids)
+    outline = _build_outline(doc, rev_id=rev_id, skip_figure_ids=skip_figure_ids)
     outline.pdf_meta_title = _pdf_embedded_title(pdf_path)
     return outline, regions
 
@@ -184,7 +184,7 @@ def reconvert_tables_in_range(
     pdf_path: Path,
     outline: DocumentOutline,
     *,
-    doc_id: str,
+    rev_id: str,
     page_range: tuple[int, int],
     accurate_tables: bool = True,
 ) -> list[dict[str, Any]]:
@@ -217,7 +217,7 @@ def reconvert_tables_in_range(
     ]
 
     partial_outline, _regions = convert_pdf(
-        pdf_path, doc_id=doc_id, accurate_tables=accurate_tables, page_range=page_range
+        pdf_path, rev_id=rev_id, accurate_tables=accurate_tables, page_range=page_range
     )
     fresh_tables: list[ContentElement] = [
         el
@@ -631,7 +631,7 @@ def _ensure_section(
 
 def _build_outline(
     doc: Any,
-    doc_id: str,
+    rev_id: str,
     skip_figure_ids: set[str] | None = None,
 ) -> DocumentOutline:
     """Walk the DoclingDocument in reading order and build a DocumentOutline."""
@@ -870,7 +870,7 @@ def _build_outline(
 
     return DocumentOutline(
         title=doc_title,
-        doc_id=doc_id,
+        rev_id=rev_id,
         total_pages=len(doc.pages),
         running_header=running_header,
         sections=sections,

@@ -100,14 +100,14 @@ class PdfText:
         self._pages: dict[str, list[str]] = {}
         self._lock = Lock()
 
-    def pages(self, doc_id: str) -> list[str]:
+    def pages(self, rev_id: str) -> list[str]:
         with self._lock:
-            cached = self._pages.get(doc_id)
+            cached = self._pages.get(rev_id)
         if cached is not None:
             return cached
         with tempfile.TemporaryDirectory() as tmp:
             pdf = Path(tmp) / "doc.pdf"
-            pdf.write_bytes(self._load_pdf(doc_id))
+            pdf.write_bytes(self._load_pdf(rev_id))
             out = subprocess.run(
                 ["pdftotext", "-layout", "-enc", "UTF-8", str(pdf), "-"],
                 check=True,
@@ -118,7 +118,7 @@ class PdfText:
         if pages and not pages[-1].strip():
             pages.pop()
         with self._lock:
-            self._pages[doc_id] = pages
+            self._pages[rev_id] = pages
         return pages
 
 
@@ -137,7 +137,7 @@ def _tool(name: str, description: str, properties: dict[str, Any], required: lis
 class PdfTools:
     def __init__(self, documents: list[dict[str, Any]], text: PdfText):
         self._docs = documents
-        self._ids = {d["doc_id"] for d in documents}
+        self._ids = {d["rev_id"] for d in documents}
         self._text = text
 
     def guidance(self) -> str:
@@ -149,11 +149,11 @@ class PdfTools:
         )
 
     def specs(self) -> list[Block]:
-        doc = {"type": "string", "description": "A doc_id from list_pdfs."}
+        doc = {"type": "string", "description": "A rev_id from list_pdfs."}
         return [
             _tool(
                 "list_pdfs",
-                "List the project's PDF files: doc_id, title, part number, "
+                "List the project's PDF files: rev_id, title, part number, "
                 "manufacturer and page count.",
                 {},
                 [],
@@ -163,8 +163,8 @@ class PdfTools:
                 "Search one PDF's text, like grep. Case-insensitive regular "
                 f"expression. Returns up to {MAX_FIND_HITS} matching lines, each "
                 "with its page number.",
-                {"doc_id": doc, "pattern": {"type": "string"}},
-                ["doc_id", "pattern"],
+                {"rev_id": doc, "pattern": {"type": "string"}},
+                ["rev_id", "pattern"],
             ),
             _tool(
                 "read_pages",
@@ -172,21 +172,21 @@ class PdfTools:
                 f"{MAX_READ_PAGES} pages) of one PDF, extracted with the page "
                 "layout kept.",
                 {
-                    "doc_id": doc,
+                    "rev_id": doc,
                     "first": {"type": "integer"},
                     "last": {"type": "integer"},
                 },
-                ["doc_id", "first", "last"],
+                ["rev_id", "first", "last"],
             ),
         ]
 
     def call(self, name: str, args: dict[str, Any]) -> tuple[list[Block], bool]:
         if name == "list_pdfs":
             return [{"text": json.dumps(self._docs, indent=1)}], False
-        doc_id = str(args.get("doc_id", ""))
-        if doc_id not in self._ids:
-            return [{"text": f"no PDF with doc_id {doc_id!r}; call list_pdfs"}], True
-        pages = self._text.pages(doc_id)
+        rev_id = str(args.get("rev_id", ""))
+        if rev_id not in self._ids:
+            return [{"text": f"no PDF with rev_id {rev_id!r}; call list_pdfs"}], True
+        pages = self._text.pages(rev_id)
         if name == "find_text":
             try:
                 rx = re.compile(str(args.get("pattern", "")), re.IGNORECASE)
@@ -237,7 +237,7 @@ class RagTools:
     def guidance(self) -> str:
         return (
             "The project's datasheets and application notes are indexed in "
-            "datasheet-rag; use its tools. Every chunk result carries a doc_id "
+            "datasheet-rag; use its tools. Every chunk result carries a rev_id "
             "and a 1-based PDF page.\n\n"
             f"Server instructions:\n{self._server.instructions}"
         )
@@ -306,10 +306,10 @@ _SUBMIT = _tool(
             "items": {
                 "type": "object",
                 "properties": {
-                    "doc_id": {"type": "string"},
+                    "rev_id": {"type": "string"},
                     "page": {"type": "integer", "description": "1-based PDF page."},
                 },
-                "required": ["doc_id", "page"],
+                "required": ["rev_id", "page"],
             },
         },
     },
@@ -324,7 +324,7 @@ _SYSTEM = (
     "{guidance}\n\n"
     "When you are done, call submit_answer once. Put your full answer in "
     "`answer`. When the question asks for one number, also fill `value` and "
-    "`unit`. List in `citations` every document page (doc_id and page) your "
+    "`unit`. List in `citations` every document page (rev_id and page) your "
     "answer rests on."
 )
 

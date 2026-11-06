@@ -20,12 +20,12 @@ EMBED_DIM = 4
 def _chunk(cid: str, text: str, *, pages: list[int], level: ChunkLevel) -> Chunk:
     return Chunk(
         id=cid,
-        doc_id="doc1",
+        rev_id="doc1",
         level=level,
         text=text,
         context_text=text,
         token_count=len(text.split()),
-        metadata=ChunkMetadata(doc_id="doc1", page_numbers=pages, layout_type=LayoutType.TABLE),
+        metadata=ChunkMetadata(rev_id="doc1", page_numbers=pages, layout_type=LayoutType.TABLE),
     )
 
 
@@ -75,7 +75,7 @@ def _item(**kw: object) -> GoldenItem:
     base: dict[str, object] = {
         "question": "VBUS absolute maximum",
         "category": "table_spec",
-        "doc_id": "doc1",
+        "rev_id": "doc1",
         "source": "mined",
         "evidence": [Evidence(page=52, quote="VBUS   Voltage on VBUS   -0.3   5.25   V")],
     }
@@ -98,13 +98,13 @@ def test_a_figure_chunk_is_matched_on_its_description(conn) -> None:
     # A drawing is stored as "[Figure]" text; its description is what search sees.
     fig = Chunk(
         id="doc1:L2:20",
-        doc_id="doc1",
+        rev_id="doc1",
         level=ChunkLevel.MICRO,
         text="[Figure]",
         context_text="[Figure]",
         token_count=1,
         figure_description="Pinout shows 8 pins: DAT2, CD/DAT3, CMD, VDD, CLK, VSS, DAT0, DAT1.",
-        metadata=ChunkMetadata(doc_id="doc1", page_numbers=[70], layout_type=LayoutType.FIGURE),
+        metadata=ChunkMetadata(rev_id="doc1", page_numbers=[70], layout_type=LayoutType.FIGURE),
     )
     insert_chunks(conn, [fig], vectors={fig.id: [1.0, 0.0, 0.0, 0.0]})
     item = _item(evidence=[Evidence(page=70, quote="DAT2 CD/DAT3 CMD VDD CLK VSS DAT0 DAT1")])
@@ -136,6 +136,6 @@ def test_harness_reports_evidence_the_store_lost(conn) -> None:
 
 
 def test_harness_skips_unanswerable_items(conn) -> None:
-    items = [_item(), _item(question="DF2S30FS clamp", doc_id=None, answerable=False, evidence=[])]
+    items = [_item(), _item(question="DF2S30FS clamp", rev_id=None, answerable=False, evidence=[])]
     report = run_eval(conn, EvalSet(items=items), RunConfig(mode="keyword", k=5, ks=(1,)))
     assert [o.question for o in report.outcomes] == ["VBUS absolute maximum"]

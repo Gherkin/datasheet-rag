@@ -31,7 +31,7 @@ class Concept(BaseModel):
     chunk_ids: list[str] = Field(default_factory=list)
 
     # Which documents this concept appears in
-    doc_ids: list[str] = Field(default_factory=list)
+    rev_ids: list[str] = Field(default_factory=list)
 
     # Related concepts (concept_id → similarity score)
     related_concepts: dict[str, float] = Field(default_factory=dict)
