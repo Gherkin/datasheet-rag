@@ -467,7 +467,8 @@ def _apply_group(
         conn.execute("RELEASE apply_group")
         return RuleGroup("conflict", ids, detail=str(e))
     conn.execute("RELEASE apply_group")
-    return RuleGroup("merged", ids, target=target, order=order, kept_order=bool(multi))
+    # apply_rule builds the final order and kept_order once all rounds are done.
+    return RuleGroup("merged", ids, target=target)
 
 
 __all__ = [
