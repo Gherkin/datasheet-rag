@@ -460,9 +460,12 @@ class LocalBackend(RagBackend):
             wanted = self._document_id(new_revision_of) if new_revision_of is not None else None
             if wanted is not None and wanted != existing:
                 short = (rev_id or "")[:12]
+                add = f"rag revisions add {revs.format_document_id(wanted)} {short}"
+                # add refuses a revision that has siblings: unlink it first.
+                if len(revs.revisions_of(conn, existing)) > 1:
+                    add = f"rag revisions unlink {short}, then {add}"
                 raise revs.RevisionError(
-                    f"{short} is already stored, as a revision of {ref}; move it with "
-                    f"rag revisions add {revs.format_document_id(wanted)} {short}"
+                    f"{short} is already stored, as a revision of {ref}; move it with {add}"
                 )
             return IngestLink(action="kept", document_id=ref)
         if new_revision_of is not None:

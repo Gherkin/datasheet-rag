@@ -1491,7 +1491,7 @@ def _rev_ids_for(be: RagBackend, ref: str, *, all_revisions: bool) -> list[str]:
 
 def _list_revisions(be: RagBackend, ref: str) -> DocumentRevisions:
     try:
-        return be.list_revisions(be.resolve_ref(ref))
+        return be.list_revisions(ref)
     except ValueError as e:
         raise click.ClickException(str(e)) from e
 
@@ -4330,8 +4330,11 @@ def metadata_cmd(
     # would silently turn every `rag metadata <doc>` into a write. The scalar
     # options are tested against None, not truthiness: `--title ''` is an
     # explicit request to clear the field, not an absent option.
-    scalars = (doc_title, manufacturer, subsystem, doc_type, revision_label)
-    is_read = all(v is None for v in scalars) and not any(
+    #
+    # document_write: what the user typed that lands on the whole document
+    # unless --this-revision says otherwise (the title and the revision label
+    # are always the revision's own).
+    document_write = any(
         (
             add_projects,
             remove_projects,
@@ -4341,8 +4344,12 @@ def metadata_cmd(
             clear_tags,
             field_items,
             unset_fields,
+            manufacturer is not None,
+            subsystem is not None,
+            doc_type is not None,
         )
     )
+    is_read = not document_write and doc_title is None and revision_label is None
     if is_read:
         if fields_project is not None:
             raise click.UsageError("--project names where to write a per-project field; set one")
@@ -4360,25 +4367,6 @@ def metadata_cmd(
         raise click.UsageError(
             "projects belong to the whole document; drop --this-revision to change them"
         )
-    # What the user typed that lands on the whole document unless
-    # --this-revision says otherwise (the title and the revision label are
-    # always the revision's own). Read before .rag.toml fills anything in.
-    document_write = any(
-        (
-            add_projects,
-            remove_projects,
-            mpn,
-            mpn_aliases,
-            tags,
-            clear_tags,
-            field_items,
-            unset_fields,
-            manufacturer is not None,
-            subsystem is not None,
-            doc_type is not None,
-        )
-    )
-
     fields: dict[str, Any] = _merge_shortcuts(
         _parse_field_items(field_items),
         _shortcut_fields(

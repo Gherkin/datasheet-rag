@@ -80,7 +80,6 @@ from datasheet_rag.backend import (
 from datasheet_rag.config import get_settings
 from datasheet_rag.models.chunk import IMAGE_LAYOUT_TYPES, ChunkLevel, LayoutType
 from datasheet_rag.store import DocMetadata, SearchFilters, SearchResult
-from datasheet_rag.store.documents import parse_document_ref
 from datasheet_rag.store.fields import MetadataFieldError, check_filter_fields
 
 # ---------------------------------------------------------------------------
@@ -499,10 +498,8 @@ def _search_impl(
         _check_filter_fields(be, fields)
 
     rev_ids: list[str] | None = None
-    if rev_id and parse_document_ref(rev_id) is not None:
+    if rev_id:
         rev_ids = be.rev_ids_for(rev_id, all_revisions=all_revisions)
-    elif rev_id:
-        rev_ids = [rev_id]
     filters = SearchFilters(
         rev_ids=rev_ids,
         all_revisions=all_revisions,
@@ -849,8 +846,8 @@ def _get_figure_impl(
 
 def _pdf_rev_id(be: RagBackend, rev_id: str) -> str:
     """The revision a PDF-bound tool works on: a document (``D12``) means its
-    newest revision; a rev_id is used as given."""
-    return be.resolve_rev_id(rev_id) if parse_document_ref(rev_id) is not None else rev_id
+    newest revision; a rev_id prefix becomes the full rev_id."""
+    return be.resolve_rev_id(rev_id)
 
 
 def _stats_impl(
