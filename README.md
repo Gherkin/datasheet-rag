@@ -445,7 +445,16 @@ rag revisions rule clear
 
 The rule is an expression over registered, document-scoped fields, with `AND`, `OR` and parentheses (`AND` binds tighter). When a PDF is ingested without `--new-revision-of`, the field values the ingest sets are compared with every document's values. A field matches only when both have it and the values are equal (case-insensitive); a list field must hold the same values, not just share one. One matching document: the PDF becomes its newest revision. None: a new document. Two or more: the ingest stops before parsing and names them.
 
-There is no default rule. `manufacturer + mpn + doc_type` would fold together documents that are not revisions of each other (one Intel CPU has hundreds of datasheets, errata and guides with the same values). The ingest output always says what happened (`linked to D12 as newest revision (rule: intel-id)`, `new document D14`), so a wrong link is seen at once and fixed with `rag revisions unlink`. Setting or changing the rule does not relink documents already stored.
+There is no default rule. `manufacturer + mpn + doc_type` would fold together documents that are not revisions of each other (one Intel CPU has hundreds of datasheets, errata and guides with the same values). The ingest output always says what happened (`linked to D12 as newest revision (rule: intel-id)`, `new document D14`), so a wrong link is seen at once and fixed with `rag revisions unlink`. Setting or changing the rule does not relink documents already stored on its own.
+
+To relink stored documents by the rule, run:
+
+```
+rag revisions apply-rule --dry-run   # print what would be linked
+rag revisions apply-rule
+```
+
+Matching works as at ingest. A group of matching documents is linked into one only when every pair in the group matches (a chain where A matches B and B matches C, but A does not match C, is skipped), at most one of them already has several revisions, and no field holds different values in two of them. Skipped groups are listed with the reason. The order of a linked document is a guess: a document that already had several revisions keeps its order and the other PDFs go on top, the latest ingested as newest; otherwise all are ordered by ingest time. Ingest time is when the PDF was first ingested into this store, not when it was published. Every linked document is listed so you can check its order and fix it with `rag revisions move`.
 
 ## Usage
 

@@ -350,4 +350,16 @@ def test_remote_backend_round_trips_every_revision_call(
     assert len(rb.list_documents(all_revisions=True).documents) == 2
     assert len(rb.list_docs(all_revisions=True)) == 2
     assert rb.unlink_revision("rev_b").document_id != a
+    # The unlinked copy keeps intel-id=7, so the rule links it back.
+    dry = rb.apply_identity_rule(dry_run=True)
+    assert dry.dry_run and dry.rule == "intel-id"
+    assert [(g.status, g.document_id) for g in dry.groups] == [("merged", a)]
+    assert len(rb.list_documents().documents) == 2
+    done = rb.apply_identity_rule()
+    assert {r.rev_id for r in done.groups[0].revisions} == {"rev_a", "rev_b"}
+    assert len(rb.list_documents().documents) == 1
     assert rb.set_identity_rule(None) is None
+    from datasheet_rag.backend.base import RagServerError
+
+    with pytest.raises(RagServerError, match="no identity rule"):
+        rb.apply_identity_rule()

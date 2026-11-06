@@ -25,6 +25,7 @@ from datasheet_rag.backend.base import (
     SearchMode,
 )
 from datasheet_rag.backend.models import (
+    ApplyRuleResult,
     ChunkPage,
     DocPage,
     DocSummary,
@@ -36,6 +37,7 @@ from datasheet_rag.backend.models import (
     IngestResult,
     MetadataPatch,
     RevisionSummary,
+    RuleGroupResult,
     StatsResult,
     TitleContext,
 )
@@ -82,7 +84,12 @@ from datasheet_rag.store.fields import (
     field_scopes,
     normalize_field_patch,
 )
-from datasheet_rag.store.identity import get_identity_rule, match_documents, set_identity_rule
+from datasheet_rag.store.identity import (
+    apply_rule,
+    get_identity_rule,
+    match_documents,
+    set_identity_rule,
+)
 from datasheet_rag.store.metadata import (
     check_write,
     join_projects,
@@ -370,10 +377,16 @@ class LocalBackend(RagBackend):
 
     # -- revisions -----------------------------------------------------
     def _revisions(self, document_id: int) -> DocumentRevisions:
-        conn = self._get_conn()
-        ids = revs.revisions_of(conn, document_id)
+        return DocumentRevisions(
+            document_id=revs.format_document_id(document_id),
+            revisions=self._revision_summaries(revs.revisions_of(self._get_conn(), document_id)),
+        )
+
+    def _revision_summaries(self, ids: Sequence[str]) -> list[RevisionSummary]:
+        """Summaries of ``ids`` (newest first) in that order."""
         if not ids:
-            return DocumentRevisions(document_id=revs.format_document_id(document_id))
+            return []
+        conn = self._get_conn()
         metas = {m.rev_id: m for m in (get_metadata(conn, d) for d in ids) if m is not None}
         counts = {
             r[0]: (int(r[1]), r[2], r[3])
@@ -398,7 +411,7 @@ class LocalBackend(RagBackend):
                     overrides=m.overrides if m else [],
                 )
             )
-        return DocumentRevisions(document_id=revs.format_document_id(document_id), revisions=out)
+        return out
 
     def list_revisions(self, ref: str) -> DocumentRevisions:
         return self._revisions(self._document_id(ref))
@@ -436,6 +449,35 @@ class LocalBackend(RagBackend):
         with self._write_lock:
             stored = set_identity_rule(self._get_conn(), rule)
         return str(stored) if stored is not None else None
+
+    def apply_identity_rule(self, *, dry_run: bool = False) -> ApplyRuleResult:
+        with self._write_lock:
+            conn = self._get_conn()
+            rule = get_identity_rule(conn)
+            if rule is None:
+                raise revs.RevisionError(
+                    "the store has no identity rule; set one with rag revisions rule set"
+                )
+            groups = apply_rule(conn, rule, dry_run=dry_run)
+            return ApplyRuleResult(
+                rule=str(rule),
+                dry_run=dry_run,
+                groups=[
+                    RuleGroupResult(
+                        status=g.status,
+                        documents=[revs.format_document_id(d) for d in g.document_ids],
+                        document_id=(
+                            revs.format_document_id(g.target)
+                            if g.target is not None and g.status == "merged"
+                            else None
+                        ),
+                        revisions=self._revision_summaries(g.order),
+                        kept_order=g.kept_order,
+                        detail=g.detail,
+                    )
+                    for g in groups
+                ],
+            )
 
     def plan_ingest_link(
         self,

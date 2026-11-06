@@ -1554,6 +1554,7 @@ def revisions_group() -> None:
         rag revisions move <rev_id> --below <rev_id>
         rag revisions unlink <rev_id>           # into a document of its own
         rag revisions rule set "intel-id OR (acme-pn AND doc_type)"
+        rag revisions apply-rule --dry-run      # relink stored documents by the rule
     """
 
 
@@ -1661,7 +1662,8 @@ def revisions_rule_group() -> None:
     matches only when both have it and the values are equal; for a list
     field, equal as a set. One match: the PDF becomes that document's newest
     revision. None: a new document. More than one: the ingest stops and
-    names them. Without a rule nothing links on its own.
+    names them. Without a rule nothing links on its own. Documents already
+    stored are relinked only by rag revisions apply-rule.
     """
 
 
@@ -1689,8 +1691,8 @@ def revisions_rule_set_cmd(expression: str, db_path: Path | None) -> None:
         raise click.ClickException(str(e)) from e
     console.print(f"[green]Identity rule set:[/] {rule}")
     console.print(
-        "  It applies to PDFs ingested from now on. Documents already stored are "
-        "not relinked; arrange those with rag revisions add / unlink."
+        "  It applies to PDFs ingested from now on. To relink the documents already "
+        "stored, run rag revisions apply-rule --dry-run, then rag revisions apply-rule."
     )
 
 
@@ -1700,6 +1702,66 @@ def revisions_rule_clear_cmd(db_path: Path | None) -> None:
     """Remove the identity rule. Stored links are kept."""
     _backend_for(db_path).set_identity_rule(None)
     console.print("[green]Identity rule cleared.[/] Revisions now link only by hand.")
+
+
+_SKIP_REASON = {
+    "chain": "not every pair matches",
+    "several": "more than one already has several revisions",
+    "conflict": "a field holds different values",
+}
+
+
+@revisions_group.command(
+    "apply-rule", short_help="Link stored documents that the identity rule matches."
+)
+@click.option("--dry-run", is_flag=True, help="Print what would be linked; change nothing.")
+@_db_option
+def revisions_apply_rule_cmd(dry_run: bool, db_path: Path | None) -> None:
+    """Check the identity rule against the stored documents and link the
+    ones that match.
+
+    Matching works as at ingest. A group of documents is linked into one
+    only when every pair in it matches, at most one of them already has
+    several revisions, and no field holds different values in two of them.
+    Other groups are listed and left as they are.
+
+    The new order is a guess: a document that already had several revisions
+    keeps its order, and the other PDFs go on top of it, the latest ingested
+    as newest. Every linked document is listed so you can check it, and fix
+    it with rag revisions move.
+    """
+    from datasheet_rag.backend.models import DocumentRevisions
+
+    try:
+        result = _backend_for(db_path).apply_identity_rule(dry_run=dry_run)
+    except ValueError as e:
+        raise click.ClickException(str(e)) from e
+    merged = [g for g in result.groups if g.status == "merged"]
+    skipped = [g for g in result.groups if g.status != "merged"]
+    verb = "Would link" if dry_run else "Linked"
+    console.print(f"Identity rule: {result.rule}")
+    if not result.groups:
+        console.print("No stored documents match each other. Nothing to link.")
+        return
+    console.print(f"[green]{verb} {len(merged)} group(s).[/] Skipped {len(skipped)}.")
+    for g in merged:
+        assert g.document_id is not None
+        others = [d for d in g.documents if d != g.document_id]
+        how = "keeps its order, the others on top" if g.kept_order else "ordered by ingest time"
+        console.print(f"\n{', '.join(others)} → {g.document_id} ({how})")
+        _print_revisions(DocumentRevisions(document_id=g.document_id, revisions=g.revisions))
+    for g in skipped:
+        console.print(
+            f"\n[yellow]Skipped[/] {', '.join(g.documents)}: {_SKIP_REASON[g.status]}. {g.detail}"
+        )
+    if merged:
+        console.print(
+            "\n[yellow]Check the order of each linked document above.[/] It comes from "
+            "ingest time, which is when a PDF was first ingested here, "
+            "not when it was published. Fix it with rag revisions move <rev_id> --below <rev_id>."
+        )
+    if dry_run:
+        console.print("\nDry run: nothing was changed. Run without --dry-run to link.")
 
 
 @get_group.command("text", short_help="Dump a document's extracted text.")
