@@ -1,4 +1,4 @@
-"""`_resolve_cached_doc_id` treats the user's prefix literally, not as a glob."""
+"""`_resolve_cached_rev_id` treats the user's prefix literally, not as a glob."""
 
 from __future__ import annotations
 
@@ -20,10 +20,10 @@ def cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def test_prefix_resolves(cache: Path) -> None:
-    assert cli._resolve_cached_doc_id("abc") == "abc123"
+    assert cli._resolve_cached_rev_id("abc") == "abc123"
 
 
 @pytest.mark.parametrize("pattern", ["*", "?", "a?c", "[a]"])
 def test_glob_characters_are_literal(cache: Path, pattern: str) -> None:
     with pytest.raises(click.ClickException, match="No cached"):
-        cli._resolve_cached_doc_id(pattern)
+        cli._resolve_cached_rev_id(pattern)

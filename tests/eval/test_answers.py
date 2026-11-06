@@ -33,7 +33,7 @@ def _needs(n: int) -> list[Need]:
             category="table_spec",
             answer="5.25 V",
             grading=G,
-            doc_id=DOC,
+            rev_id=DOC,
             pages=[7],
         )
         for i in range(n)
@@ -90,7 +90,7 @@ class FakeModel:
                 "answer": "5.25 V",
                 "value": 5.25,
                 "unit": "V",
-                "citations": [{"doc_id": DOC, "page": 7}],
+                "citations": [{"rev_id": DOC, "page": 7}],
             }
         use = {"toolUse": {"toolUseId": "u", "name": "submit_answer", "input": args}}
         return {
@@ -359,7 +359,7 @@ def _slow_agent(started: list[str]) -> Any:
         started.append(need.need_id)
         time.sleep(0.05)
         run.final = FinalAnswer(
-            answer="5.25 V", value=5.25, unit="V", citations=[Citation(doc_id=DOC, page=7)]
+            answer="5.25 V", value=5.25, unit="V", citations=[Citation(rev_id=DOC, page=7)]
         )
 
     return agent

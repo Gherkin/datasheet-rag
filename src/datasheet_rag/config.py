@@ -346,7 +346,7 @@ class Settings(BaseSettings):
         default=None,  # resolved by _resolve_storage_path
         validate_default=True,
         description=(
-            "Directory holding source PDFs, named ``<doc_id>.pdf`` (doc_id "
+            "Directory holding source PDFs, named ``<rev_id>.pdf`` (rev_id "
             "is a content hash, so the filename doubles as the lookup key — "
             "no scanning required). Defaults to ``<rag_home>/pdfs``."
         ),
@@ -356,7 +356,7 @@ class Settings(BaseSettings):
         validate_default=True,
         description=(
             "Directory holding cropped figure images, one subdirectory per "
-            "doc_id. Defaults to ``<rag_home>/figures``."
+            "rev_id. Defaults to ``<rag_home>/figures``."
         ),
     )
 

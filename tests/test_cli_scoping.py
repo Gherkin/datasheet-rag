@@ -22,10 +22,10 @@ from datasheet_rag.store.schema import connect
 from datasheet_rag.store.sqlite import insert_chunks
 
 
-def _chunk(chunk_id: str, doc_id: str) -> Chunk:
+def _chunk(chunk_id: str, rev_id: str) -> Chunk:
     md = ChunkMetadata(
-        doc_id=doc_id,
-        doc_title=f"Doc {doc_id}",
+        rev_id=rev_id,
+        doc_title=f"Doc {rev_id}",
         chapter_title="",
         section_title="",
         page_numbers=[1],
@@ -34,7 +34,7 @@ def _chunk(chunk_id: str, doc_id: str) -> Chunk:
     )
     return Chunk(
         id=chunk_id,
-        doc_id=doc_id,
+        rev_id=rev_id,
         level=ChunkLevel.MACRO,
         text="some text",
         context_text="some text",

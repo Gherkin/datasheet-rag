@@ -124,17 +124,17 @@ class NeedsReembedBody(BaseModel):
 
 class AddRevisionBody(BaseModel):
     document: str
-    doc_id: str
+    rev_id: str
 
 
 class MoveRevisionBody(BaseModel):
-    doc_id: str
+    rev_id: str
     above: str | None = None
     below: str | None = None
 
 
 class UnlinkRevisionBody(BaseModel):
-    doc_id: str
+    rev_id: str
 
 
 class IdentityRuleBody(BaseModel):
@@ -142,7 +142,7 @@ class IdentityRuleBody(BaseModel):
 
 
 class LinkPlanBody(BaseModel):
-    doc_id: str | None = None
+    rev_id: str | None = None
     metadata: MetadataPatch | None = None
     new_revision_of: str | None = None
 
@@ -181,7 +181,7 @@ class FigureDescriptionBody(BaseModel):
 
 
 class DescribeFiguresBody(BaseModel):
-    doc_id: str | None = None
+    rev_id: str | None = None
     project_id: str | None = None
     missing_only: bool = True
     limit: int | None = None
@@ -323,11 +323,11 @@ def build_app() -> FastAPI:
     # -- chunks ----------------------------------------------------------
     @app.get("/chunks/count", dependencies=dep)
     def chunks_count(
-        doc_id: str | None = None,
+        rev_id: str | None = None,
         project_id: str | None = None,
         be: LocalBackend = Depends(get_backend),
     ) -> dict[str, Any]:
-        return {"count": be.count_chunks(doc_id=doc_id, project_id=project_id)}
+        return {"count": be.count_chunks(rev_id=rev_id, project_id=project_id)}
 
     @app.get("/chunks/{chunk_id}/children", dependencies=dep)
     def chunk_children(
@@ -358,10 +358,10 @@ def build_app() -> FastAPI:
     def documents_titles(be: LocalBackend = Depends(get_backend)) -> dict[str, Any]:
         return {"titles": be.get_doc_titles()}
 
-    @app.get("/documents/resolve/{doc_id}", dependencies=dep)
-    def documents_resolve(doc_id: str, be: LocalBackend = Depends(get_backend)) -> dict[str, Any]:
-        # A D12 resolves to its newest revision; a doc_id prefix to its document.
-        return {"doc_id": be.resolve_doc_id(doc_id), "document_id": be.resolve_document(doc_id)}
+    @app.get("/documents/resolve/{rev_id}", dependencies=dep)
+    def documents_resolve(rev_id: str, be: LocalBackend = Depends(get_backend)) -> dict[str, Any]:
+        # A D12 resolves to its newest revision; a rev_id prefix to its document.
+        return {"rev_id": be.resolve_rev_id(rev_id), "document_id": be.resolve_document(rev_id)}
 
     @app.get("/documents/{ref}/revisions", dependencies=dep)
     def document_revisions(ref: str, be: LocalBackend = Depends(get_backend)) -> dict[str, Any]:
@@ -372,13 +372,13 @@ def build_app() -> FastAPI:
     def revisions_add(
         body: AddRevisionBody, be: LocalBackend = Depends(get_backend)
     ) -> dict[str, Any]:
-        return be.add_revision(body.document, body.doc_id).model_dump(mode="json")
+        return be.add_revision(body.document, body.rev_id).model_dump(mode="json")
 
     @app.post("/revisions/move", dependencies=ingest_dep)
     def revisions_move(
         body: MoveRevisionBody, be: LocalBackend = Depends(get_backend)
     ) -> dict[str, Any]:
-        return be.move_revision(body.doc_id, above=body.above, below=body.below).model_dump(
+        return be.move_revision(body.rev_id, above=body.above, below=body.below).model_dump(
             mode="json"
         )
 
@@ -386,7 +386,7 @@ def build_app() -> FastAPI:
     def revisions_unlink(
         body: UnlinkRevisionBody, be: LocalBackend = Depends(get_backend)
     ) -> dict[str, Any]:
-        return be.unlink_revision(body.doc_id).model_dump(mode="json")
+        return be.unlink_revision(body.rev_id).model_dump(mode="json")
 
     @app.get("/identity-rule", dependencies=dep)
     def identity_rule(be: LocalBackend = Depends(get_backend)) -> dict[str, Any]:
@@ -403,20 +403,20 @@ def build_app() -> FastAPI:
         body: LinkPlanBody, be: LocalBackend = Depends(get_backend)
     ) -> dict[str, Any]:
         return be.plan_ingest_link(
-            doc_id=body.doc_id, metadata=body.metadata, new_revision_of=body.new_revision_of
+            rev_id=body.rev_id, metadata=body.metadata, new_revision_of=body.new_revision_of
         ).model_dump(mode="json")
 
-    @app.get("/documents/{doc_id}/pdf", dependencies=dep)
-    def document_pdf(doc_id: str, be: LocalBackend = Depends(get_backend)) -> Response:
+    @app.get("/documents/{rev_id}/pdf", dependencies=dep)
+    def document_pdf(rev_id: str, be: LocalBackend = Depends(get_backend)) -> Response:
         try:
-            data = be.get_pdf_bytes(doc_id)
+            data = be.get_pdf_bytes(rev_id)
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         return Response(content=data, media_type="application/pdf")
 
-    @app.put("/documents/{doc_id}/pdf", dependencies=ingest_dep)
+    @app.put("/documents/{rev_id}/pdf", dependencies=ingest_dep)
     async def document_put_pdf(
-        doc_id: str,
+        rev_id: str,
         payload: UploadFile = File(...),
         be: LocalBackend = Depends(get_backend),
     ) -> dict[str, Any]:
@@ -437,7 +437,7 @@ def build_app() -> FastAPI:
         from datasheet_rag.storage import save_pdf_bytes
 
         try:
-            resolved = be.resolve_doc_id(doc_id)
+            resolved = be.resolve_rev_id(rev_id)
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -458,19 +458,19 @@ def build_app() -> FastAPI:
             )
 
         save_pdf_bytes(data, resolved)
-        return {"stored": True, "doc_id": resolved}
+        return {"stored": True, "rev_id": resolved}
 
-    @app.get("/documents/{doc_id}/summary", dependencies=dep)
-    def document_summary(doc_id: str, be: LocalBackend = Depends(get_backend)) -> Response:
-        summary = be.get_document(doc_id)
+    @app.get("/documents/{rev_id}/summary", dependencies=dep)
+    def document_summary(rev_id: str, be: LocalBackend = Depends(get_backend)) -> Response:
+        summary = be.get_document(rev_id)
         if summary is None:
             return Response(status_code=204)
         return JSONResponse(summary.model_dump(mode="json"))
 
-    @app.get("/documents/{doc_id}/metadata", dependencies=dep)
-    def document_metadata(doc_id: str, be: LocalBackend = Depends(get_backend)) -> Response:
+    @app.get("/documents/{rev_id}/metadata", dependencies=dep)
+    def document_metadata(rev_id: str, be: LocalBackend = Depends(get_backend)) -> Response:
         try:
-            ref = be.resolve_ref(doc_id)
+            ref = be.resolve_ref(rev_id)
         except ValueError:
             return Response(status_code=204)
         md = be.get_metadata(ref)
@@ -478,40 +478,40 @@ def build_app() -> FastAPI:
             return Response(status_code=204)
         return JSONResponse(md.model_dump(mode="json"))
 
-    @app.patch("/documents/{doc_id}/metadata", dependencies=ingest_dep)
+    @app.patch("/documents/{rev_id}/metadata", dependencies=ingest_dep)
     def document_set_metadata(
-        doc_id: str, patch: MetadataPatch, be: LocalBackend = Depends(get_backend)
+        rev_id: str, patch: MetadataPatch, be: LocalBackend = Depends(get_backend)
     ) -> dict[str, Any]:
-        return be.set_metadata(be.resolve_ref(doc_id), patch).model_dump(mode="json")
+        return be.set_metadata(be.resolve_ref(rev_id), patch).model_dump(mode="json")
 
-    @app.put("/documents/{doc_id}/title", dependencies=ingest_dep)
+    @app.put("/documents/{rev_id}/title", dependencies=ingest_dep)
     def document_set_title(
-        doc_id: str, body: TitleBody, be: LocalBackend = Depends(get_backend)
+        rev_id: str, body: TitleBody, be: LocalBackend = Depends(get_backend)
     ) -> dict[str, Any]:
-        did = be.resolve_doc_id(doc_id)  # an unknown id must not create a sidecar row
+        did = be.resolve_rev_id(rev_id)  # an unknown id must not create a sidecar row
         return {"updated": be.set_doc_title(did, body.title, source=body.source, force=body.force)}
 
-    @app.put("/documents/{doc_id}/needs-reembed", dependencies=ingest_dep)
+    @app.put("/documents/{rev_id}/needs-reembed", dependencies=ingest_dep)
     def document_set_needs_reembed(
-        doc_id: str, body: NeedsReembedBody, be: LocalBackend = Depends(get_backend)
+        rev_id: str, body: NeedsReembedBody, be: LocalBackend = Depends(get_backend)
     ) -> dict[str, Any]:
         # Resolve first: a prefix or an unknown id must not create a sidecar row.
-        be.set_needs_reembed(be.resolve_doc_id(doc_id), body.value)
+        be.set_needs_reembed(be.resolve_rev_id(rev_id), body.value)
         return {"needs_reembed": body.value}
 
-    @app.delete("/documents/{doc_id}", dependencies=ingest_dep)
+    @app.delete("/documents/{rev_id}", dependencies=ingest_dep)
     def document_delete(
-        doc_id: str, request: Request, be: LocalBackend = Depends(get_backend)
+        rev_id: str, request: Request, be: LocalBackend = Depends(get_backend)
     ) -> dict[str, Any]:
         try:
-            deleted = be.delete_doc(doc_id)
+            deleted = be.delete_doc(rev_id)
         except Exception as exc:
             audit(
                 request,
                 be,
                 action="delete_doc",
                 status="error",
-                doc_id=doc_id,
+                rev_id=rev_id,
                 error=str(exc),
             )
             raise
@@ -520,7 +520,7 @@ def build_app() -> FastAPI:
             be,
             action="delete_doc",
             status="ok",
-            doc_id=doc_id,
+            rev_id=rev_id,
             detail={"deleted": deleted},
         )
         return {"deleted": deleted}
@@ -591,21 +591,21 @@ def build_app() -> FastAPI:
     @app.get("/stats", dependencies=dep)
     def stats(
         project_id: str | None = None,
-        doc_id: str | None = None,
+        rev_id: str | None = None,
         be: LocalBackend = Depends(get_backend),
     ) -> dict[str, Any]:
-        return be.stats(project_id=project_id, doc_id=doc_id).model_dump(mode="json")
+        return be.stats(project_id=project_id, rev_id=rev_id).model_dump(mode="json")
 
     # -- figures ---------------------------------------------------------
     @app.get("/figures", dependencies=dep)
     def figures(
-        doc_id: str | None = None,
+        rev_id: str | None = None,
         project_id: str | None = None,
         only_with_image: bool = True,
         be: LocalBackend = Depends(get_backend),
     ) -> dict[str, Any]:
         chunks = be.list_figure_chunks(
-            doc_id=doc_id, project_id=project_id, only_with_image=only_with_image
+            rev_id=rev_id, project_id=project_id, only_with_image=only_with_image
         )
         return {"chunks": [_chunk_json(c) for c in chunks]}
 
@@ -632,7 +632,7 @@ def build_app() -> FastAPI:
     ) -> dict[str, Any]:
         try:
             descriptions, stats = be.describe_figures(
-                doc_id=body.doc_id,
+                rev_id=body.rev_id,
                 project_id=body.project_id,
                 missing_only=body.missing_only,
                 limit=body.limit,
@@ -645,7 +645,7 @@ def build_app() -> FastAPI:
                 be,
                 action="describe_figures",
                 status="error",
-                doc_id=body.doc_id,
+                rev_id=body.rev_id,
                 project_id=body.project_id,
                 error=str(exc),
             )
@@ -655,29 +655,29 @@ def build_app() -> FastAPI:
             be,
             action="describe_figures",
             status="ok",
-            doc_id=body.doc_id,
+            rev_id=body.rev_id,
             project_id=body.project_id,
             detail=stats,
         )
         return {"descriptions": descriptions, "stats": stats}
 
-    @app.get("/documents/{doc_id}/title-context", dependencies=dep)
+    @app.get("/documents/{rev_id}/title-context", dependencies=dep)
     def document_title_context(
-        doc_id: str, be: LocalBackend = Depends(get_backend)
+        rev_id: str, be: LocalBackend = Depends(get_backend)
     ) -> dict[str, Any]:
         """The store-side half of a title inference, for a client that runs the LLM."""
-        return be.get_title_context(doc_id).model_dump(mode="json")
+        return be.get_title_context(rev_id).model_dump(mode="json")
 
-    @app.post("/documents/{doc_id}/infer-title", dependencies=ingest_dep)
+    @app.post("/documents/{rev_id}/infer-title", dependencies=ingest_dep)
     def document_infer_title(
-        doc_id: str,
+        rev_id: str,
         body: InferTitleBody,
         request: Request,
         be: LocalBackend = Depends(get_backend),
     ) -> dict[str, Any]:
         try:
             title = be.infer_title(
-                doc_id,
+                rev_id,
                 model_id=body.model_id,
                 dry_run=body.dry_run,
                 force=body.force,
@@ -688,7 +688,7 @@ def build_app() -> FastAPI:
                 be,
                 action="infer_title",
                 status="error",
-                doc_id=doc_id,
+                rev_id=rev_id,
                 error=str(exc),
             )
             raise
@@ -697,7 +697,7 @@ def build_app() -> FastAPI:
             be,
             action="infer_title",
             status="ok",
-            doc_id=doc_id,
+            rev_id=rev_id,
             detail={"title": title, "dry_run": body.dry_run},
         )
         return {"title": title}
@@ -761,7 +761,7 @@ def build_app() -> FastAPI:
             be,
             action="ingest",
             status="ok",
-            doc_id=result.doc_id,
+            rev_id=result.rev_id,
             project_id=data.get("project_id"),
             detail={
                 "inserted": result.inserted,
@@ -800,7 +800,7 @@ def build_app() -> FastAPI:
         opts = json.loads(options) if options else {}
         # Read once: the preflight must check the backend the worker runs.
         backend = opts.get("backend", "docling")
-        doc_id = opts.get("doc_id")
+        rev_id = opts.get("rev_id")
         force = bool(opts.get("force", False))
         pdf_bytes = await payload.read()
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
@@ -813,7 +813,7 @@ def build_app() -> FastAPI:
         # A bad field in the metadata patch fails here too, not after the parse.
         metadata: MetadataPatch | None = None
         try:
-            check_backend_prerequisites(tmp_path, backend=backend, doc_id=doc_id, force=force)
+            check_backend_prerequisites(tmp_path, backend=backend, rev_id=rev_id, force=force)
             if opts.get("group_name") is not None:
                 raise ValueError(
                     "group_name was removed (GH #123): set the project-scoped "
@@ -831,7 +831,7 @@ def build_app() -> FastAPI:
             from datasheet_rag.storage import _content_hash
 
             be.plan_ingest_link(
-                doc_id=doc_id or _content_hash(tmp_path),
+                rev_id=rev_id or _content_hash(tmp_path),
                 metadata=metadata,
                 new_revision_of=opts.get("new_revision_of"),
             )
@@ -861,7 +861,7 @@ def build_app() -> FastAPI:
                 skip_describe = bool(opts.get("skip_describe", False))
                 parsed = parse_pdf_to_graph(
                     tmp_path,
-                    doc_id=doc_id,
+                    rev_id=rev_id,
                     backend=backend,
                     skip_figures=skip_figures,
                     upload_figures=bool(opts.get("upload_figures", False)),
@@ -928,7 +928,7 @@ def build_app() -> FastAPI:
                         be,
                         action="ingest",
                         status="ok",
-                        doc_id=result_doc.get("doc_id"),
+                        rev_id=result_doc.get("rev_id"),
                         project_id=opts.get("project_id"),
                         detail={
                             "inserted": result_doc.get("inserted"),
@@ -984,11 +984,11 @@ def build_app() -> FastAPI:
 
     @app.get("/audit", dependencies=admin_dep)
     def audit_list(
-        doc_id: str | None = None,
+        rev_id: str | None = None,
         since: str | None = None,
         limit: int = 200,
         be: LocalBackend = Depends(get_backend),
     ) -> dict[str, Any]:
-        return {"entries": list_audit(be.conn, doc_id=doc_id, since=since, limit=limit)}
+        return {"entries": list_audit(be.conn, rev_id=rev_id, since=since, limit=limit)}
 
     return app

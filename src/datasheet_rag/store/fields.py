@@ -34,8 +34,8 @@ Four tables back this:
                               field keeps its order in ``position``.
 * ``document_project_field_values`` – values of project-scoped fields, the
                               same shape with the project added to the key.
-* ``doc_field_values``      – per-revision overrides of document-scoped
-                              fields, keyed on the revision's doc_id.
+* ``revision_field_values``      – per-revision overrides of document-scoped
+                              fields, keyed on the revision's rev_id.
 
 Values compare case-insensitively (``COLLATE NOCASE``): part and document
 numbers are identifiers, and ``stm32h743`` should find ``STM32H743``.
@@ -72,7 +72,7 @@ FieldValue = str | list[str]
 #: in a query string without quoting.
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
-#: Names a field may not take: the ``doc_metadata`` columns (including the
+#: Names a field may not take: the ``revisions`` columns (including the
 #: pipeline's bookkeeping columns and the revision columns of GH #124), and
 #: the built-in column names of ``rag list``, which would shadow the field. A
 #: field with one of these names would be ambiguous in every listing and
@@ -80,7 +80,7 @@ _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 #: ``revision``.
 RESERVED_NAMES = frozenset(
     {
-        *("doc_id", "title", "project_id", "projects", "tags"),
+        *("rev_id", "title", "project_id", "projects", "tags"),
         "updated_at",
         *("title_source", "needs_reembed", "pdf_meta_title", "running_header"),
         *("fields", "project_fields", "version"),
@@ -105,7 +105,7 @@ class FieldSpec(BaseModel):
 
 
 #: The fields every store ships with. Their values used to be fixed columns on
-#: ``doc_metadata`` (moved here by the v3 and v5 migrations in ``store.schema``).
+#: ``revisions`` (moved here by the v3 and v5 migrations in ``store.schema``).
 BUILTIN_FIELDS: tuple[FieldSpec, ...] = (
     FieldSpec(
         name="mpn",
@@ -175,17 +175,18 @@ def ensure_field_tables(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         """
-        CREATE TABLE IF NOT EXISTS doc_field_values (
-            doc_id   TEXT NOT NULL,
+        CREATE TABLE IF NOT EXISTS revision_field_values (
+            rev_id   TEXT NOT NULL,
             field    TEXT NOT NULL REFERENCES metadata_fields(name),
             value    TEXT NOT NULL COLLATE NOCASE,
             position INTEGER NOT NULL DEFAULT 0,
-            PRIMARY KEY (doc_id, field, value)
+            PRIMARY KEY (rev_id, field, value)
         )
         """
     )
     conn.execute(
-        "CREATE INDEX IF NOT EXISTS ix_doc_field_values_fv ON doc_field_values(field, value)"
+        "CREATE INDEX IF NOT EXISTS ix_revision_field_values_fv "
+        "ON revision_field_values(field, value)"
     )
     conn.execute(
         """
@@ -354,8 +355,8 @@ def remove_field(conn: sqlite3.Connection, name: str, *, clear: bool = False) ->
                 "SELECT COUNT(*) FROM ("
                 "SELECT document_id FROM document_field_values WHERE field = ? "
                 "UNION SELECT document_id FROM document_project_field_values WHERE field = ? "
-                "UNION SELECT m.document_id FROM doc_field_values o "
-                "JOIN doc_metadata m ON m.doc_id = o.doc_id WHERE o.field = ?)",
+                "UNION SELECT m.document_id FROM revision_field_values o "
+                "JOIN revisions m ON m.rev_id = o.rev_id WHERE o.field = ?)",
                 (name, name, name),
             ).fetchone()[0]
         )
@@ -364,7 +365,11 @@ def remove_field(conn: sqlite3.Connection, name: str, *, clear: bool = False) ->
                 f"field {name!r} has values on {held} document(s); pass clear to "
                 "delete them with the field"
             )
-        for table in ("document_field_values", "document_project_field_values", "doc_field_values"):
+        for table in (
+            "document_field_values",
+            "document_project_field_values",
+            "revision_field_values",
+        ):
             conn.execute(f"DELETE FROM {table} WHERE field = ?", (name,))
         conn.execute("DELETE FROM metadata_fields WHERE name = ?", (name,))
         conn.commit()
@@ -475,12 +480,14 @@ def check_patch_project(
         )
 
 
-def _write_values(conn: sqlite3.Connection, doc_id: str, field: str, values: list[str]) -> None:
-    """Replace revision ``doc_id``'s override for ``field``. Does not commit."""
-    conn.execute("DELETE FROM doc_field_values WHERE doc_id = ? AND field = ?", (doc_id, field))
+def _write_values(conn: sqlite3.Connection, rev_id: str, field: str, values: list[str]) -> None:
+    """Replace revision ``rev_id``'s override for ``field``. Does not commit."""
+    conn.execute(
+        "DELETE FROM revision_field_values WHERE rev_id = ? AND field = ?", (rev_id, field)
+    )
     conn.executemany(
-        "INSERT INTO doc_field_values(doc_id, field, value, position) VALUES (?, ?, ?, ?)",
-        [(doc_id, field, v, i) for i, v in enumerate(values)],
+        "INSERT INTO revision_field_values(rev_id, field, value, position) VALUES (?, ?, ?, ?)",
+        [(rev_id, field, v, i) for i, v in enumerate(values)],
     )
 
 
@@ -608,13 +615,13 @@ def get_document_values(
 
 def get_override_values(
     conn: sqlite3.Connection,
-    doc_ids: Iterable[str] | None,
+    rev_ids: Iterable[str] | None,
     *,
     fields: Iterable[str] | None = None,
 ) -> dict[str, dict[str, FieldValue]]:
-    """``{doc_id: {field: value}}`` of per-revision overrides (all if None)."""
+    """``{rev_id: {field: value}}`` of per-revision overrides (all if None)."""
     out: dict[str, dict[str, FieldValue]] = {}
-    for row in _read_values(conn, "doc_field_values", "doc_id", doc_ids, fields=fields):
+    for row in _read_values(conn, "revision_field_values", "rev_id", rev_ids, fields=fields):
         _add_value(out.setdefault(row["k"], {}), row)
     return out
 
@@ -679,15 +686,15 @@ def check_filter_fields(registered: Iterable[str], fields: Iterable[str]) -> Non
 
 
 def field_filter_sql(
-    fields: Mapping[str, str], *, doc_id_column: str, project_id: str | None = None
+    fields: Mapping[str, str], *, rev_id_column: str, project_id: str | None = None
 ) -> tuple[list[str], list[object]]:
-    """SQL clauses restricting ``doc_id_column`` to documents matching every field.
+    """SQL clauses restricting ``rev_id_column`` to documents matching every field.
 
     A list field matches when any one of its values equals the filter value.
     Comparison is case-insensitive (the column's ``NOCASE`` collation). The
     clauses are meant to be AND-ed into the caller's WHERE.
 
-    ``doc_id_column`` holds revision doc_ids. A document-scoped field matches
+    ``rev_id_column`` holds revision rev_ids. A document-scoped field matches
     a revision by its effective value: the revision's override when it has
     one, else its document's value (GH #124). A project-scoped field matches
     the document's value in ``project_id`` when one is given, and in any
@@ -701,13 +708,13 @@ def field_filter_sql(
     for field, value in fields.items():
         v = value.strip()
         clauses.append(
-            f"{doc_id_column} IN ("
-            "SELECT doc_id FROM doc_field_values WHERE field = ? AND value = ? "
-            "UNION SELECT m.doc_id FROM doc_metadata m "
+            f"{rev_id_column} IN ("
+            "SELECT rev_id FROM revision_field_values WHERE field = ? AND value = ? "
+            "UNION SELECT m.rev_id FROM revisions m "
             "JOIN document_field_values v ON v.document_id = m.document_id "
             "WHERE v.field = ? AND v.value = ? AND NOT EXISTS ("
-            "SELECT 1 FROM doc_field_values o WHERE o.doc_id = m.doc_id AND o.field = ?) "
-            "UNION SELECT m.doc_id FROM doc_metadata m "
+            "SELECT 1 FROM revision_field_values o WHERE o.rev_id = m.rev_id AND o.field = ?) "
+            "UNION SELECT m.rev_id FROM revisions m "
             "JOIN document_project_field_values v ON v.document_id = m.document_id "
             f"WHERE v.field = ? AND v.value = ?{project_sql})"
         )

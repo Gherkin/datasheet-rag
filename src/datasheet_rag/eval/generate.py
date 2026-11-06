@@ -117,22 +117,22 @@ def _sample_chunks(
     category: Category,
     *,
     n: int,
-    doc_id: str | None,
+    rev_id: str | None,
     project_id: str | None,
     rng: random.Random,
 ) -> list[Chunk]:
     predicate = _CATEGORY_SQL[category]
     clauses = [predicate]
     params: list[object] = []
-    if doc_id:
-        clauses.append("doc_id = ?")
-        params.append(doc_id)
+    if rev_id:
+        clauses.append("rev_id = ?")
+        params.append(rev_id)
     else:
         # Questions are drawn from what search covers by default: the newest
-        # revision of each document (GH #124). A named doc_id is used as given.
-        clauses.append(older_revisions_sql("doc_id"))
+        # revision of each document (GH #124). A named rev_id is used as given.
+        clauses.append(older_revisions_sql("rev_id"))
     if project_id:
-        clause, clause_params = project_scope_sql(project_id, doc_id_column="doc_id")
+        clause, clause_params = project_scope_sql(project_id, rev_id_column="rev_id")
         clauses.append(clause)
         params.extend(clause_params)
     # Over-fetch a pool then sample in Python for a stable seed.
@@ -185,7 +185,7 @@ def generate_golden_set(
     conn: sqlite3.Connection,
     *,
     per_category: int = 4,
-    doc_id: str | None = None,
+    rev_id: str | None = None,
     project_id: str | None = None,
     model_id: str | None = None,
     max_tokens: int = 400,
@@ -209,7 +209,7 @@ def generate_golden_set(
             conn,
             category,
             n=per_category,
-            doc_id=doc_id,
+            rev_id=rev_id,
             project_id=project_id,
             rng=rng,
         )
@@ -236,7 +236,7 @@ def generate_golden_set(
                 GoldenItem(
                     question=question,
                     category=category,
-                    doc_id=chunk.doc_id,
+                    rev_id=chunk.rev_id,
                     gold_chunk_ids=[chunk.id],
                     gold_pages=list(chunk.metadata.page_numbers),
                     answer_notes=str(parsed.get("answer_notes", "")).strip(),

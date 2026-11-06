@@ -138,11 +138,11 @@ def _search(
     )[:fetch_n]
 
 
-def _load_doc_graph(conn: sqlite3.Connection, doc_id: str) -> dict[str, GraphNode]:
+def _load_doc_graph(conn: sqlite3.Connection, rev_id: str) -> dict[str, GraphNode]:
     """Load the lineage links for one document's chunks from the store."""
     rows = conn.execute(
-        "SELECT id, parent_id, prev_id, next_id FROM chunks WHERE doc_id = ?",
-        (doc_id,),
+        "SELECT id, parent_id, prev_id, next_id FROM chunks WHERE rev_id = ?",
+        (rev_id,),
     ).fetchall()
     return {r[0]: GraphNode(r[1], r[2], r[3]) for r in rows}
 
@@ -181,12 +181,12 @@ def run_eval(
     relevant_by_item: list[set[str]] = []
     unresolved: list[str] = []
     for item in items:
-        if item.doc_id is None:
-            raise ValueError(f"answerable item has no doc_id: {item.question!r}")
-        graph = graph_cache.get(item.doc_id)
+        if item.rev_id is None:
+            raise ValueError(f"answerable item has no rev_id: {item.question!r}")
+        graph = graph_cache.get(item.rev_id)
         if graph is None:
-            graph = _load_doc_graph(conn, item.doc_id)
-            graph_cache[item.doc_id] = graph
+            graph = _load_doc_graph(conn, item.rev_id)
+            graph_cache[item.rev_id] = graph
         gold = resolve_gold_chunk_ids(conn, item) if item.evidence else item.gold_chunk_ids
         if item.evidence and not gold:
             unresolved.append(item.question)
@@ -220,14 +220,14 @@ def run_eval(
                         {
                             "question": item.question,
                             "category": item.category,
-                            "doc_id": item.doc_id,
+                            "rev_id": item.rev_id,
                             "config": config.model_dump(),
                             "results": [
                                 {
                                     "chunk_id": r.chunk_id,
                                     "score": r.score,
                                     "match_source": r.match_source,
-                                    "doc_id": r.chunk.doc_id,
+                                    "rev_id": r.chunk.rev_id,
                                     "pages": r.chunk.metadata.page_numbers,
                                     "level": r.chunk.level.name,
                                 }

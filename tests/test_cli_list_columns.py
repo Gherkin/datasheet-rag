@@ -28,10 +28,10 @@ DOC_A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 DOC_B = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
 
-def _chunk(doc_id: str) -> Chunk:
+def _chunk(rev_id: str) -> Chunk:
     md = ChunkMetadata(
-        doc_id=doc_id,
-        doc_title=f"Doc {doc_id[:8]}",
+        rev_id=rev_id,
+        doc_title=f"Doc {rev_id[:8]}",
         chapter_title="",
         section_title="",
         page_numbers=[1],
@@ -39,8 +39,8 @@ def _chunk(doc_id: str) -> Chunk:
         context_string="",
     )
     return Chunk(
-        id=f"{doc_id}:L1:0",
-        doc_id=doc_id,
+        id=f"{rev_id}:L1:0",
+        rev_id=rev_id,
         level=ChunkLevel.MICRO,
         text="chunk 0",
         context_text="chunk 0",
@@ -93,7 +93,7 @@ def _meta(db_path: Path, *args: str):
 def _list(db_path: Path, *args: str):
     """`rag list [options]`, widened past the default 80 columns.
 
-    At 80, Rich squeezes doc_id until it wraps mid-hash, which would have
+    At 80, Rich squeezes rev_id until it wraps mid-hash, which would have
     these tests asserting on the wrapping rather than on the columns.
     """
     runner = CliRunner()
@@ -104,17 +104,17 @@ def _list(db_path: Path, *args: str):
 
 def _header(output: str) -> str:
     """The table's header row — the line holding the column labels."""
-    return next(line for line in output.splitlines() if "doc_id" in line)
+    return next(line for line in output.splitlines() if "rev_id" in line)
 
 
-def _row(output: str, doc_id: str) -> str:
-    return next(line for line in output.splitlines() if doc_id[:10] in line)
+def _row(output: str, rev_id: str) -> str:
+    return next(line for line in output.splitlines() if rev_id[:10] in line)
 
 
-def _mark_stale(db_path: Path, doc_id: str) -> None:
+def _mark_stale(db_path: Path, rev_id: str) -> None:
     conn = connect(db_path, embedding_dim=get_settings().embedding_dimensions)
     try:
-        set_needs_reembed(conn, doc_id, True)
+        set_needs_reembed(conn, rev_id, True)
     finally:
         conn.close()
 
@@ -158,7 +158,7 @@ def test_columns_wins_over_the_filter_implied_wide_view(db_path: Path) -> None:
     assert DOC_B[:10] not in result.output
 
 
-def test_doc_id_is_always_shown(db_path: Path) -> None:
+def test_rev_id_is_always_shown(db_path: Path) -> None:
     result = _list(db_path, "--columns", "drawing")
     assert result.exit_code == 0, result.output
     assert DOC_A[:10] in result.output

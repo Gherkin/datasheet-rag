@@ -22,7 +22,7 @@ DOC = "c" * 64
 
 def _chunk(title: str) -> Chunk:
     md = ChunkMetadata(
-        doc_id=DOC,
+        rev_id=DOC,
         doc_title=title,
         chapter_title="",
         section_title="",
@@ -32,7 +32,7 @@ def _chunk(title: str) -> Chunk:
     )
     return Chunk(
         id=f"{DOC}:L1:0",
-        doc_id=DOC,
+        rev_id=DOC,
         level=ChunkLevel.MICRO,
         text="t",
         context_text="t",
@@ -47,7 +47,7 @@ def conn(tmp_path: Path):
 
 
 def _title(conn) -> str:
-    return conn.execute("SELECT doc_title FROM chunks WHERE doc_id = ?", (DOC,)).fetchone()[0]
+    return conn.execute("SELECT doc_title FROM chunks WHERE rev_id = ?", (DOC,)).fetchone()[0]
 
 
 def _ingest(conn, title: str, **kw) -> None:

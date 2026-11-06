@@ -34,7 +34,7 @@ class _FakeBackend:
 
     def ingest_pdf(self, pdf_path: Path, **kwargs: Any) -> IngestResult:
         self.calls.append({"pdf_path": pdf_path, **kwargs})
-        return IngestResult(doc_id="d" * 64)
+        return IngestResult(rev_id="d" * 64)
 
 
 @pytest.fixture()

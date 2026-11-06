@@ -45,14 +45,14 @@ def _preview(chunk: Chunk, limit: int = 180) -> str:
 
 
 def chunks_on_pages(
-    conn: sqlite3.Connection, doc_id: str, pages: list[int]
+    conn: sqlite3.Connection, rev_id: str, pages: list[int]
 ) -> list[dict[str, Any]]:
     """Indexed chunks whose page span overlaps any of ``pages``."""
     if not pages:
         return []
     page_set = set(pages)
     rows = conn.execute(
-        "SELECT * FROM chunks WHERE doc_id = ? ORDER BY level, id", (doc_id,)
+        "SELECT * FROM chunks WHERE rev_id = ? ORDER BY level, id", (rev_id,)
     ).fetchall()
     out: list[dict[str, Any]] = []
     for row in rows:
@@ -195,10 +195,10 @@ def _make_handler(state: ReviewState) -> type[http.server.BaseHTTPRequestHandler
                             }
                         )
                 elif path == "/api/chunks":
-                    doc_id = qs.get("doc_id", [""])[0]
+                    rev_id = qs.get("rev_id", [""])[0]
                     pages = [int(p) for p in qs.get("pages", [""])[0].split(",") if p.strip()]
                     with state.lock:
-                        self._json(chunks_on_pages(state.conn, doc_id, pages))
+                        self._json(chunks_on_pages(state.conn, rev_id, pages))
                 elif path == "/api/retrieval":
                     idx = int(qs.get("i", ["-1"])[0])
                     with state.lock:
@@ -251,9 +251,9 @@ def _make_handler(state: ReviewState) -> type[http.server.BaseHTTPRequestHandler
                 self._json({"error": str(exc)}, status=500)
 
         def _serve_page(self, rest: str) -> None:
-            # rest = "<doc_id>/<page>.png"
+            # rest = "<rev_id>/<page>.png"
             try:
-                doc_id, page_part = rest.rsplit("/", 1)
+                rev_id, page_part = rest.rsplit("/", 1)
                 page = int(page_part.removesuffix(".png"))
             except ValueError:
                 self.send_error(400)
@@ -261,7 +261,7 @@ def _make_handler(state: ReviewState) -> type[http.server.BaseHTTPRequestHandler
             from datasheet_rag.pdf_render import render_page_png
 
             try:
-                png = render_page_png(doc_id, page)
+                png = render_page_png(rev_id, page)
             except Exception as exc:  # noqa: BLE001
                 self._json({"error": str(exc)}, status=404)
                 return
@@ -400,7 +400,7 @@ function item(){ return ITEMS[cur]; }
 async function render() {
   const it = item();
   if (!it) { document.getElementById("left").innerHTML = "<h2>No items.</h2>"; return; }
-  doc = it.doc_id;
+  doc = it.rev_id;
   document.getElementById("counter").textContent = `${cur+1} / ${ITEMS.length}`;
   const pages = (it.gold_pages||[]).join(", ");
   const left = document.getElementById("left");
@@ -441,7 +441,7 @@ async function loadChunks(){
   const pages = currentPages();
   const box = document.getElementById("chunks");
   if (!pages.length){ box.innerHTML = "<span class='hint'>set gold pages to see chunks</span>"; return; }
-  const list = await api(`/api/chunks?doc_id=${encodeURIComponent(doc)}&pages=${pages.join(",")}`);
+  const list = await api(`/api/chunks?rev_id=${encodeURIComponent(doc)}&pages=${pages.join(",")}`);
   const gold = new Set(item().gold_chunk_ids||[]);
   box.innerHTML = list.map(c => `
     <div class="chunk ${gold.has(c.chunk_id)?'sel':''}" data-id="${esc(c.chunk_id)}">

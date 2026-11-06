@@ -18,7 +18,7 @@ lineage set is precomputed per item from the document's chunk graph (see
 :func:`lineage_relevant_ids`).
 
 **page (loose, diagnostic)** — a retrieved chunk is relevant iff it is a
-gold chunk, or it shares a ``doc_id`` **and** a page number with the gold
+gold chunk, or it shares a ``rev_id`` **and** a page number with the gold
 location. This is the old behavior; in a dense technical document a page
 holds many unrelated facts (e.g. every row of an Electrical Characteristics
 table), so it over-credits "landed on the right page" as if it were "found
@@ -120,7 +120,7 @@ def is_hit(chunk: Chunk, item: GoldenItem) -> bool:
     """
     if chunk.id in item.gold_chunk_ids:
         return True
-    if item.gold_pages and chunk.doc_id == item.doc_id:
+    if item.gold_pages and chunk.rev_id == item.rev_id:
         if set(chunk.metadata.page_numbers) & set(item.gold_pages):
             return True
     return False
@@ -185,7 +185,7 @@ class QueryOutcome(BaseModel):
 
     question: str
     category: Category
-    doc_id: str | None
+    rev_id: str | None
     # Rephrasings of one need share it; the bootstrap resamples by it.
     need_id: str | None = None
     num_retrieved: int
@@ -225,7 +225,7 @@ class QueryOutcome(BaseModel):
         return cls(
             question=item.question,
             category=item.category,
-            doc_id=item.doc_id,
+            rev_id=item.rev_id,
             need_id=item.need_id,
             num_retrieved=len(results),
             retrieved_chunk_ids=[r.chunk_id for r in results],

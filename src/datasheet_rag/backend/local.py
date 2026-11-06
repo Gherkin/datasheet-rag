@@ -65,8 +65,8 @@ from datasheet_rag.store import (
     list_figure_chunks,
     register_field,
     remove_field,
-    resolve_doc_id,
     resolve_figure_path,
+    resolve_rev_id,
     set_doc_title,
     set_metadata,
     stored_embedding_dim,
@@ -227,24 +227,24 @@ class LocalBackend(RagBackend):
                 out.append(child)
         return ChunkPage(chunks=out, total=int(total))
 
-    def count_chunks(self, *, doc_id: str | None = None, project_id: str | None = None) -> int:
-        return count_chunks(self._get_conn(), doc_id=doc_id, project_id=project_id)
+    def count_chunks(self, *, rev_id: str | None = None, project_id: str | None = None) -> int:
+        return count_chunks(self._get_conn(), rev_id=rev_id, project_id=project_id)
 
     # -- documents / titles -------------------------------------------
-    def _derived_doc_fields(self, doc_id: str) -> tuple[str | None, int | None]:
+    def _derived_doc_fields(self, rev_id: str) -> tuple[str | None, int | None]:
         conn = self._get_conn()
         row = conn.execute(
-            "SELECT doc_title FROM chunks WHERE doc_id = ? AND doc_title != '' LIMIT 1",
-            (doc_id,),
+            "SELECT doc_title FROM chunks WHERE rev_id = ? AND doc_title != '' LIMIT 1",
+            (rev_id,),
         ).fetchone()
         title = row["doc_title"] if row else None
         page_row = conn.execute(
             """
             SELECT page_numbers FROM chunks
-             WHERE doc_id = ? AND page_numbers IS NOT NULL AND page_numbers != '[]'
+             WHERE rev_id = ? AND page_numbers IS NOT NULL AND page_numbers != '[]'
              ORDER BY rowid DESC LIMIT 1
             """,
-            (doc_id,),
+            (rev_id,),
         ).fetchone()
         page_count: int | None = None
         if page_row:
@@ -268,7 +268,7 @@ class LocalBackend(RagBackend):
         docs = list_docs(
             self._get_conn(), project_id=project_id, fields=fields, all_revisions=all_revisions
         )
-        matched: dict[str, DocMetadata | None] = {d.doc_id: d for d in docs}
+        matched: dict[str, DocMetadata | None] = {d.rev_id: d for d in docs}
         # insert_chunks gives every stored PDF a revision row (GH #124), but a
         # store can still hold chunks without one (a sidecar deleted on its
         # own). Such a PDF is chunked and searchable, so list it too, with its
@@ -277,34 +277,34 @@ class LocalBackend(RagBackend):
         if not fields:
             known = revs.documents_of(self._get_conn(), None)
             for row in get_ingested_docs(self._get_conn(), project_id=project_id):
-                if row["doc_id"] not in known:
-                    matched[row["doc_id"]] = None
+                if row["rev_id"] not in known:
+                    matched[row["rev_id"]] = None
         # Page before deriving title and page count: those cost two queries
         # per document, and a page should not pay for the whole store.
         ordered = sorted(matched)
         end = None if limit is None else offset + limit
-        out = [self._doc_summary(doc_id, matched[doc_id]) for doc_id in ordered[offset:end]]
+        out = [self._doc_summary(rev_id, matched[rev_id]) for rev_id in ordered[offset:end]]
         return DocPage(documents=out, total=len(ordered))
 
-    def get_document(self, doc_id: str) -> DocSummary | None:
-        meta = get_metadata(self._get_conn(), doc_id)
+    def get_document(self, rev_id: str) -> DocSummary | None:
+        meta = get_metadata(self._get_conn(), rev_id)
         if meta is None:
             row = (
                 self._get_conn()
-                .execute("SELECT 1 FROM chunks WHERE doc_id = ? LIMIT 1", (doc_id,))
+                .execute("SELECT 1 FROM chunks WHERE rev_id = ? LIMIT 1", (rev_id,))
                 .fetchone()
             )
             if row is None:
                 return None
-            return self._doc_summary(doc_id, None)
-        return self._doc_summary(meta.doc_id, meta)
+            return self._doc_summary(rev_id, None)
+        return self._doc_summary(meta.rev_id, meta)
 
-    def _doc_summary(self, doc_id: str, d: DocMetadata | None) -> DocSummary:
-        title, page_count = self._derived_doc_fields(doc_id)
+    def _doc_summary(self, rev_id: str, d: DocMetadata | None) -> DocSummary:
+        title, page_count = self._derived_doc_fields(rev_id)
         if d is None:
-            return DocSummary(doc_id=doc_id, doc_title=title, page_count=page_count)
+            return DocSummary(rev_id=rev_id, doc_title=title, page_count=page_count)
         return DocSummary(
-            doc_id=d.doc_id,
+            rev_id=d.rev_id,
             document_id=d.document_id,
             revision=d.revision,
             revisions=d.revisions,
@@ -325,37 +325,37 @@ class LocalBackend(RagBackend):
         return get_doc_titles(self._get_conn())
 
     def set_doc_title(
-        self, doc_id: str, title: str, *, source: TitleSource = "manual", force: bool = False
+        self, rev_id: str, title: str, *, source: TitleSource = "manual", force: bool = False
     ) -> int:
         with self._write_lock:
             conn = self._get_conn()
-            n = set_doc_title(conn, doc_id, title, source=source, force=force)
+            n = set_doc_title(conn, rev_id, title, source=source, force=force)
             conn.commit()
             return n
 
-    def resolve_doc_id(self, doc_id: str) -> str:
-        return resolve_doc_id(self._get_conn(), doc_id)
+    def resolve_rev_id(self, rev_id: str) -> str:
+        return resolve_rev_id(self._get_conn(), rev_id)
 
     def resolve_document(self, ref: str) -> str:
         return revs.format_document_id(self._document_id(ref))
 
     def _document_id(self, ref: str) -> int:
-        """The document a ``D12`` or a revision doc_id (prefix ok) names."""
+        """The document a ``D12`` or a revision rev_id (prefix ok) names."""
         conn = self._get_conn()
         if revs.parse_document_ref(ref) is None:
-            ref = resolve_doc_id(conn, ref)
+            ref = resolve_rev_id(conn, ref)
         found = revs.lookup(conn, ref).document_id
         if found is None:
             raise revs.RevisionError(f"{ref[:12]} is not a known revision")
         return found
 
     # -- metadata ------------------------------------------------------
-    def get_metadata(self, doc_id: str) -> DocMetadata | None:
-        return get_metadata(self._get_conn(), doc_id)
+    def get_metadata(self, rev_id: str) -> DocMetadata | None:
+        return get_metadata(self._get_conn(), rev_id)
 
-    def set_metadata(self, doc_id: str, patch: MetadataPatch) -> DocMetadata:
+    def set_metadata(self, rev_id: str, patch: MetadataPatch) -> DocMetadata:
         with self._write_lock:
-            return set_metadata(self._get_conn(), doc_id, **patch.kwargs())
+            return set_metadata(self._get_conn(), rev_id, **patch.kwargs())
 
     def list_docs(
         self,
@@ -374,12 +374,12 @@ class LocalBackend(RagBackend):
         ids = revs.revisions_of(conn, document_id)
         if not ids:
             return DocumentRevisions(document_id=revs.format_document_id(document_id))
-        metas = {m.doc_id: m for m in (get_metadata(conn, d) for d in ids) if m is not None}
+        metas = {m.rev_id: m for m in (get_metadata(conn, d) for d in ids) if m is not None}
         counts = {
             r[0]: (int(r[1]), r[2], r[3])
             for r in conn.execute(
-                "SELECT doc_id, COUNT(*), MIN(created_at), MAX(doc_title) FROM chunks "
-                f"WHERE doc_id IN ({','.join('?' * len(ids))}) GROUP BY doc_id",
+                "SELECT rev_id, COUNT(*), MIN(created_at), MAX(doc_title) FROM chunks "
+                f"WHERE rev_id IN ({','.join('?' * len(ids))}) GROUP BY rev_id",
                 ids,
             )
         }
@@ -389,7 +389,7 @@ class LocalBackend(RagBackend):
             n, at, title = counts.get(d, (0, None, None))
             out.append(
                 RevisionSummary(
-                    doc_id=d,
+                    rev_id=d,
                     revision=m.revision if m else None,
                     newest=i == 0,
                     doc_title=title,
@@ -403,30 +403,30 @@ class LocalBackend(RagBackend):
     def list_revisions(self, ref: str) -> DocumentRevisions:
         return self._revisions(self._document_id(ref))
 
-    def add_revision(self, document: str, doc_id: str) -> DocumentRevisions:
+    def add_revision(self, document: str, rev_id: str) -> DocumentRevisions:
         with self._write_lock:
             target = self._document_id(document)
-            full = resolve_doc_id(self._get_conn(), doc_id)
+            full = resolve_rev_id(self._get_conn(), rev_id)
             revs.add_revision(self._get_conn(), target, full)
             return self._revisions(target)
 
     def move_revision(
-        self, doc_id: str, *, above: str | None = None, below: str | None = None
+        self, rev_id: str, *, above: str | None = None, below: str | None = None
     ) -> DocumentRevisions:
         with self._write_lock:
             conn = self._get_conn()
             document_id = revs.move_revision(
                 conn,
-                resolve_doc_id(conn, doc_id),
-                above=resolve_doc_id(conn, above) if above else None,
-                below=resolve_doc_id(conn, below) if below else None,
+                resolve_rev_id(conn, rev_id),
+                above=resolve_rev_id(conn, above) if above else None,
+                below=resolve_rev_id(conn, below) if below else None,
             )
             return self._revisions(document_id)
 
-    def unlink_revision(self, doc_id: str) -> DocumentRevisions:
+    def unlink_revision(self, rev_id: str) -> DocumentRevisions:
         with self._write_lock:
             conn = self._get_conn()
-            return self._revisions(revs.unlink_revision(conn, resolve_doc_id(conn, doc_id)))
+            return self._revisions(revs.unlink_revision(conn, resolve_rev_id(conn, rev_id)))
 
     def get_identity_rule(self) -> str | None:
         rule = get_identity_rule(self._get_conn())
@@ -440,26 +440,26 @@ class LocalBackend(RagBackend):
     def plan_ingest_link(
         self,
         *,
-        doc_id: str | None = None,
+        rev_id: str | None = None,
         metadata: MetadataPatch | None = None,
         new_revision_of: str | None = None,
     ) -> IngestLink:
-        return self._plan_link(doc_id, metadata, new_revision_of)
+        return self._plan_link(rev_id, metadata, new_revision_of)
 
     def _plan_link(
         self,
-        doc_id: str | None,
+        rev_id: str | None,
         metadata: MetadataPatch | None,
         new_revision_of: str | None,
     ) -> IngestLink:
         """Decide the document a PDF goes into (see :meth:`ingest_chunk_graph`)."""
         conn = self._get_conn()
-        existing = revs.document_of(conn, doc_id) if doc_id else None
+        existing = revs.document_of(conn, rev_id) if rev_id else None
         if existing is not None:
             ref = revs.format_document_id(existing)
             wanted = self._document_id(new_revision_of) if new_revision_of is not None else None
             if wanted is not None and wanted != existing:
-                short = (doc_id or "")[:12]
+                short = (rev_id or "")[:12]
                 raise revs.RevisionError(
                     f"{short} is already stored, as a revision of {ref}; move it with "
                     f"rag revisions add {revs.format_document_id(wanted)} {short}"
@@ -496,9 +496,9 @@ class LocalBackend(RagBackend):
             )
         return IngestLink(action="new")
 
-    def set_needs_reembed(self, doc_id: str, value: bool) -> None:
+    def set_needs_reembed(self, rev_id: str, value: bool) -> None:
         with self._write_lock:
-            set_needs_reembed(self._get_conn(), doc_id, value)
+            set_needs_reembed(self._get_conn(), rev_id, value)
 
     # -- metadata fields -----------------------------------------------
     def list_fields(self) -> list[FieldSpec]:
@@ -528,16 +528,16 @@ class LocalBackend(RagBackend):
             return remove_field(self._get_conn(), name, clear=clear)
 
     # -- stats ---------------------------------------------------------
-    def stats(self, *, project_id: str | None = None, doc_id: str | None = None) -> StatsResult:
+    def stats(self, *, project_id: str | None = None, rev_id: str | None = None) -> StatsResult:
         conn = self._get_conn()
-        total = count_chunks(conn, doc_id=doc_id, project_id=project_id)
+        total = count_chunks(conn, rev_id=rev_id, project_id=project_id)
         where: list[str] = []
         params: list[Any] = []
-        if doc_id:
-            where.append("doc_id = ?")
-            params.append(doc_id)
+        if rev_id:
+            where.append("rev_id = ?")
+            params.append(rev_id)
         if project_id:
-            clause, clause_params = project_scope_sql(project_id, doc_id_column="doc_id")
+            clause, clause_params = project_scope_sql(project_id, rev_id_column="rev_id")
             where.append(clause)
             params.extend(clause_params)
         where_sql = (" WHERE " + " AND ".join(where)) if where else ""
@@ -558,7 +558,7 @@ class LocalBackend(RagBackend):
             total_chunks=total,
             by_level=by_level,
             project_id=project_id,
-            doc_id=doc_id,
+            rev_id=rev_id,
             fts_missing=fts_status(conn).missing,
         )
 
@@ -566,13 +566,13 @@ class LocalBackend(RagBackend):
     def list_figure_chunks(
         self,
         *,
-        doc_id: str | None = None,
+        rev_id: str | None = None,
         project_id: str | None = None,
         only_with_image: bool = True,
     ) -> list[Chunk]:
         chunks = list_figure_chunks(
             self._get_conn(),
-            doc_id=doc_id,
+            rev_id=rev_id,
             project_id=project_id,
             only_with_image=only_with_image,
         )
@@ -620,14 +620,14 @@ class LocalBackend(RagBackend):
         page = str(pages[0]) if len(pages) == 1 else f"{pages[0]}-{pages[-1]}" if pages else ""
         return FigureBytes.from_bytes(
             chunk_id=chunk.id,
-            doc_id=chunk.doc_id,
+            rev_id=chunk.rev_id,
             image_bytes=image_bytes,
             fmt=fmt,
             local_path=str(resolved) if resolved else None,
             caption=chunk.figure_caption or "",
             description=chunk.figure_description or "",
             citation=FigureCitation(
-                doc_id=chunk.doc_id,
+                rev_id=chunk.rev_id,
                 page=page,
                 section=chunk.metadata.section_title or "",
                 chapter=chunk.metadata.chapter_title or "",
@@ -651,7 +651,7 @@ class LocalBackend(RagBackend):
     def describe_figures(
         self,
         *,
-        doc_id: str | None = None,
+        rev_id: str | None = None,
         project_id: str | None = None,
         missing_only: bool = True,
         limit: int | None = None,
@@ -664,7 +664,7 @@ class LocalBackend(RagBackend):
         with self._write_lock:
             descriptions = describe_figures_in_store(
                 self._get_conn(),
-                doc_id=doc_id,
+                rev_id=rev_id,
                 project_id=project_id,
                 missing_only=missing_only,
                 limit=limit,
@@ -673,14 +673,14 @@ class LocalBackend(RagBackend):
             )
         return descriptions, describer.stats()
 
-    def get_title_context(self, doc_id: str) -> TitleContext:
+    def get_title_context(self, rev_id: str) -> TitleContext:
         from datasheet_rag.titling import first_page_text
 
         conn = self._get_conn()
-        md = get_metadata(conn, doc_id) or DocMetadata(doc_id=doc_id)
+        md = get_metadata(conn, rev_id) or DocMetadata(rev_id=rev_id)
         return TitleContext(
-            doc_id=doc_id,
-            first_page_text=first_page_text(conn, doc_id),
+            rev_id=rev_id,
+            first_page_text=first_page_text(conn, rev_id),
             title_source=md.title_source,
             running_header=md.running_header,
             pdf_meta_title=md.pdf_meta_title,
@@ -688,7 +688,7 @@ class LocalBackend(RagBackend):
 
     def infer_title(
         self,
-        doc_id: str,
+        rev_id: str,
         *,
         model_id: str | None = None,
         dry_run: bool = False,
@@ -700,17 +700,17 @@ class LocalBackend(RagBackend):
         with self._write_lock:
             return infer_and_backfill_title(
                 self._get_conn(),
-                doc_id,
+                rev_id,
                 inferer=inferer,
                 dry_run=dry_run,
                 force=force,
             )
 
     # -- source PDF ----------------------------------------------------
-    def get_pdf_bytes(self, doc_id: str) -> bytes:
+    def get_pdf_bytes(self, rev_id: str) -> bytes:
         from datasheet_rag import pdf_viewer
 
-        return pdf_viewer.load_pdf_bytes(doc_id)
+        return pdf_viewer.load_pdf_bytes(rev_id)
 
     def _assert_vector_dims(self, vectors: Mapping[str, Sequence[float]]) -> None:
         """Reject caller-supplied vectors whose width is not the store's.
@@ -768,7 +768,7 @@ class LocalBackend(RagBackend):
             self._assert_vector_dims(vectors)
             embed = False
 
-        did = graph.doc_id
+        did = graph.rev_id
         settings = get_settings()
 
         # 1. Land uploaded figure bytes locally and rewrite host-local paths.
@@ -881,7 +881,7 @@ class LocalBackend(RagBackend):
                 conn.commit()
                 descriptions = describe_figures_in_store(
                     conn,
-                    doc_id=did,
+                    rev_id=did,
                     missing_only=True,
                     describer=FigureDescriber(verbose=False),
                     dry_run=False,
@@ -889,7 +889,7 @@ class LocalBackend(RagBackend):
                 described = len(descriptions)
                 for row in conn.execute(
                     "SELECT id, figure_description FROM chunks "
-                    "WHERE doc_id=? AND figure_description IS NOT NULL",
+                    "WHERE rev_id=? AND figure_description IS NOT NULL",
                     (did,),
                 ).fetchall():
                     chunk = graph.chunks.get(row["id"])
@@ -944,7 +944,7 @@ class LocalBackend(RagBackend):
         document = revs.document_of(self._get_conn(), did)
         document_ref = revs.format_document_id(document) if document is not None else ""
         return IngestResult(
-            doc_id=did,
+            rev_id=did,
             document_id=document_ref,
             link=link.model_copy(update={"document_id": document_ref}),
             inserted=stats.inserted,
@@ -957,7 +957,7 @@ class LocalBackend(RagBackend):
         self,
         pdf_path: Path,
         *,
-        doc_id: str | None = None,
+        rev_id: str | None = None,
         project_id: str | None = None,
         metadata: MetadataPatch | None = None,
         backend: str = "docling",
@@ -980,7 +980,7 @@ class LocalBackend(RagBackend):
 
         parsed = parse_pdf_to_graph(
             pdf_path,
-            doc_id=doc_id,
+            rev_id=rev_id,
             backend=backend,
             skip_figures=skip_figures,
             upload_figures=upload_figures,
@@ -1003,14 +1003,14 @@ class LocalBackend(RagBackend):
             new_revision_of=new_revision_of,
         )
 
-    def delete_doc(self, doc_id: str) -> int:
+    def delete_doc(self, rev_id: str) -> int:
         from datasheet_rag.delete import purge_local_files, purge_s3_objects
 
         with self._write_lock:
             conn = self._get_conn()
-            n = delete_doc(conn, doc_id)
-            delete_metadata(conn, doc_id)
+            n = delete_doc(conn, rev_id)
+            delete_metadata(conn, rev_id)
 
-        purge_local_files(doc_id)
-        purge_s3_objects(doc_id)
+        purge_local_files(rev_id)
+        purge_s3_objects(rev_id)
         return n

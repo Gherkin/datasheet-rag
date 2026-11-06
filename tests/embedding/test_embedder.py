@@ -244,12 +244,12 @@ def _chunk(
 ) -> Chunk:
     return Chunk(
         id=chunk_id,
-        doc_id="doc-1",
+        rev_id="doc-1",
         level=ChunkLevel.MICRO,
         text=text,
         context_text=context_text,
         token_count=len(text.split()),
-        metadata=ChunkMetadata(doc_id="doc-1", layout_type=LayoutType.TEXT),
+        metadata=ChunkMetadata(rev_id="doc-1", layout_type=LayoutType.TEXT),
     )
 
 
@@ -323,7 +323,7 @@ def test_embed_chunks_empty_iterable_returns_empty_dict(
 def test_embed_chunk_graph_round_trip(
     mock_bedrock_client: MagicMock, embedder: BedrockEmbedder
 ) -> None:
-    graph = ChunkGraph(doc_id="doc-1")
+    graph = ChunkGraph(rev_id="doc-1")
     graph.add(_chunk("c1", text="t1", context_text="CTX 1"))
     graph.add(_chunk("c2", text="t2", context_text="CTX two"))
     graph.add(_chunk("c3", text="t3", context_text="CTX three!"))

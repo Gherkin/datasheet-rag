@@ -32,12 +32,12 @@ def _unit(pos: int) -> list[float]:
 def _chunk(chunk_id: str, text: str, *, page: int, pos: int) -> tuple[Chunk, list[float]]:
     chunk = Chunk(
         id=chunk_id,
-        doc_id="doc1",
+        rev_id="doc1",
         level=ChunkLevel.MICRO,
         text=text,
         context_text=text,
         token_count=len(text.split()),
-        metadata=ChunkMetadata(doc_id="doc1", page_numbers=[page], layout_type=LayoutType.TEXT),
+        metadata=ChunkMetadata(rev_id="doc1", page_numbers=[page], layout_type=LayoutType.TEXT),
     )
     return chunk, _unit(pos)
 
@@ -81,14 +81,14 @@ def eval_set() -> EvalSet:
             GoldenItem(
                 question="How does I2C clock stretching work?",
                 category="conceptual",
-                doc_id="doc1",
+                rev_id="doc1",
                 gold_chunk_ids=["doc1:2:0"],
                 gold_pages=[5],
             ),
             GoldenItem(
                 question="thermal junction temperature limit",
                 category="identifier",
-                doc_id="doc1",
+                rev_id="doc1",
                 gold_chunk_ids=["doc1:2:1"],
                 gold_pages=[7],
             ),
@@ -117,14 +117,14 @@ def test_keyword_mode_no_embedder_needed(conn) -> None:
             GoldenItem(
                 question="I2C clock stretching SCL",
                 category="identifier",
-                doc_id="doc1",
+                rev_id="doc1",
                 gold_chunk_ids=["doc1:2:0"],
                 gold_pages=[5],
             ),
             GoldenItem(
                 question="thermal junction temperature",
                 category="identifier",
-                doc_id="doc1",
+                rev_id="doc1",
                 gold_chunk_ids=["doc1:2:1"],
                 gold_pages=[7],
             ),
@@ -152,7 +152,7 @@ def test_page_only_label_scores_loose_not_strict(conn) -> None:
             GoldenItem(
                 question="How does I2C clock stretching work?",
                 category="conceptual",
-                doc_id="doc1",
+                rev_id="doc1",
                 gold_chunk_ids=[],
                 gold_pages=[5],
             )
@@ -197,7 +197,7 @@ def test_keyword_ranks_the_live_search_pool() -> None:
             GoldenItem(
                 question="vref",
                 category="identifier",
-                doc_id="doc1",
+                rev_id="doc1",
                 gold_chunk_ids=["doc1:2:99"],
                 gold_pages=[2],
             )
@@ -249,7 +249,7 @@ def test_hybrid_differs_from_vector_when_keyword_has_the_hit(conn) -> None:
             GoldenItem(
                 question="SCL register",
                 category="identifier",
-                doc_id="doc1",
+                rev_id="doc1",
                 gold_chunk_ids=["doc1:2:0"],
                 gold_pages=[5],
             )

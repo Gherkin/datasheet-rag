@@ -23,7 +23,7 @@ from datasheet_rag.store.fields import MetadataFieldError, register_field
 from datasheet_rag.store.metadata import delete_metadata, get_metadata, list_docs, set_metadata
 from datasheet_rag.store.schema import connect
 from datasheet_rag.store.search import SearchFilters, keyword_search, vector_search
-from datasheet_rag.store.sqlite import delete_doc, insert_chunks, resolve_doc_id
+from datasheet_rag.store.sqlite import delete_doc, insert_chunks, resolve_rev_id
 
 EMBED_DIM = 4
 
@@ -37,26 +37,26 @@ def conn() -> Iterator[sqlite3.Connection]:
         c.close()
 
 
-def _ingest(conn: sqlite3.Connection, doc_id: str, text: str = "supply voltage range") -> None:
+def _ingest(conn: sqlite3.Connection, rev_id: str, text: str = "supply voltage range") -> None:
     chunk = Chunk(
-        id=f"{doc_id}:L2:0",
-        doc_id=doc_id,
+        id=f"{rev_id}:L2:0",
+        rev_id=rev_id,
         level=ChunkLevel.MICRO,
         text=text,
         context_text=text,
-        metadata=ChunkMetadata(doc_id=doc_id, page_numbers=[1]),
+        metadata=ChunkMetadata(rev_id=rev_id, page_numbers=[1]),
     )
     insert_chunks(conn, [chunk], vectors={chunk.id: [1.0, 0.0, 0.0, 0.0]})
 
 
-def _doc(conn: sqlite3.Connection, doc_id: str) -> int:
-    n = document_of(conn, doc_id)
+def _doc(conn: sqlite3.Connection, rev_id: str) -> int:
+    n = document_of(conn, rev_id)
     assert n is not None
     return n
 
 
-def _ref(conn: sqlite3.Connection, doc_id: str) -> str:
-    return format_document_id(_doc(conn, doc_id))
+def _ref(conn: sqlite3.Connection, rev_id: str) -> str:
+    return format_document_id(_doc(conn, rev_id))
 
 
 # ---- ids and creation ----------------------------------------------------
@@ -64,7 +64,7 @@ def _ref(conn: sqlite3.Connection, doc_id: str) -> str:
 
 def test_document_ref_is_an_upper_case_d() -> None:
     assert parse_document_ref("D12") == 12
-    # Lower case is the start of a hex doc_id, not a document.
+    # Lower case is the start of a hex rev_id, not a document.
     assert parse_document_ref("d12") is None
     assert parse_document_ref("D12a") is None
 
@@ -83,9 +83,9 @@ def test_a_document_id_resolves_to_its_newest_revision(conn: sqlite3.Connection)
     _ingest(conn, "rev_a")
     _ingest(conn, "rev_b")
     add_revision(conn, _doc(conn, "rev_a"), "rev_b")
-    assert resolve_doc_id(conn, _ref(conn, "rev_a")) == "rev_b"
+    assert resolve_rev_id(conn, _ref(conn, "rev_a")) == "rev_b"
     with pytest.raises(ValueError, match="No document D999"):
-        resolve_doc_id(conn, "D999")
+        resolve_rev_id(conn, "D999")
 
 
 def test_resolve_target_rejects_an_unknown_document(conn: sqlite3.Connection) -> None:
@@ -110,7 +110,7 @@ def test_add_merges_a_lone_document_and_puts_the_pdf_on_top(conn: sqlite3.Connec
     assert conn.execute("SELECT 1 FROM documents WHERE id = ?", (lone,)).fetchone() is None
     md = get_metadata(conn, format_document_id(result.document_id))
     assert md is not None
-    assert md.doc_id == "rev_b"  # the document view shows its newest revision
+    assert md.rev_id == "rev_b"  # the document view shows its newest revision
     assert md.projects == ["p1", "p2"]
     assert md.tags == ["mcu", "new"]
     assert md.fields == {"mpn": ["X1"], "manufacturer": "TI"}
@@ -280,9 +280,9 @@ def test_field_filters_use_each_revisions_effective_value(conn: sqlite3.Connecti
     set_metadata(conn, "rev_a", this_revision=True, fields={"doc_type": "errata"})
 
     hits = list_docs(conn, fields={"doc_type": "errata"}, all_revisions=True)
-    assert [m.doc_id for m in hits] == ["rev_a"]
+    assert [m.rev_id for m in hits] == ["rev_a"]
     hits = list_docs(conn, fields={"doc_type": "datasheet"}, all_revisions=True)
-    assert [m.doc_id for m in hits] == ["rev_b"]
+    assert [m.rev_id for m in hits] == ["rev_b"]
 
 
 def test_a_user_field_cannot_take_a_revision_name(conn: sqlite3.Connection) -> None:
@@ -303,8 +303,8 @@ def _two_revisions(conn: sqlite3.Connection) -> None:
 
 def test_list_docs_shows_the_newest_revision_by_default(conn: sqlite3.Connection) -> None:
     _two_revisions(conn)
-    assert [m.doc_id for m in list_docs(conn)] == ["other", "rev_b"]
-    assert [m.doc_id for m in list_docs(conn, all_revisions=True)] == ["other", "rev_a", "rev_b"]
+    assert [m.rev_id for m in list_docs(conn)] == ["other", "rev_b"]
+    assert [m.rev_id for m in list_docs(conn, all_revisions=True)] == ["other", "rev_a", "rev_b"]
 
 
 def test_search_hides_older_revisions_unless_asked(conn: sqlite3.Connection) -> None:
@@ -312,7 +312,7 @@ def test_search_hides_older_revisions_unless_asked(conn: sqlite3.Connection) -> 
     vec = [1.0, 0.0, 0.0, 0.0]
 
     def docs(results: list) -> set[str]:  # type: ignore[type-arg]
-        return {r.chunk.doc_id for r in results}
+        return {r.chunk.rev_id for r in results}
 
     assert docs(keyword_search(conn, "supply voltage")) == {"rev_b", "other"}
     assert docs(vector_search(conn, vec)) == {"rev_b", "other"}
@@ -324,7 +324,7 @@ def test_search_hides_older_revisions_unless_asked(conn: sqlite3.Connection) -> 
     }
     assert docs(vector_search(conn, vec, filters=every)) == {"rev_a", "rev_b", "other"}
     # A revision named outright is searched, newest or not.
-    named = SearchFilters(doc_ids=["rev_a"])
+    named = SearchFilters(rev_ids=["rev_a"])
     assert docs(keyword_search(conn, "supply voltage", filters=named)) == {"rev_a"}
 
 
@@ -332,7 +332,7 @@ def test_projects_scope_every_revision(conn: sqlite3.Connection) -> None:
     _two_revisions(conn)
     set_metadata(conn, "rev_a", add_projects=["board"])
     scoped = SearchFilters(project_id="board", all_revisions=True)
-    assert {r.chunk.doc_id for r in keyword_search(conn, "supply", filters=scoped)} == {
+    assert {r.chunk.rev_id for r in keyword_search(conn, "supply", filters=scoped)} == {
         "rev_a",
         "rev_b",
     }

@@ -52,7 +52,7 @@ class GoldenItem(BaseModel):
     question: str
     category: Category
     # None only for an unanswerable item: no stored document holds the answer.
-    doc_id: str | None
+    rev_id: str | None
     gold_chunk_ids: list[str] = Field(default_factory=list)
     gold_pages: list[int] = Field(default_factory=list)
     answer_notes: str = ""
@@ -85,7 +85,7 @@ class Need(BaseModel):
     # {"type": "numeric", value, unit, bound, tolerance} | {"type": "set", items}
     # | {"type": "text", must_mention, must_not}
     grading: dict[str, Any]
-    doc_id: str | None
+    rev_id: str | None
     pages: list[int] = Field(default_factory=list)
     evidence: list[Evidence] = Field(default_factory=list)
     queries: list[str] = Field(default_factory=list)

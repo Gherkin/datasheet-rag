@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from datasheet_rag.cli import SHORT_DOC_ID_LEN, cli
+from datasheet_rag.cli import SHORT_REV_ID_LEN, cli
 from datasheet_rag.config import get_settings
 from datasheet_rag.models.chunk import Chunk, ChunkLevel, ChunkMetadata, LayoutType
 from datasheet_rag.project_config import get_project_config
@@ -26,7 +26,7 @@ DOC_B = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
 
 def _chunk(
-    doc_id: str,
+    rev_id: str,
     index: int,
     text: str,
     *,
@@ -38,10 +38,10 @@ def _chunk(
     figure_caption: str | None = None,
     figure_image_path: str | None = None,
 ) -> Chunk:
-    chunk_id = f"{doc_id}:L{level.value}:{index}"
+    chunk_id = f"{rev_id}:L{level.value}:{index}"
     md = ChunkMetadata(
-        doc_id=doc_id,
-        doc_title=f"Doc {doc_id[:8]}",
+        rev_id=rev_id,
+        doc_title=f"Doc {rev_id[:8]}",
         chapter_title="",
         section_title="Thermal Characteristics",
         page_numbers=[3],
@@ -50,7 +50,7 @@ def _chunk(
     )
     return Chunk(
         id=chunk_id,
-        doc_id=doc_id,
+        rev_id=rev_id,
         level=level,
         text=text,
         context_text=f"Chapter: intro > {text}",
@@ -110,7 +110,7 @@ def _run(db_path: Path, *args: str):
 def test_search_output_includes_short_chunk_id(db_path: Path) -> None:
     result = _run(db_path, "search", "derates junction temperature", "--mode", "keyword", "-g")
     assert result.exit_code == 0, result.output
-    expected_short_id = f"{DOC_A[:SHORT_DOC_ID_LEN]}:L2:2"
+    expected_short_id = f"{DOC_A[:SHORT_REV_ID_LEN]}:L2:2"
     assert expected_short_id in result.output
     assert "chunk_id" in result.output
     assert "rag get chunk" in result.output
@@ -125,8 +125,8 @@ def test_get_chunk_by_full_id(db_path: Path) -> None:
     assert "section: Thermal Characteristics" in result.output
 
 
-def test_get_chunk_by_abbreviated_doc_id(db_path: Path) -> None:
-    short_id = f"{DOC_A[:SHORT_DOC_ID_LEN]}:L2:2"
+def test_get_chunk_by_abbreviated_rev_id(db_path: Path) -> None:
+    short_id = f"{DOC_A[:SHORT_REV_ID_LEN]}:L2:2"
     result = _run(db_path, "get", "chunk", short_id)
     assert result.exit_code == 0, result.output
     assert f"{DOC_A}:L2:2" in result.output
@@ -152,7 +152,7 @@ def test_get_chunk_ambiguous_doc_prefix(db_path: Path) -> None:
     # unresolvable-prefix path via a prefix that matches neither doc.
     result = _run(db_path, "get", "chunk", "zzzzzzzzzzzz:L2:2")
     assert result.exit_code != 0
-    assert "No ingested document matches" in result.output
+    assert "No ingested revision matches" in result.output
 
 
 def test_get_chunk_with_neighbors(db_path: Path) -> None:
@@ -179,13 +179,13 @@ def test_inspect_figures_chunk_id_round_trips_through_get_chunk(db_path: Path) -
     )
     conn = connect(db_path, embedding_dim=get_settings().embedding_dimensions)
     insert_chunks(conn, [fig])
-    set_metadata(conn, fig.doc_id, add_projects=["proj-a"])
+    set_metadata(conn, fig.rev_id, add_projects=["proj-a"])
     conn.commit()
     conn.close()
 
     listed = _run(db_path, "inspect", "figures", "-g")
     assert listed.exit_code == 0, listed.output
-    short_id = f"{DOC_A[:SHORT_DOC_ID_LEN]}:L2:4"
+    short_id = f"{DOC_A[:SHORT_REV_ID_LEN]}:L2:4"
     assert short_id in listed.output
 
     fetched = _run(db_path, "get", "chunk", short_id)
@@ -205,11 +205,11 @@ def test_inspect_figures_flags_chunks_whose_image_is_gone(db_path: Path) -> None
     )
     conn = connect(db_path, embedding_dim=get_settings().embedding_dimensions)
     insert_chunks(conn, [fig])
-    set_metadata(conn, fig.doc_id, add_projects=["proj-a"])
+    set_metadata(conn, fig.rev_id, add_projects=["proj-a"])
     conn.commit()
     conn.close()
 
-    short_id = f"{DOC_A[:SHORT_DOC_ID_LEN]}:L2:5"
+    short_id = f"{DOC_A[:SHORT_REV_ID_LEN]}:L2:5"
 
     hidden = _run(db_path, "inspect", "figures", "-g")
     assert hidden.exit_code == 0, hidden.output

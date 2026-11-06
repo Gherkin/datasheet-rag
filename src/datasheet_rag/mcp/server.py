@@ -258,7 +258,7 @@ def _shape_chunk(result_or_chunk: Any, *, score: float | None = None) -> dict[st
 
     out: dict[str, Any] = {
         "chunk_id": chunk.id,
-        "doc_id": chunk.doc_id,
+        "rev_id": chunk.rev_id,
         "level": chunk.level.name,
         "page": page,
         "section": chunk.metadata.section_title or "",
@@ -335,14 +335,14 @@ def _chunk_fields_help(source_page_tool: str) -> str:
     # its user-facing source-page tool.
     if source_page_tool == "show_page":
         source_page_note = (
-            "To check a table, call `show_page(doc_id, page)` — it renders\n"
+            "To check a table, call `show_page(rev_id, page)` — it renders\n"
             "the source page as an image you can read."
         )
     else:
         source_page_note = (
-            "To check a table, call `show_page(doc_id, page)` — it renders\n"
+            "To check a table, call `show_page(rev_id, page)` — it renders\n"
             "the source page as an image you can read. "
-            f"`{source_page_tool}(doc_id, page)`\n"
+            f"`{source_page_tool}(rev_id, page)`\n"
             "opens the document in a browser for the *user* to look at, and\n"
             "returns no image to you."
         )
@@ -475,7 +475,7 @@ def _search_impl(
     limit: int = DEFAULT_SEARCH_LIMIT,
     offset: int = 0,
     project_id: str | None = None,
-    doc_id: str | None = None,
+    rev_id: str | None = None,
     level: str | None = None,
     layout_types: list[str] | None = None,
     fields: dict[str, str] | None = None,
@@ -487,7 +487,7 @@ def _search_impl(
     """Run a search and return one page of result dicts.
 
     By default only the newest revision of each document is searched; a
-    ``doc_id`` that is a document (``D12``) means its newest revision, or
+    ``rev_id`` that is a document (``D12``) means its newest revision, or
     every revision with ``all_revisions`` (GH #124).
     """
     if not query or not query.strip():
@@ -498,13 +498,13 @@ def _search_impl(
     if fields:
         _check_filter_fields(be, fields)
 
-    doc_ids: list[str] | None = None
-    if doc_id and parse_document_ref(doc_id) is not None:
-        doc_ids = be.doc_ids_for(doc_id, all_revisions=all_revisions)
-    elif doc_id:
-        doc_ids = [doc_id]
+    rev_ids: list[str] | None = None
+    if rev_id and parse_document_ref(rev_id) is not None:
+        rev_ids = be.rev_ids_for(rev_id, all_revisions=all_revisions)
+    elif rev_id:
+        rev_ids = [rev_id]
     filters = SearchFilters(
-        doc_ids=doc_ids,
+        rev_ids=rev_ids,
         all_revisions=all_revisions,
         project_id=_resolve_project(project_id),
         fields=fields or None,
@@ -531,12 +531,12 @@ def _add_revision_info(be: RagBackend, items: list[dict[str, Any]]) -> None:
     """
     seen: dict[str, DocMetadata | None] = {}
     for item in items:
-        doc_id = item.get("doc_id")
-        if not doc_id:
+        rev_id = item.get("rev_id")
+        if not rev_id:
             continue
-        if doc_id not in seen:
-            seen[doc_id] = be.get_metadata(doc_id)
-        meta = seen[doc_id]
+        if rev_id not in seen:
+            seen[rev_id] = be.get_metadata(rev_id)
+        meta = seen[rev_id]
         if meta is None:
             continue
         item["document_id"] = meta.document_id
@@ -665,7 +665,7 @@ def _list_documents_impl(
     items = [
         {
             "document_id": d.document_id,
-            "doc_id": d.doc_id,
+            "rev_id": d.rev_id,
             **({"revision": d.revision} if d.revision else {}),
             "revision_count": len(d.revisions),
             **({"overrides": d.overrides} if d.overrides else {}),
@@ -709,11 +709,11 @@ def _check_filter_fields(be: RagBackend, fields: dict[str, str]) -> None:
 
 
 def _list_revisions_impl(
-    doc_id: str, *, backend: RagBackend | None = None, conn: Any | None = None
+    rev_id: str, *, backend: RagBackend | None = None, conn: Any | None = None
 ) -> dict[str, Any]:
     """A document's revisions, newest first."""
     be = _backend(backend, conn)
-    return be.list_revisions(doc_id).model_dump(mode="json", exclude_none=True)
+    return be.list_revisions(rev_id).model_dump(mode="json", exclude_none=True)
 
 
 def _list_metadata_fields_impl(
@@ -725,7 +725,7 @@ def _list_metadata_fields_impl(
 
 
 def _get_document_metadata_impl(
-    doc_id: str,
+    rev_id: str,
     *,
     backend: RagBackend | None = None,
     conn: Any | None = None,
@@ -733,18 +733,18 @@ def _get_document_metadata_impl(
     be = _backend(backend, conn)
     # ``get_document`` covers both ways a document exists (sidecar row or
     # ingested chunks), so it alone decides "no such document".
-    summary = be.get_document(doc_id)
+    summary = be.get_document(rev_id)
     if summary is None:
         return None
-    meta = be.get_metadata(doc_id)
+    meta = be.get_metadata(rev_id)
 
     # An ingested document need not have a sidecar row. Answering with the
     # empty row says "this document exists, nothing is tagged on it", which
     # is the truth; ``None`` reads as "no such document" and sends the caller
-    # hunting for a doc_id that search and stats just handed them.
-    result = (meta or DocMetadata(doc_id=doc_id)).model_dump(exclude_none=False)
+    # hunting for a rev_id that search and stats just handed them.
+    result = (meta or DocMetadata(rev_id=rev_id)).model_dump(exclude_none=False)
     result["revisions"] = [
-        r.model_dump(mode="json", exclude_none=True) for r in be.list_revisions(doc_id).revisions
+        r.model_dump(mode="json", exclude_none=True) for r in be.list_revisions(rev_id).revisions
     ]
     if summary.doc_title:
         result["doc_title"] = summary.doc_title
@@ -804,13 +804,13 @@ def _figure_unavailable_text(chunk_id: str, exc: Exception) -> str:
     arriving inside a tool result is what agents learn to distrust (GH #30) —
     the rule itself lives in the two tools' descriptions.
     """
-    doc_id = chunk_id.split(":", 1)[0]
+    rev_id = chunk_id.split(":", 1)[0]
     return (
         f"No image is stored for chunk {chunk_id} ({exc}). The condition is "
         f"permanent rather than transient: the image is absent from the "
         f"store, so a retry resolves the same way. The chunk's own text and "
         f"caption are all there is; its source page is available through "
-        f"{_source_page_tool()}({doc_id!r}, <page>)."
+        f"{_source_page_tool()}({rev_id!r}, <page>)."
     )
 
 
@@ -837,7 +837,7 @@ def _get_figure_impl(
     fig = be.get_figure_bytes(chunk_id)
     return {
         "chunk_id": fig.chunk_id,
-        "doc_id": fig.doc_id,
+        "rev_id": fig.rev_id,
         "image_bytes": fig.image_bytes(),
         "format": fig.format,
         "local_path": fig.local_path,
@@ -847,23 +847,23 @@ def _get_figure_impl(
     }
 
 
-def _pdf_doc_id(be: RagBackend, doc_id: str) -> str:
+def _pdf_rev_id(be: RagBackend, rev_id: str) -> str:
     """The revision a PDF-bound tool works on: a document (``D12``) means its
-    newest revision; a doc_id is used as given."""
-    return be.resolve_doc_id(doc_id) if parse_document_ref(doc_id) is not None else doc_id
+    newest revision; a rev_id is used as given."""
+    return be.resolve_rev_id(rev_id) if parse_document_ref(rev_id) is not None else rev_id
 
 
 def _stats_impl(
     *,
     project_id: str | None = None,
-    doc_id: str | None = None,
+    rev_id: str | None = None,
     backend: RagBackend | None = None,
     conn: Any | None = None,
 ) -> dict[str, Any]:
     """Return chunk counts. Useful for the agent to sanity-check the corpus size."""
     be = _backend(backend, conn)
     pid = _resolve_project(project_id)
-    result = be.stats(project_id=pid, doc_id=_pdf_doc_id(be, doc_id) if doc_id else None)
+    result = be.stats(project_id=pid, rev_id=_pdf_rev_id(be, rev_id) if rev_id else None)
     return result.model_dump()
 
 
@@ -1032,16 +1032,16 @@ def build_server(
             "\n\n"
             "Documents and revisions: a document (`document_id`, e.g. D12) "
             "groups the revisions of one datasheet (Rev A, Rev B, ...); each "
-            "revision is one PDF with its own `doc_id`. Search and "
+            "revision is one PDF with its own `rev_id`. Search and "
             "list_documents cover the newest revision of each document unless "
             "you pass `all_revisions=true`; `list_revisions` shows a "
             "document's revisions. Use all revisions when the user asks what "
             "changed between revisions or names an older one."
             "\n\n"
-            "Source pages: Every chunk result includes a `doc_id` and a "
+            "Source pages: Every chunk result includes a `rev_id` and a "
             "`page` field. When the user wants to see the original document "
             "— to read surrounding text, check the exact layout, or browse "
-            f"adjacent pages — call `{source_page_tool}(doc_id, page)`. "
+            f"adjacent pages — call `{source_page_tool}(rev_id, page)`. "
             + (
                 "This opens a full interactive PDF viewer in the browser. "
                 if local_client
@@ -1065,7 +1065,7 @@ def build_server(
         limit: int = DEFAULT_SEARCH_LIMIT,
         offset: int = 0,
         project_id: str | None = None,
-        doc_id: str | None = None,
+        rev_id: str | None = None,
         level: str | None = None,
         layout_types: list[str] | None = None,
         fields: dict[str, str] | None = None,
@@ -1088,7 +1088,7 @@ def build_server(
 
         Optional filters:
         - `project_id`: override the server's default project.
-        - `doc_id`: restrict to one revision (a doc_id), or to a document
+        - `rev_id`: restrict to one revision (a rev_id), or to a document
                     ("D12": its newest revision, or all with all_revisions).
         - `level`: 'macro' (chapter summaries), 'meso' (subsections),
                    'micro' (paragraphs / tables).
@@ -1107,7 +1107,7 @@ def build_server(
             limit=limit,
             offset=offset,
             project_id=project_id,
-            doc_id=doc_id,
+            rev_id=rev_id,
             level=level,
             layout_types=layout_types,
             fields=fields,
@@ -1168,7 +1168,7 @@ def build_server(
         """List documents in the current (or specified) project.
 
         A document (`document_id`, "D12") groups the revisions of one
-        datasheet; each revision is one PDF (`doc_id`). One row per document,
+        datasheet; each revision is one PDF (`rev_id`). One row per document,
         showing its newest revision, with `revision_count`; pass
         `all_revisions=true` for one row per revision. `list_revisions` lists
         one document's revisions.
@@ -1200,15 +1200,15 @@ def build_server(
         )
 
     @mcp.tool()
-    def list_revisions(doc_id: str) -> dict[str, Any]:
+    def list_revisions(rev_id: str) -> dict[str, Any]:
         """List the revisions of a document, newest first.
 
-        `doc_id` is a document ("D12") or any of its revisions' doc_ids. Each
-        revision has its doc_id, its `revision` label when set ("Rev C"),
+        `rev_id` is a document ("D12") or any of its revisions' rev_ids. Each
+        revision has its rev_id, its `revision` label when set ("Rev C"),
         its title and chunk count, and `newest: true` on the one search
         uses by default.
         """
-        return _list_revisions_impl(doc_id, backend=backend)
+        return _list_revisions_impl(rev_id, backend=backend)
 
     @mcp.tool()
     def list_metadata_fields() -> dict[str, Any]:
@@ -1225,25 +1225,25 @@ def build_server(
         return _list_metadata_fields_impl(backend=backend)
 
     @mcp.tool()
-    def get_document_metadata(doc_id: str) -> dict[str, Any] | None:
+    def get_document_metadata(rev_id: str) -> dict[str, Any] | None:
         """Fetch a document's metadata (fields such as mpn, tags, …) and its revisions.
 
-        `doc_id` is a revision's doc_id (its effective metadata, with
+        `rev_id` is a revision's rev_id (its effective metadata, with
         `overrides` naming values set on that revision only) or a document
         ("D12": the document's own metadata, shown with its newest revision).
 
         An ingested document with no metadata assigned returns a row of null
         fields. ``None`` means no such document is in the store.
         """
-        return _get_document_metadata_impl(doc_id, backend=backend)
+        return _get_document_metadata_impl(rev_id, backend=backend)
 
     @mcp.tool()
     def stats(
         project_id: str | None = None,
-        doc_id: str | None = None,
+        rev_id: str | None = None,
     ) -> dict[str, Any]:
         """Return chunk counts (total + by level) for the current scope."""
-        return _stats_impl(project_id=project_id, doc_id=doc_id, backend=backend)
+        return _stats_impl(project_id=project_id, rev_id=rev_id, backend=backend)
 
     @mcp.tool(structured_output=False)
     def get_figure(chunk_id: str) -> ContentBlocks:
@@ -1278,7 +1278,7 @@ def build_server(
             f"Figure {result['chunk_id']}\n"
             f"  caption: {caption or '(none)'}\n"
             f"  description: {description or '(none generated yet)'}\n"
-            f"  source: doc {citation['doc_id'][:10]} · "
+            f"  source: doc {citation['rev_id'][:10]} · "
             f"page {citation['page']} · section {citation['section']!r}"
         )
         return [
@@ -1488,7 +1488,7 @@ def build_server(
     if local_client:
 
         @mcp.tool(structured_output=False)
-        def show_pdf(doc_id: str, page: int = 1) -> ContentBlocks:
+        def show_pdf(rev_id: str, page: int = 1) -> ContentBlocks:
             """Open the source PDF in a browser-based interactive viewer.
 
             Starts a local HTTP server (if not already running) and returns a
@@ -1501,21 +1501,21 @@ def build_server(
             - They want to browse pages freely beyond a single screenshot.
 
             Args:
-                doc_id: From chunk.doc_id or list_documents results; a
+                rev_id: From chunk.rev_id or list_documents results; a
                         document ("D12") opens its newest revision.
                 page:   1-based starting page number (passed as URL hash).
             """
             try:
-                doc_id = _pdf_doc_id(_backend(backend), doc_id)
+                rev_id = _pdf_rev_id(_backend(backend), rev_id)
                 # Fetch via the backend (HTTP in remote mode) and prime the
                 # viewer cache so the loopback server can serve it locally.
-                pdf_viewer.prime_pdf_cache(doc_id, _backend(backend).get_pdf_bytes(doc_id))
-                url = pdf_viewer.viewer_url(doc_id, page=page)
+                pdf_viewer.prime_pdf_cache(rev_id, _backend(backend).get_pdf_bytes(rev_id))
+                url = pdf_viewer.viewer_url(rev_id, page=page)
             except FileNotFoundError as exc:
                 return [TextContent(type="text", text=f"Error: {exc}")]
             except Exception as exc:
                 return [TextContent(type="text", text=f"Failed to load PDF: {exc}")]
-            label = _doc_label(_get_document_metadata_impl(doc_id, backend=backend))
+            label = _doc_label(_get_document_metadata_impl(rev_id, backend=backend))
             desc = f" ({label})" if label else ""
             return [
                 TextContent(
@@ -1531,7 +1531,7 @@ def build_server(
         meta={"ui": {"resourceUri": "ui://datasheet-rag/figure-app"}},
         structured_output=False,
     )
-    def show_page(doc_id: str, page: int = 1) -> ContentBlocks:
+    def show_page(rev_id: str, page: int = 1) -> ContentBlocks:
         """Render a single PDF page as an inline image widget in Claude Desktop.
 
         Converts the page to PNG server-side (via poppler/pdf2image) and
@@ -1544,7 +1544,7 @@ def build_server(
         - Alongside an answer, to show the source page for context.
 
         Args:
-            doc_id: From chunk.doc_id or list_documents results; a
+            rev_id: From chunk.rev_id or list_documents results; a
                     document ("D12") shows its newest revision.
             page:   1-based page number (use the chunk's ``page`` field).
         """
@@ -1554,8 +1554,8 @@ def build_server(
         from pdf2image import convert_from_bytes
 
         try:
-            doc_id = _pdf_doc_id(_backend(backend), doc_id)
-            pdf_bytes = _backend(backend).get_pdf_bytes(doc_id)
+            rev_id = _pdf_rev_id(_backend(backend), rev_id)
+            pdf_bytes = _backend(backend).get_pdf_bytes(rev_id)
         except FileNotFoundError as exc:
             return [TextContent(type="text", text=f"Error: {exc}")]
         except Exception as exc:
@@ -1569,7 +1569,7 @@ def build_server(
         buf = io.BytesIO()
         images[0].save(buf, format="PNG")
         img_b64 = base64.b64encode(buf.getvalue()).decode()
-        label = _doc_label(_get_document_metadata_impl(doc_id, backend=backend))
+        label = _doc_label(_get_document_metadata_impl(rev_id, backend=backend))
         caption = f"page {page}" + (f" · {label}" if label else "")
         return [
             ImageContent(type="image", data=img_b64, mime_type="image/png"),

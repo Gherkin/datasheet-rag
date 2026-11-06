@@ -3,7 +3,7 @@
 This package owns the local persistence layer:
 
 * `schema`   – connection factory and DDL (chunks, chunk_vecs, chunk_fts,
-               doc_metadata, schema_version).
+               revisions, schema_version).
 * `sqlite`   – CRUD helpers for chunks and vectors.
 * `search`   – vector / keyword / hybrid retrieval.
 * `documents` – documents (`D12`) and the order of their revisions (PDFs).
@@ -72,8 +72,8 @@ from datasheet_rag.store.sqlite import (
     insert_chunks,
     insert_chunks_stats,
     list_figure_chunks,
-    resolve_doc_id,
     resolve_figure_path,
+    resolve_rev_id,
     set_doc_title,
     set_figure_source,
     to_relative_figure_path,
@@ -122,7 +122,7 @@ __all__ = [
     "list_figure_chunks",
     "lookup_api_key",
     "record_audit",
-    "resolve_doc_id",
+    "resolve_rev_id",
     "resolve_figure_path",
     "revoke_api_key",
     "set_doc_title",

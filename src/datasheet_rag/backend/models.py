@@ -29,7 +29,7 @@ class DocSummary(BaseModel):
     """
 
     #: The revision (one PDF).
-    doc_id: str
+    rev_id: str
     #: Its document, ``"D12"``.
     document_id: str = ""
     #: The revision label, e.g. ``"Rev C"``.
@@ -50,7 +50,7 @@ class DocSummary(BaseModel):
 
 
 class DocPage(BaseModel):
-    """One page of ``list_documents``, in ``doc_id`` order.
+    """One page of ``list_documents``, in ``rev_id`` order.
 
     ``total`` counts every document the filters match, not just this page's,
     so a caller can tell a short page from the end of the list (GH #42).
@@ -73,7 +73,7 @@ class ChunkPage(BaseModel):
 class IngestedDoc(BaseModel):
     """One row of ``get_ingested_docs`` — a doc that's actually in the store."""
 
-    doc_id: str
+    rev_id: str
     doc_title: str | None = None
     chunk_count: int = 0
     page_count: int | None = None
@@ -92,12 +92,12 @@ class StatsResult(BaseModel):
     total_chunks: int = 0
     by_level: dict[str, int] = Field(default_factory=dict)
     project_id: str | None = None
-    doc_id: str | None = None
+    rev_id: str | None = None
     fts_missing: int | None = None
 
 
 class FigureCitation(BaseModel):
-    doc_id: str
+    rev_id: str
     page: str = ""
     section: str = ""
     chapter: str = ""
@@ -111,7 +111,7 @@ class FigureBytes(BaseModel):
     """
 
     chunk_id: str
-    doc_id: str
+    rev_id: str
     image_b64: str
     format: str = "png"
     local_path: str | None = None
@@ -128,7 +128,7 @@ class FigureBytes(BaseModel):
         cls,
         *,
         chunk_id: str,
-        doc_id: str,
+        rev_id: str,
         image_bytes: bytes,
         fmt: str,
         local_path: str | None,
@@ -139,7 +139,7 @@ class FigureBytes(BaseModel):
     ) -> FigureBytes:
         return cls(
             chunk_id=chunk_id,
-            doc_id=doc_id,
+            rev_id=rev_id,
             image_b64=base64.b64encode(image_bytes).decode(),
             format=fmt,
             local_path=local_path,
@@ -177,7 +177,7 @@ class MetadataPatch(BaseModel):
     fields: dict[str, str | list[str] | None] | None = None
     project: str | None = None
     #: Write ``tags`` / ``fields`` on this one revision instead of on its
-    #: document (GH #124). Needs a revision's doc_id; no project changes.
+    #: document (GH #124). Needs a revision's rev_id; no project changes.
     this_revision: bool | None = None
     #: The revision label (``"Rev C"``); ``""`` clears it. Always per revision.
     revision: str | None = None
@@ -217,7 +217,7 @@ class MetadataPatch(BaseModel):
 class RevisionSummary(BaseModel):
     """One revision in a document's list of revisions."""
 
-    doc_id: str
+    rev_id: str
     revision: str | None = None
     newest: bool = False
     doc_title: str | None = None
@@ -267,7 +267,7 @@ class IngestLink(BaseModel):
 class IngestResult(BaseModel):
     """Outcome of an ingest call."""
 
-    doc_id: str
+    rev_id: str
     #: The document the PDF is a revision of, ``"D12"``.
     document_id: str = ""
     #: Which document the PDF went into, and why (GH #124).
@@ -289,7 +289,7 @@ class TitleContext(BaseModel):
     itself is worth moving.
     """
 
-    doc_id: str
+    rev_id: str
     first_page_text: str = ""
     title_source: str = ""
     running_header: str | None = None

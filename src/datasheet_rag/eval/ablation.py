@@ -137,7 +137,7 @@ def build_variant_store(
     variant: IndexVariant,
     embedder: BatchEmbedder,
     *,
-    doc_id: str | None = None,
+    rev_id: str | None = None,
     project_id: str | None = None,
     limit: int | None = None,
     verbose: bool = False,
@@ -154,11 +154,11 @@ def build_variant_store(
 
     clauses: list[str] = []
     params: list[object] = []
-    if doc_id:
-        clauses.append("doc_id = ?")
-        params.append(doc_id)
+    if rev_id:
+        clauses.append("rev_id = ?")
+        params.append(rev_id)
     if project_id:
-        clause, clause_params = project_scope_sql(project_id, doc_id_column="doc_id")
+        clause, clause_params = project_scope_sql(project_id, rev_id_column="rev_id")
         clauses.append(clause)
         params.extend(clause_params)
     where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
@@ -193,11 +193,11 @@ def build_variant_store(
     # subsystem filters behave identically to the source.
     for chunk in chunks:
         insert_chunks(dst, [chunk], vectors=vectors)
-    _copy_projects(src_conn, dst, sorted({c.doc_id for c in chunks}))
+    _copy_projects(src_conn, dst, sorted({c.rev_id for c in chunks}))
     return dst
 
 
-def _copy_projects(src: sqlite3.Connection, dst: sqlite3.Connection, doc_ids: list[str]) -> None:
+def _copy_projects(src: sqlite3.Connection, dst: sqlite3.Connection, rev_ids: list[str]) -> None:
     """Give the revisions copied into ``dst`` the documents they have in ``src``.
 
     Revisions of one source document become revisions of one document in
@@ -208,8 +208,8 @@ def _copy_projects(src: sqlite3.Connection, dst: sqlite3.Connection, doc_ids: li
     overrides — so scoping and field filters behave as in the source.
     """
     registered = field_shapes(dst)
-    wanted = set(doc_ids)
-    for document_id in sorted(set(documents_of(src, doc_ids).values())):
+    wanted = set(rev_ids)
+    for document_id in sorted(set(documents_of(src, rev_ids).values())):
         revs = [d for d in reversed(revisions_of(src, document_id)) if d in wanted]
         if not revs:
             continue
@@ -257,7 +257,7 @@ def _copy_projects(src: sqlite3.Connection, dst: sqlite3.Connection, doc_ids: li
 # extractive to abstractive" TODO — this is the eval that gates the switch.
 
 
-def _load_doc_graph_from_store(conn: sqlite3.Connection, doc_id: str) -> ChunkGraph:
+def _load_doc_graph_from_store(conn: sqlite3.Connection, rev_id: str) -> ChunkGraph:
     """Reconstruct a full :class:`ChunkGraph` (with ``children_ids``) from
     store rows.
 
@@ -268,7 +268,7 @@ def _load_doc_graph_from_store(conn: sqlite3.Connection, doc_id: str) -> ChunkGr
     originally appended children in, so grouping by ``parent_id`` over that
     order reproduces the original ``children_ids`` lists.
     """
-    rows = conn.execute("SELECT * FROM chunks WHERE doc_id = ?", (doc_id,)).fetchall()
+    rows = conn.execute("SELECT * FROM chunks WHERE rev_id = ?", (rev_id,)).fetchall()
     chunks = [_row_to_chunk(r) for r in rows]
     chunks.sort(key=_chunk_sort_key)
 
@@ -279,7 +279,7 @@ def _load_doc_graph_from_store(conn: sqlite3.Connection, doc_id: str) -> ChunkGr
     for c in chunks:
         c.children_ids = children_by_parent.get(c.id, [])
 
-    graph = ChunkGraph(doc_id=doc_id)
+    graph = ChunkGraph(rev_id=rev_id)
     for c in chunks:
         graph.add(c)
     return graph
@@ -298,7 +298,7 @@ def _fetch_vector(conn: sqlite3.Connection, chunk_id: str) -> list[float] | None
 def build_macro_summarizer_variant_store(
     src_conn: sqlite3.Connection,
     dst_path: Path | str,
-    doc_id: str,
+    rev_id: str,
     summarizer: AbstractiveSummarizer,
     embedder: BatchEmbedder,
     *,
@@ -306,7 +306,7 @@ def build_macro_summarizer_variant_store(
 ) -> sqlite3.Connection:
     """Build a variant store with MACRO chunks re-summarized abstractively.
 
-    Loads ``doc_id``'s chunk graph from ``src_conn``, runs
+    Loads ``rev_id``'s chunk graph from ``src_conn``, runs
     ``summarizer.summarize_graph`` over it (only MACRO ``text``/
     ``context_text``/``token_count`` change — MESO/MICRO chunks are
     untouched), re-embeds just the chapters whose ``context_text`` changed,
@@ -323,13 +323,13 @@ def build_macro_summarizer_variant_store(
     dim = _embedding_dim(src_conn)
     dst = connect(dst_path, embedding_dim=dim)
 
-    graph = _load_doc_graph_from_store(src_conn, doc_id)
+    graph = _load_doc_graph_from_store(src_conn, rev_id)
     macro_chunks = graph.by_level(ChunkLevel.MACRO)
     original_context = {c.id: c.context_text for c in macro_chunks}
 
     if verbose:
         console.print(
-            f"[cyan]macro-summarizer[/]: re-summarizing {doc_id} "
+            f"[cyan]macro-summarizer[/]: re-summarizing {rev_id} "
             f"({len(macro_chunks)} chapters) with {summarizer.model_id}…"
         )
     graph = summarizer.summarize_graph(graph)
@@ -363,5 +363,5 @@ def build_macro_summarizer_variant_store(
 
     for chunk in graph.chunks.values():
         insert_chunks(dst, [chunk], vectors=vectors)
-    _copy_projects(src_conn, dst, [doc_id])
+    _copy_projects(src_conn, dst, [rev_id])
     return dst

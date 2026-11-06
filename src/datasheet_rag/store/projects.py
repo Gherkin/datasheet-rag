@@ -66,14 +66,14 @@ def check_project_change(
     return add_n, remove_n
 
 
-def project_scope_sql(project_id: str, *, doc_id_column: str) -> tuple[str, list[object]]:
+def project_scope_sql(project_id: str, *, rev_id_column: str) -> tuple[str, list[object]]:
     """A WHERE clause keeping rows whose revision's document belongs to ``project_id``.
 
-    ``doc_id_column`` names the column to test (``"doc_id"``, ``"c.doc_id"``)
+    ``rev_id_column`` names the column to test (``"rev_id"``, ``"c.rev_id"``)
     and comes from code, never from user input.
     """
     return (
-        f"{doc_id_column} IN (SELECT m.doc_id FROM doc_metadata m "
+        f"{rev_id_column} IN (SELECT m.rev_id FROM revisions m "
         "JOIN document_projects p ON p.document_id = m.document_id WHERE p.project_id = ?)",
         [project_id],
     )
@@ -110,15 +110,15 @@ def get_projects_for_documents(
 
 
 def get_projects_for_docs(
-    conn: sqlite3.Connection, doc_ids: Sequence[str] | None = None
+    conn: sqlite3.Connection, rev_ids: Sequence[str] | None = None
 ) -> dict[str, list[str]]:
-    """``{doc_id: sorted projects of its document}``; ``None`` reads every revision.
+    """``{rev_id: sorted projects of its document}``; ``None`` reads every revision.
 
     A revision whose document is in no project is absent from the result.
     """
     from datasheet_rag.store.documents import documents_of
 
-    docs = documents_of(conn, doc_ids)
+    docs = documents_of(conn, rev_ids)
     projects = get_projects_for_documents(conn, sorted(set(docs.values())))
     return {d: list(projects[n]) for d, n in docs.items() if n in projects}
 

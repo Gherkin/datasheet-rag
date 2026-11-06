@@ -1,6 +1,6 @@
 """How the CLI reports errors (GH #36).
 
-A mistake the user can fix — an unreachable server, a mistyped doc_id, a bad
+A mistake the user can fix — an unreachable server, a mistyped rev_id, a bad
 option value — must come out as a one-line message and exit code 1. Anything
 else is a bug: the traceback stays, under a line asking for it to be
 reported.
@@ -40,7 +40,7 @@ def _clear_project_config_cache() -> None:
 @pytest.fixture()
 def db_path(tmp_path: Path) -> Path:
     md = ChunkMetadata(
-        doc_id=DOC_A,
+        rev_id=DOC_A,
         doc_title="Doc A",
         chapter_title="",
         section_title="",
@@ -50,7 +50,7 @@ def db_path(tmp_path: Path) -> Path:
     )
     chunk = Chunk(
         id=f"{DOC_A}:L2:0",
-        doc_id=DOC_A,
+        rev_id=DOC_A,
         level=ChunkLevel.MICRO,
         text="t",
         context_text="t",
@@ -60,20 +60,20 @@ def db_path(tmp_path: Path) -> Path:
     path = tmp_path / "store" / "rag.sqlite"
     conn = connect(path, embedding_dim=get_settings().embedding_dimensions)
     insert_chunks(conn, [chunk])
-    set_metadata(conn, chunk.doc_id, add_projects=["proj-a"])
+    set_metadata(conn, chunk.rev_id, add_projects=["proj-a"])
     conn.commit()
     conn.close()
     return path
 
 
 class _Backend:
-    """Resolves any doc_id; every other call raises ``error``."""
+    """Resolves any rev_id; every other call raises ``error``."""
 
     def __init__(self, error: Exception) -> None:
         self._error = error
 
-    def resolve_doc_id(self, doc_id: str) -> str:
-        return doc_id
+    def resolve_rev_id(self, rev_id: str) -> str:
+        return rev_id
 
     def __getattr__(self, name: str) -> Any:
         def _fail(*_a: Any, **_kw: Any) -> Any:
@@ -147,15 +147,15 @@ def test_unexpected_error_keeps_traceback_with_preface(monkeypatch: pytest.Monke
     assert result.exception is boom
 
 
-# --- mistyped doc_id ----------------------------------------------------------
+# --- mistyped rev_id ----------------------------------------------------------
 
 
-def test_search_unknown_doc_id_is_a_clean_error(db_path: Path) -> None:
+def test_search_unknown_rev_id_is_a_clean_error(db_path: Path) -> None:
     result = CliRunner().invoke(
-        cli, ["search", "x", "--mode", "keyword", "--doc-id", "zzzz", "--db", str(db_path)]
+        cli, ["search", "x", "--mode", "keyword", "--rev-id", "zzzz", "--db", str(db_path)]
     )
     assert result.exit_code == 1, result.output
-    assert "No ingested document matches" in result.output
+    assert "No ingested revision matches" in result.output
     assert result.exception is None or isinstance(result.exception, SystemExit)
 
 
@@ -177,7 +177,7 @@ def test_eval_on_a_broken_keyword_index_is_a_clean_error(db_path: Path, tmp_path
     conn.close()
     golden = tmp_path / "golden.jsonl"
     golden.write_text(
-        f'{{"question": "t", "category": "identifier", "doc_id": "{DOC_A}"}}\n',
+        f'{{"question": "t", "category": "identifier", "rev_id": "{DOC_A}"}}\n',
         encoding="utf-8",
     )
     result = CliRunner().invoke(
@@ -204,7 +204,7 @@ def test_index_ablation_refuses_a_broken_keyword_index_before_re_embedding(
     conn.close()
     golden = tmp_path / "golden.jsonl"
     golden.write_text(
-        f'{{"question": "t", "category": "identifier", "doc_id": "{DOC_A}"}}\n',
+        f'{{"question": "t", "category": "identifier", "rev_id": "{DOC_A}"}}\n',
         encoding="utf-8",
     )
     args = ["--index-ablation", "context-vs-raw", "--variant-db", str(tmp_path / "v.sqlite")]
@@ -221,7 +221,7 @@ def test_eval_k_past_the_pool_is_a_clean_error(db_path: Path, tmp_path: Path, co
     # GH #90: the eval scores the live search pool, so a k past it is refused.
     golden = tmp_path / "golden.jsonl"
     golden.write_text(
-        f'{{"question": "t", "category": "identifier", "doc_id": "{DOC_A}"}}\n',
+        f'{{"question": "t", "category": "identifier", "rev_id": "{DOC_A}"}}\n',
         encoding="utf-8",
     )
     result = CliRunner().invoke(
@@ -233,10 +233,10 @@ def test_eval_k_past_the_pool_is_a_clean_error(db_path: Path, tmp_path: Path, co
 
 
 @pytest.mark.parametrize("extra", [(), ("--mpn", "X1")], ids=["read", "write"])
-def test_metadata_unknown_doc_id_is_a_clean_error(db_path: Path, extra: tuple[str, ...]) -> None:
+def test_metadata_unknown_rev_id_is_a_clean_error(db_path: Path, extra: tuple[str, ...]) -> None:
     result = CliRunner().invoke(cli, ["metadata", "zzzz", *extra, "--db", str(db_path)])
     assert result.exit_code == 1, result.output
-    assert "No ingested document matches" in result.output
+    assert "No ingested revision matches" in result.output
     assert _PREFACE not in result.output
 
 

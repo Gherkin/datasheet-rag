@@ -3,11 +3,11 @@
 Metadata belongs to a *document* (``D12``, see ``store.documents``): its
 projects, its tags and the values of registered fields such as MPN,
 manufacturer and the project-scoped subsystem (``store.fields``). Every
-revision of the document has them. A revision (one PDF, ``doc_id``) may
+revision of the document has them. A revision (one PDF, ``rev_id``) may
 override a field or the tag list for itself only (``this_revision``); its
 *effective* metadata is then the override.
 
-Each revision has a ``doc_metadata`` row. It holds the revision label
+Each revision has a ``revisions`` row. It holds the revision label
 (``"Rev C"``), the revision's place in its document, its tag override, and
 the pipeline's own bookkeeping: title provenance, the ingest-time title
 hints and the re-embed marker. Bookkeeping is typed columns the pipeline
@@ -72,11 +72,11 @@ class DocMetadata(BaseModel):
     For a revision, ``projects`` / ``tags`` / ``fields`` / ``project_fields``
     are its effective values: its document's, with its own overrides in
     place (named in ``overrides``). For a document, they are the document's
-    own values and ``doc_id`` is its newest revision.
+    own values and ``rev_id`` is its newest revision.
     """
 
     #: The revision (one PDF). For a document view, its newest revision.
-    doc_id: str
+    rev_id: str
     #: The document, ``"D12"``.
     document_id: str = ""
     #: The revision label, e.g. ``"Rev C"``; free text, never parsed.
@@ -107,7 +107,7 @@ class DocMetadata(BaseModel):
 
     @property
     def is_newest(self) -> bool:
-        return not self.revisions or self.revisions[0] == self.doc_id
+        return not self.revisions or self.revisions[0] == self.rev_id
 
 
 # ---------------------------------------------------------------------------
@@ -158,39 +158,37 @@ def validate_title_source(source: str) -> None:
         raise ValueError(f"unknown title source {source!r} (expected one of {TITLE_SOURCES})")
 
 
-def get_title_source(conn: sqlite3.Connection, doc_id: str) -> str:
-    """Return the recorded provenance of ``doc_id``'s title (``auto`` if none)."""
-    row = conn.execute(
-        "SELECT title_source FROM doc_metadata WHERE doc_id = ?", (doc_id,)
-    ).fetchone()
+def get_title_source(conn: sqlite3.Connection, rev_id: str) -> str:
+    """Return the recorded provenance of ``rev_id``'s title (``auto`` if none)."""
+    row = conn.execute("SELECT title_source FROM revisions WHERE rev_id = ?", (rev_id,)).fetchone()
     return (row["title_source"] if row is not None else None) or "auto"
 
 
-def _set_bookkeeping(conn: sqlite3.Connection, doc_id: str, **columns: object) -> None:
-    """Set pipeline bookkeeping columns of revision ``doc_id``. Does not commit.
+def _set_bookkeeping(conn: sqlite3.Connection, rev_id: str, **columns: object) -> None:
+    """Set pipeline bookkeeping columns of revision ``rev_id``. Does not commit.
 
     A revision seen for the first time gets its row (and a document).
     ``columns`` names come from this module only, never from user input.
     """
-    ensure_revision(conn, doc_id)
+    ensure_revision(conn, rev_id)
     conn.execute(
-        "UPDATE doc_metadata SET "
+        "UPDATE revisions SET "
         + ", ".join(f"{n} = ?" for n in columns)
-        + ", updated_at = CURRENT_TIMESTAMP WHERE doc_id = ?",
-        (*columns.values(), doc_id),
+        + ", updated_at = CURRENT_TIMESTAMP WHERE rev_id = ?",
+        (*columns.values(), rev_id),
     )
 
 
-def set_title_source(conn: sqlite3.Connection, doc_id: str, source: str) -> None:
-    """Record ``doc_id``'s title provenance."""
+def set_title_source(conn: sqlite3.Connection, rev_id: str, source: str) -> None:
+    """Record ``rev_id``'s title provenance."""
     validate_title_source(source)
-    _set_bookkeeping(conn, doc_id, title_source=source)
+    _set_bookkeeping(conn, rev_id, title_source=source)
     conn.commit()
 
 
 def set_title_hints(
     conn: sqlite3.Connection,
-    doc_id: str,
+    rev_id: str,
     *,
     pdf_meta_title: str | None,
     running_header: str | None,
@@ -202,24 +200,24 @@ def set_title_hints(
     """
     if not pdf_meta_title and not running_header:
         conn.execute(
-            "UPDATE doc_metadata SET pdf_meta_title = NULL, running_header = NULL, "
+            "UPDATE revisions SET pdf_meta_title = NULL, running_header = NULL, "
             "updated_at = CURRENT_TIMESTAMP "
-            "WHERE doc_id = ? AND (pdf_meta_title IS NOT NULL OR running_header IS NOT NULL)",
-            (doc_id,),
+            "WHERE rev_id = ? AND (pdf_meta_title IS NOT NULL OR running_header IS NOT NULL)",
+            (rev_id,),
         )
     else:
         _set_bookkeeping(
             conn,
-            doc_id,
+            rev_id,
             pdf_meta_title=pdf_meta_title or None,
             running_header=running_header or None,
         )
     conn.commit()
 
 
-def set_needs_reembed(conn: sqlite3.Connection, doc_id: str, value: bool) -> None:
-    """Mark (or unmark) ``doc_id`` as needing its chunks re-embedded."""
-    _set_bookkeeping(conn, doc_id, needs_reembed=1 if value else None)
+def set_needs_reembed(conn: sqlite3.Connection, rev_id: str, value: bool) -> None:
+    """Mark (or unmark) ``rev_id`` as needing its chunks re-embedded."""
+    _set_bookkeeping(conn, rev_id, needs_reembed=1 if value else None)
     conn.commit()
 
 
@@ -242,10 +240,10 @@ def _views(
     """Build :class:`DocMetadata` for revision rows, in a fixed number of queries."""
     if not rows:
         return []
-    doc_ids = [r["doc_id"] for r in rows]
+    rev_ids = [r["rev_id"] for r in rows]
     dids = sorted({int(r["document_id"]) for r in rows if r["document_id"] is not None})
     dvals = get_document_values(conn, _keys(dids))
-    ovals = {} if document_view else get_override_values(conn, _keys(doc_ids))
+    ovals = {} if document_view else get_override_values(conn, _keys(rev_ids))
     projects = get_projects_for_documents(conn, _keys(dids))
     pvals = get_project_values(conn, _keys(dids))
     doc_tags: dict[int, list[str]] = {}
@@ -256,8 +254,8 @@ def _views(
         for r in conn.execute(f"SELECT id, tags FROM documents WHERE id IN ({marks})", batch):
             doc_tags[int(r[0])] = json.loads(r[1]) if r[1] else []
         for r in conn.execute(
-            f"SELECT document_id, doc_id FROM doc_metadata WHERE document_id IN ({marks}) "
-            "ORDER BY position DESC, doc_id",
+            f"SELECT document_id, rev_id FROM revisions WHERE document_id IN ({marks}) "
+            "ORDER BY position DESC, rev_id",
             batch,
         ):
             revs.setdefault(int(r[0]), []).append(r[1])
@@ -269,7 +267,7 @@ def _views(
         overridden: list[str] = []
         tags = list(doc_tags.get(did, [])) if did is not None else []
         if not document_view:
-            own = ovals.get(row["doc_id"], {})
+            own = ovals.get(row["rev_id"], {})
             values.update(own)
             overridden = sorted(own)
             if row["tags"] is not None:
@@ -277,10 +275,10 @@ def _views(
                 overridden.append("tags")
         out.append(
             DocMetadata(
-                doc_id=row["doc_id"],
+                rev_id=row["rev_id"],
                 document_id=format_document_id(did) if did is not None else "",
                 revision=row["revision"],
-                revisions=list(revs.get(did, [row["doc_id"]])) if did is not None else [],
+                revisions=list(revs.get(did, [row["rev_id"]])) if did is not None else [],
                 projects=list(projects.get(did, [])) if did is not None else [],
                 tags=tags,
                 fields=values,
@@ -297,18 +295,18 @@ def _views(
 
 
 def get_metadata(conn: sqlite3.Connection, ref: str) -> DocMetadata | None:
-    """The metadata of a revision (``doc_id``) or a document (``D12``), or ``None``.
+    """The metadata of a revision (``rev_id``) or a document (``D12``), or ``None``.
 
-    Read-only: an unknown doc_id returns ``None`` rather than creating a row.
+    Read-only: an unknown rev_id returns ``None`` rather than creating a row.
     """
     n = parse_document_ref(ref)
     if n is not None:
         newest = newest_revision(conn, n) if document_exists(conn, n) else None
         if newest is None:
             return None
-        row = conn.execute("SELECT * FROM doc_metadata WHERE doc_id = ?", (newest,)).fetchone()
+        row = conn.execute("SELECT * FROM revisions WHERE rev_id = ?", (newest,)).fetchone()
         return _views(conn, [row], document_view=True)[0]
-    row = conn.execute("SELECT * FROM doc_metadata WHERE doc_id = ?", (ref,)).fetchone()
+    row = conn.execute("SELECT * FROM revisions WHERE rev_id = ?", (ref,)).fetchone()
     if row is None or row["document_id"] is None:
         return None
     return _views(conn, [row])[0]
@@ -335,20 +333,20 @@ def list_docs(
     clauses: list[str] = ["document_id IS NOT NULL"]
     params: list[object] = []
     if not all_revisions:
-        clauses.append(older_revisions_sql("doc_id"))
+        clauses.append(older_revisions_sql("rev_id"))
     if project_id is not None:
-        clause, clause_params = project_scope_sql(project_id, doc_id_column="doc_id")
+        clause, clause_params = project_scope_sql(project_id, rev_id_column="rev_id")
         clauses.append(clause)
         params.extend(clause_params)
     if fields:
         check_filter_fields(field_shapes(conn), fields)
         field_clauses, field_params = field_filter_sql(
-            fields, doc_id_column="doc_id", project_id=project_id
+            fields, rev_id_column="rev_id", project_id=project_id
         )
         clauses.extend(field_clauses)
         params.extend(field_params)
     rows = conn.execute(
-        f"SELECT * FROM doc_metadata WHERE {' AND '.join(clauses)} ORDER BY doc_id",
+        f"SELECT * FROM revisions WHERE {' AND '.join(clauses)} ORDER BY rev_id",
         params,
     ).fetchall()
     return _views(conn, rows)
@@ -395,16 +393,16 @@ def check_write(
     ref, or ``this_revision`` with project changes. Raises ``ValueError``
     for a project both added and removed. Writes nothing, so ingest checks a
     patch before work it would be a waste to throw away. ``into`` is the
-    document a doc_id not stored yet will join (an ingest with a link): the
+    document a rev_id not stored yet will join (an ingest with a link): the
     check runs against it, so nothing is written before the chunks are.
     """
-    document_id, doc_id = lookup(conn, ref)
+    document_id, rev_id = lookup(conn, ref)
     if document_id is None and into is not None:
         document_id = require_document(conn, into)
-    if doc_id is None and (this_revision or revision is not None):
+    if rev_id is None and (this_revision or revision is not None):
         what = "--this-revision" if this_revision else "a revision label"
         raise RevisionError(
-            f"{ref} names a whole document; {what} needs one revision's doc_id "
+            f"{ref} names a whole document; {what} needs one revision's rev_id "
             f"(see rag revisions {ref})"
         )
     project = project.strip() if project is not None and project.strip() else None
@@ -468,7 +466,7 @@ def set_metadata(
 ) -> DocMetadata:
     """Upsert metadata with **partial** merge semantics.
 
-    ``ref`` is a document (``D12``) or a revision's doc_id. Either way the
+    ``ref`` is a document (``D12``) or a revision's rev_id. Either way the
     write lands on the document, unless ``this_revision`` is set: then tags
     and fields are written as overrides on that revision only. A parameter
     left as ``None`` (its default) means "leave the existing value alone".
@@ -492,10 +490,10 @@ def set_metadata(
     * ``project``: where the project-scoped fields in ``fields`` are
       written. Required when ``fields`` names one (see :func:`check_write`).
     * ``revision``: the revision label (``"Rev C"``); ``""`` clears it.
-      Needs a doc_id ref.
+      Needs a rev_id ref.
 
     Returns the resulting :class:`DocMetadata`: the revision view for a
-    doc_id ref, the document view for a ``D12``.
+    rev_id ref, the document view for a ``D12``.
     """
     checked = check_write(
         conn,
@@ -513,7 +511,7 @@ def set_metadata(
         if tags is not None:
             if this_revision:
                 conn.execute(
-                    "UPDATE doc_metadata SET tags = ? WHERE doc_id = ?",
+                    "UPDATE revisions SET tags = ? WHERE rev_id = ?",
                     (json.dumps(list(tags)) if tags else None, rev),
                 )
             else:
@@ -523,7 +521,7 @@ def set_metadata(
                 )
         if revision is not None:
             conn.execute(
-                "UPDATE doc_metadata SET revision = ? WHERE doc_id = ?",
+                "UPDATE revisions SET revision = ? WHERE rev_id = ?",
                 (revision.strip() or None, rev),
             )
         change_projects(conn, document_id, add=checked.add, remove=checked.remove)
@@ -538,7 +536,7 @@ def set_metadata(
         )
         if rev is not None:
             conn.execute(
-                "UPDATE doc_metadata SET updated_at = CURRENT_TIMESTAMP WHERE doc_id = ?",
+                "UPDATE revisions SET updated_at = CURRENT_TIMESTAMP WHERE rev_id = ?",
                 (rev,),
             )
         conn.commit()
@@ -551,8 +549,8 @@ def set_metadata(
     return refreshed
 
 
-def join_projects(conn: sqlite3.Connection, doc_id: str, projects: list[str]) -> None:
-    """Add ``doc_id``'s document to ``projects``. Does not commit.
+def join_projects(conn: sqlite3.Connection, rev_id: str, projects: list[str]) -> None:
+    """Add ``rev_id``'s document to ``projects``. Does not commit.
 
     Ingest calls this inside the chunk-insert transaction, so the projects
     commit with the chunks. ``projects`` are normalised already
@@ -560,20 +558,20 @@ def join_projects(conn: sqlite3.Connection, doc_id: str, projects: list[str]) ->
     """
     if not projects:
         return
-    change_projects(conn, ensure_revision(conn, doc_id), add=projects)
+    change_projects(conn, ensure_revision(conn, rev_id), add=projects)
 
 
-def delete_metadata(conn: sqlite3.Connection, doc_id: str) -> int:
-    """Delete revision ``doc_id``'s row and overrides; the document goes with
+def delete_metadata(conn: sqlite3.Connection, rev_id: str) -> int:
+    """Delete revision ``rev_id``'s row and overrides; the document goes with
     its last revision, with its projects and values.
 
-    Not covered by the ``chunks`` cascade (``doc_metadata`` is intentionally
+    Not covered by the ``chunks`` cascade (``revisions`` is intentionally
     not FK'd to ``chunks`` — see module docstring), so callers that fully
     delete a revision must call this alongside
     :func:`datasheet_rag.store.sqlite.delete_doc`.
 
     Returns the number of revision rows deleted (0 or 1).
     """
-    deleted = delete_revision(conn, doc_id)
+    deleted = delete_revision(conn, rev_id)
     conn.commit()
     return deleted

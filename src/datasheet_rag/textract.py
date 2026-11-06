@@ -49,7 +49,7 @@ def analyze_document_sync(pdf_path: Path) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def start_analysis(doc_id: str, s3_key: str) -> str:
+def start_analysis(rev_id: str, s3_key: str) -> str:
     """Start an async Textract analysis job. Returns the job ID."""
     settings = get_settings()
     client = textract_client()

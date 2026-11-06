@@ -119,7 +119,7 @@ def _migrate_to_v3(conn: sqlite3.Connection) -> None:
     migration fail with the document ids and names rather than lose data.
     One transaction: a failure leaves the v2 store as it was.
     """
-    from datasheet_rag.store.fields import _coerce, _write_values, ensure_field_tables
+    from datasheet_rag.store.fields import _coerce, ensure_field_tables
 
     if conn.in_transaction:
         conn.commit()
@@ -133,6 +133,7 @@ def _migrate_to_v3(conn: sqlite3.Connection) -> None:
             return
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(doc_metadata)")}
         ensure_field_tables(conn)
+        _ensure_legacy_tables(conn)
         for col, ddl in _V3_BOOKKEEPING_COLUMNS:
             if col not in cols:
                 conn.execute(f"ALTER TABLE doc_metadata ADD COLUMN {col} {ddl}")
@@ -148,7 +149,11 @@ def _migrate_to_v3(conn: sqlite3.Connection) -> None:
                     continue
                 moved = _coerce(raw.split(","), "list") if col == "mpn" else _coerce(raw, "single")
                 # v3 kept document values per doc_id here; v6 moves them on.
-                _write_values(conn, row["doc_id"], col, moved)
+                conn.executemany(
+                    "INSERT OR REPLACE INTO doc_field_values(doc_id, field, value, position) "
+                    "VALUES (?, ?, ?, ?)",
+                    [(row["doc_id"], col, v, i) for i, v in enumerate(moved)],
+                )
             if not has_attrs or not row["attributes"]:
                 continue
             attrs = json.loads(row["attributes"])
@@ -373,9 +378,20 @@ def _migrate_to_v5(conn: sqlite3.Connection) -> None:
 
 
 def _ensure_legacy_tables(conn: sqlite3.Connection) -> None:
-    """The v4/v5 tables keyed on doc_id: project membership and project-scoped
-    values. The v4 and v5 migrations write them; v6 moves their rows onto
-    documents and drops them. Does not commit."""
+    """The v3–v5 tables keyed on doc_id: field values, project membership and
+    project-scoped values. The v3–v5 migrations write them; v6 moves their
+    rows onto documents and drops them. Does not commit."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS doc_field_values (
+            doc_id   TEXT NOT NULL,
+            field    TEXT NOT NULL,
+            value    TEXT NOT NULL COLLATE NOCASE,
+            position INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (doc_id, field, value)
+        )
+        """
+    )
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS doc_projects (
@@ -502,7 +518,6 @@ def _migrate_to_v6(conn: sqlite3.Connection) -> None:
             "SELECT m.document_id, v.field, v.value, v.position FROM doc_field_values v "
             "JOIN doc_metadata m ON m.doc_id = v.doc_id"
         )
-        conn.execute("DELETE FROM doc_field_values")
         conn.execute(
             "INSERT OR IGNORE INTO document_project_field_values "
             "(document_id, project_id, field, value, position) "
@@ -511,14 +526,38 @@ def _migrate_to_v6(conn: sqlite3.Connection) -> None:
         )
         conn.execute("DROP TABLE doc_projects")
         conn.execute("DROP TABLE doc_project_field_values")
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS ix_doc_metadata_document ON doc_metadata(document_id)"
-        )
+        conn.execute("DROP TABLE doc_field_values")
+        _v6_rename_to_rev_id(conn)
         conn.execute("UPDATE schema_version SET version = 6 WHERE id = 1")
         conn.commit()
     except BaseException:
         conn.rollback()
         raise
+
+
+def _v6_rename_to_rev_id(conn: sqlite3.Connection) -> None:
+    """v6 names a PDF a revision: ``doc_id`` becomes ``rev_id`` and
+    ``doc_metadata`` becomes ``revisions``. ``revision_field_values`` (the
+    per-revision overrides, empty after v6) is created by
+    ``ensure_field_tables``. Does not commit."""
+    conn.execute("ALTER TABLE doc_metadata RENAME TO revisions")
+    conn.execute("ALTER TABLE revisions RENAME COLUMN doc_id TO rev_id")
+    for name in ("ix_doc_metadata_project", "ix_doc_metadata_group", "ix_doc_metadata_document"):
+        conn.execute(f"DROP INDEX IF EXISTS {name}")
+    conn.execute("CREATE INDEX IF NOT EXISTS ix_revisions_document ON revisions(document_id)")
+    conn.execute("ALTER TABLE chunks RENAME COLUMN doc_id TO rev_id")
+    # The full ChunkMetadata blob carries the id too.
+    conn.execute(
+        "UPDATE chunks SET metadata_json = json_set(json_remove(metadata_json, '$.doc_id'), "
+        "'$.rev_id', json_extract(metadata_json, '$.doc_id')) "
+        "WHERE json_type(metadata_json, '$.doc_id') IS NOT NULL"
+    )
+    conn.execute("DROP INDEX IF EXISTS ix_chunks_doc_id")
+    conn.execute("CREATE INDEX IF NOT EXISTS ix_chunks_rev_id ON chunks(rev_id)")
+    audit_cols = {r["name"] for r in conn.execute("PRAGMA table_info(audit_log)")}
+    if "doc_id" in audit_cols:
+        conn.execute("ALTER TABLE audit_log RENAME COLUMN doc_id TO rev_id")
+        conn.execute("DROP INDEX IF EXISTS ix_audit_doc")
 
 
 #: Data migrations run when an older store is opened, keyed by the version
@@ -711,7 +750,7 @@ def _ensure_control_tables(conn: sqlite3.Connection) -> None:
             key_label   TEXT,
             client_ip   TEXT,
             action      TEXT NOT NULL,
-            doc_id      TEXT,
+            rev_id      TEXT,
             project_id  TEXT,
             detail_json TEXT,
             status      TEXT NOT NULL,
@@ -719,7 +758,7 @@ def _ensure_control_tables(conn: sqlite3.Connection) -> None:
         )
         """
     )
-    cur.execute("CREATE INDEX IF NOT EXISTS ix_audit_doc ON audit_log(doc_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS ix_audit_rev ON audit_log(rev_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS ix_audit_ts ON audit_log(ts)")
     conn.commit()
 
@@ -930,7 +969,7 @@ def init_schema(conn: sqlite3.Connection, *, embedding_dim: int) -> None:
         """
         CREATE TABLE IF NOT EXISTS chunks (
             id              TEXT PRIMARY KEY,
-            doc_id          TEXT NOT NULL,
+            rev_id          TEXT NOT NULL,
             level           INTEGER NOT NULL,
             text            TEXT NOT NULL,
             context_text    TEXT NOT NULL,
@@ -953,7 +992,7 @@ def init_schema(conn: sqlite3.Connection, *, embedding_dim: int) -> None:
         )
         """
     )
-    cur.execute("CREATE INDEX IF NOT EXISTS ix_chunks_doc_id ON chunks(doc_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS ix_chunks_rev_id ON chunks(rev_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS ix_chunks_level ON chunks(level)")
 
     # ---- chunk_vecs ------------------------------------------------------
@@ -977,14 +1016,14 @@ def init_schema(conn: sqlite3.Connection, *, embedding_dim: int) -> None:
 
     ensure_documents_tables(conn)
 
-    # ---- doc_metadata ----------------------------------------------------
+    # ---- revisions ----------------------------------------------------
     # One row per revision (PDF). Not a FK to chunks so metadata can be
     # registered before ingestion completes (and survive a re-ingest).
     # document_id is set on every row by store.documents.ensure_revision.
     cur.execute(
         """
-        CREATE TABLE IF NOT EXISTS doc_metadata (
-            doc_id       TEXT PRIMARY KEY,
+        CREATE TABLE IF NOT EXISTS revisions (
+            rev_id       TEXT PRIMARY KEY,
             document_id  INTEGER,          -- documents.id; set by ensure_revision
             position     INTEGER NOT NULL DEFAULT 0,  -- higher = newer revision
             revision     TEXT,             -- revision label, e.g. "Rev C"
@@ -997,7 +1036,7 @@ def init_schema(conn: sqlite3.Connection, *, embedding_dim: int) -> None:
         )
         """
     )
-    cur.execute("CREATE INDEX IF NOT EXISTS ix_doc_metadata_document ON doc_metadata(document_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS ix_revisions_document ON revisions(document_id)")
 
     # ---- document_projects -----------------------------------------------
     # Project membership, many projects per document (GH #121).
@@ -1005,7 +1044,7 @@ def init_schema(conn: sqlite3.Connection, *, embedding_dim: int) -> None:
 
     ensure_projects_table(conn)
 
-    # ---- metadata_fields / doc_field_values ------------------------------
+    # ---- metadata_fields / revision_field_values ------------------------------
     # Registered fields and their values (GH #120, #123). mpn, manufacturer,
     # doc_type and the project-scoped subsystem are pre-registered fields.
     from datasheet_rag.store.fields import ensure_field_tables

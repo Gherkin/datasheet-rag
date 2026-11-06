@@ -16,6 +16,7 @@ import click
 from rich.console import Console
 from rich.table import Table
 
+from datasheet_rag import cache_files
 from datasheet_rag.config import get_settings
 from datasheet_rag.store.documents import parse_document_ref
 
@@ -40,42 +41,42 @@ if TYPE_CHECKING:
 
 console = Console()
 
-# doc_ids are full SHA-256 content hashes (64 hex chars). We display and
+# rev_ids are full SHA-256 content hashes (64 hex chars). We display and
 # accept abbreviated forms — like `git log --oneline` short SHAs — and
-# resolve unambiguous prefixes to the full hash via `resolve_doc_id`.
-SHORT_DOC_ID_LEN = 12
+# resolve unambiguous prefixes to the full hash via `resolve_rev_id`.
+SHORT_REV_ID_LEN = 12
 
 
-def _resolve_doc_id(conn: sqlite3.Connection, doc_id: str) -> str:
-    """CLI wrapper around the **store-backed** `resolve_doc_id`: turns
+def _resolve_rev_id(conn: sqlite3.Connection, rev_id: str) -> str:
+    """CLI wrapper around the **store-backed** `resolve_rev_id`: turns
     ambiguity/misses into ClickException.
 
     Domain: the sqlite index — only resolves docs that have been *embedded*.
     For commands that operate on on-disk cache artifacts (blocks/chunks/outline)
-    before a doc is embedded, use `_resolve_cached_doc_id` instead.
+    before a doc is embedded, use `_resolve_cached_rev_id` instead.
     """
-    from datasheet_rag.store import resolve_doc_id
+    from datasheet_rag.store import resolve_rev_id
 
     try:
-        return resolve_doc_id(conn, doc_id)
+        return resolve_rev_id(conn, rev_id)
     except ValueError as e:
         raise click.ClickException(str(e)) from e
 
 
-def _cache_path(doc_id: str, suffix: str) -> Path:
-    """Return the conventional cache-artifact path for *doc_id*.
+def _cache_path(rev_id: str, suffix: str) -> Path:
+    """Return the conventional cache-artifact path for *rev_id*.
 
     All local pipeline artifacts live under ``settings.output_dir`` keyed by
-    doc_id, e.g. ``{doc_id}_blocks.json`` / ``{doc_id}_chunks.json`` /
-    ``{doc_id}_outline.json``.
+    rev_id, e.g. ``{rev_id}_blocks.json`` / ``{rev_id}_chunks.json`` /
+    ``{rev_id}_outline.json``.
     """
-    return get_settings().output_dir / f"{doc_id}{suffix}"
+    return get_settings().output_dir / f"{rev_id}{suffix}"
 
 
 def _resolve_store_first(arg: str) -> str | None:
-    """Expand a doc_id prefix via the store, or return None if it isn't there.
+    """Expand a rev_id prefix via the store, or return None if it isn't there.
 
-    The store is the authoritative namespace: a doc_id printed by `rag list`
+    The store is the authoritative namespace: a rev_id printed by `rag list`
     or `rag search` should resolve the same way everywhere. Cache-reading
     commands consult this first and only fall back to prefix-matching the
     local cache, which is what lets them still work on a PDF that was parsed
@@ -85,17 +86,17 @@ def _resolve_store_first(arg: str) -> str | None:
     in the store", and the caller falls back to the cache.
     """
     try:
-        return _backend_for().resolve_doc_id(arg)
+        return _backend_for().resolve_rev_id(arg)
     except Exception:
         return None
 
 
-def _resolve_cached_doc_id(doc_id: str, suffix: str = "_outline.json") -> str:
-    """Resolve a possibly-abbreviated doc_id against the local cache dir.
+def _resolve_cached_rev_id(rev_id: str, suffix: str = "_outline.json") -> str:
+    """Resolve a possibly-abbreviated rev_id against the local cache dir.
 
     Domain: the filesystem cache (``settings.output_dir``). Globs
-    ``{output_dir}/{doc_id}*{suffix}`` and returns the single full doc_id that
-    matches. Unlike the store-backed `_resolve_doc_id`, this sees documents
+    ``{output_dir}/{rev_id}*{suffix}`` and returns the single full rev_id that
+    matches. Unlike the store-backed `_resolve_rev_id`, this sees documents
     that have a cached artifact but have not been embedded yet — which is the
     normal state for `repair chunks` / `repair embeddings` inputs.
 
@@ -106,65 +107,65 @@ def _resolve_cached_doc_id(doc_id: str, suffix: str = "_outline.json") -> str:
     # Store first, so an abbreviation resolves the same way it does in
     # `rag list` / `rag search`; fall back to the cache for docs not (yet)
     # ingested.
-    full = _resolve_store_first(doc_id)
+    full = _resolve_store_first(rev_id)
     if full is not None and (settings.output_dir / f"{full}{suffix}").is_file():
         return full
 
     # The prefix is user input: `*`, `?` and `[` must not act as wildcards.
-    matches = sorted(settings.output_dir.glob(f"{glob.escape(doc_id)}*{suffix}"))
+    matches = sorted(settings.output_dir.glob(f"{glob.escape(rev_id)}*{suffix}"))
     if not matches:
         raise click.ClickException(
-            f"No cached {suffix.lstrip('_')} matching doc_id {doc_id!r} in "
+            f"No cached {suffix.lstrip('_')} matching rev_id {rev_id!r} in "
             f"{settings.output_dir}. Run the earlier pipeline stage for this "
             "document first."
         )
     resolved = {p.name.removesuffix(suffix) for p in matches}
     if len(resolved) > 1:
         names = ", ".join(sorted(resolved))
-        raise click.ClickException(f"doc_id {doc_id!r} is ambiguous — matches: {names}")
+        raise click.ClickException(f"rev_id {rev_id!r} is ambiguous — matches: {names}")
     return next(iter(resolved))
 
 
-def _require_docling_outline(doc_id: str) -> str:
-    """Resolve *doc_id* to a cached Docling outline, or explain why there isn't one.
+def _require_docling_outline(rev_id: str) -> str:
+    """Resolve *rev_id* to a cached Docling outline, or explain why there isn't one.
 
     The table commands read Docling's own structure confidence signals, which
     Textract's output has no equivalent of — so they are Docling-only by
     nature, not by oversight. Detect the Textract case explicitly rather than
-    letting `_resolve_cached_doc_id` report a generic missing-artifact error
+    letting `_resolve_cached_rev_id` report a generic missing-artifact error
     that reads like the document was never ingested.
     """
     settings = get_settings()
-    prefix = glob.escape(doc_id)
+    prefix = glob.escape(rev_id)
     if not sorted(settings.output_dir.glob(f"{prefix}*_outline.json")):
         if sorted(settings.output_dir.glob(f"{prefix}*_blocks.json")):
             raise click.ClickException(
-                f"Document {doc_id!r} was ingested with the Textract backend, and "
+                f"Revision {rev_id!r} was ingested with the Textract backend, and "
                 "the table commands are Docling-only — they read Docling's "
                 "table-structure confidence signals, which Textract's output "
                 "does not provide. Re-ingest with `rag ingest --backend docling` "
                 "to use them (see GitHub issue #31)."
             )
-    return _resolve_cached_doc_id(doc_id, "_outline.json")
+    return _resolve_cached_rev_id(rev_id, "_outline.json")
 
 
 def _doc_input(arg: str, suffix: str) -> tuple[str, Path]:
-    """Resolve a smart positional that is *either* a doc_id or an explicit file path.
+    """Resolve a smart positional that is *either* a rev_id or an explicit file path.
 
-    If *arg* is an existing file, use it directly and infer the doc_id from its
+    If *arg* is an existing file, use it directly and infer the rev_id from its
     stem (dropping the artifact suffix, e.g. ``_blocks``). Otherwise treat *arg*
-    as a doc_id prefix, resolve it against the cache (`_resolve_cached_doc_id`),
-    and return the conventional ``{doc_id}{suffix}`` path.
+    as a rev_id prefix, resolve it against the cache (`_resolve_cached_rev_id`),
+    and return the conventional ``{rev_id}{suffix}`` path.
 
-    Returns ``(doc_id, path)``.
+    Returns ``(rev_id, path)``.
     """
     p = Path(arg)
     if p.is_file():
         stem_suffix = suffix.removesuffix(".json")  # e.g. "_blocks"
-        doc_id = p.stem.removesuffix(stem_suffix)
-        return doc_id, p
-    doc_id = _resolve_cached_doc_id(arg, suffix)
-    return doc_id, _cache_path(doc_id, suffix)
+        rev_id = p.stem.removesuffix(stem_suffix)
+        return rev_id, p
+    rev_id = _resolve_cached_rev_id(arg, suffix)
+    return rev_id, _cache_path(rev_id, suffix)
 
 
 def _backend_for(db_path: Path | None = None) -> RagBackend:
@@ -241,42 +242,42 @@ def _friendly_server_error(e: RagServerError) -> click.ClickException:
     return click.ClickException(str(e))
 
 
-def _backend_resolve(be: RagBackend, doc_id: str) -> str:
-    """Resolve a doc_id prefix via the backend, turning a miss into ClickException.
+def _backend_resolve(be: RagBackend, rev_id: str) -> str:
+    """Resolve a rev_id prefix via the backend, turning a miss into ClickException.
 
     A server error is left to the root group, which reports it the same way.
     """
     try:
-        return be.resolve_doc_id(doc_id)
+        return be.resolve_rev_id(rev_id)
     except ValueError as e:
         raise click.ClickException(str(e)) from e
 
 
-def _short_chunk_id(chunk_id: str, doc_id: str) -> str:
-    """Abbreviate a chunk_id's doc_id portion the same way doc_ids are
+def _short_chunk_id(chunk_id: str, rev_id: str) -> str:
+    """Abbreviate a chunk_id's rev_id portion the same way rev_ids are
     displayed elsewhere (`ab12cd34ef56:L2:143`), keeping the
     `:L{level}:{index}` suffix intact so it round-trips through
     `_resolve_chunk_id`.
     """
-    return doc_id[:SHORT_DOC_ID_LEN] + chunk_id[len(doc_id) :]
+    return rev_id[:SHORT_REV_ID_LEN] + chunk_id[len(rev_id) :]
 
 
 def _resolve_chunk_id(be: RagBackend, chunk_id: str) -> str:
-    """Resolve a chunk_id whose doc_id portion may be abbreviated (as
+    """Resolve a chunk_id whose rev_id portion may be abbreviated (as
     printed by `rag search` / `rag inspect figures`) to its full form.
 
-    Chunk IDs are `{doc_id}:L{level}:{index}`; the doc_id may be given in
-    full or as an unambiguous prefix, resolved the same way `doc_id`
+    Chunk IDs are `{rev_id}:L{level}:{index}`; the rev_id may be given in
+    full or as an unambiguous prefix, resolved the same way `rev_id`
     arguments are elsewhere in this CLI.
     """
     if ":" not in chunk_id:
         raise click.ClickException(
             f"{chunk_id!r} doesn't look like a chunk ID — expected "
-            "'<doc_id>:L<level>:<index>' (see `rag search` output)."
+            "'<rev_id>:L<level>:<index>' (see `rag search` output)."
         )
     doc_part, suffix = chunk_id.split(":", 1)
-    full_doc_id = _backend_resolve(be, doc_part)
-    return f"{full_doc_id}:{suffix}"
+    full_rev_id = _backend_resolve(be, doc_part)
+    return f"{full_rev_id}:{suffix}"
 
 
 _SLUG_RE = re.compile(r"[^a-zA-Z0-9]+")
@@ -341,7 +342,7 @@ class OrderedGroup(click.Group):
 
         try:
             return super().invoke(ctx)
-        except ProjectConfigError as e:
+        except (ProjectConfigError, cache_files.StaleCacheError) as e:
             raise click.ClickException(str(e)) from e
         except RagServerError as e:
             raise _friendly_server_error(e) from e
@@ -710,7 +711,7 @@ def repair_group() -> None:
     too, which is by far the most expensive step on a large datasheet.
 
     Anything here that changes a document's embedded text (`tables`,
-    `figures`, `chunks`) needs `rag repair embeddings <doc-id>` afterwards
+    `figures`, `chunks`) needs `rag repair embeddings <rev-id>` afterwards
     before the change shows up in `rag search`. `titles` is the exception —
     it writes doc_title directly and is visible immediately.
     """
@@ -726,7 +727,7 @@ def repair_group() -> None:
 # (mpn, manufacturer, doc_type and user fields — GH #120); each field is a
 # column of its own.
 _DOC_COLUMNS: dict[str, Callable[[IngestedDoc], Any]] = {
-    "doc_id": lambda d: d.doc_id[:SHORT_DOC_ID_LEN],
+    "rev_id": lambda d: d.rev_id[:SHORT_REV_ID_LEN],
     "title": lambda d: d.doc_title,
     "chunks": lambda d: d.chunk_count,
     "pages": lambda d: d.page_count,
@@ -747,7 +748,7 @@ _META_COLUMNS: dict[str, Callable[[DocMetadata], Any]] = {
 # model or the JSON `rag metadata` prints reaches for these spellings, so map
 # them rather than rejecting them as unknown.
 _LIST_COLUMN_ALIASES = {
-    "id": "doc_id",
+    "id": "rev_id",
     "doc_title": "title",
     "chunk_count": "chunks",
     "page_count": "pages",
@@ -761,7 +762,7 @@ _LIST_RIGHT_ALIGNED = {"chunks", "pages", "revisions"}
 
 #: Shown after a table that marks values set on one revision only (GH #124).
 _OVERRIDE_NOTE = (
-    "  * set on this revision only (rag metadata <doc_id> --this-revision ...); "
+    "  * set on this revision only (rag metadata <rev_id> --this-revision ...); "
     "the document's other revisions hold the document's value"
 )
 
@@ -870,7 +871,7 @@ def _fmt_list_cell(value: Any) -> str:
     help="Choose the columns to show (comma-separated, repeatable). "
     "Built-ins: revision, revisions, title, chunks, pages, ingested, "
     "projects, mpn, manufacturer, subsystem, doc_type, tags, updated, stale, "
-    "and any registered field (`rag fields list`). document and doc_id are "
+    "and any registered field (`rag fields list`). document and rev_id are "
     "always shown.",
 )
 @click.option(
@@ -950,10 +951,10 @@ def list_docs(
             return
 
         table = Table(title="S3 Uploads")
-        table.add_column("doc_id", style="cyan")
+        table.add_column("rev_id", style="cyan")
         table.add_column("S3 Prefix")
         for s3_doc in s3_docs:
-            table.add_row(s3_doc["doc_id"], s3_doc["prefix"])
+            table.add_row(s3_doc["rev_id"], s3_doc["prefix"])
         console.print(table)
         return
 
@@ -999,26 +1000,26 @@ def list_docs(
         )
     docs = be.get_ingested_docs(project_id=project_id)
 
-    # The sidecar is a separate table from the chunk store, so join by doc_id
+    # The sidecar is a separate table from the chunk store, so join by rev_id
     # rather than assuming every ingested document has a row in it.
     # Always fetched, not just when filtering: the stale marker and the
     # document a revision belongs to live there. Every revision is read, so a
     # PDF missing here is one without a sidecar row, not an older revision.
     meta_by_id = {
-        m.doc_id: m
+        m.rev_id: m
         for m in be.list_docs(
             project_id=project_id, fields=field_filters or None, all_revisions=True
         )
     }
     if not all_revisions:
-        docs = [d for d in docs if (m := meta_by_id.get(d.doc_id)) is None or m.is_newest]
+        docs = [d for d in docs if (m := meta_by_id.get(d.rev_id)) is None or m.is_newest]
 
     if filtering:
         wanted_tags = set(tags)
         docs = [
             d
             for d in docs
-            if (m := meta_by_id.get(d.doc_id)) is not None and wanted_tags.issubset(set(m.tags))
+            if (m := meta_by_id.get(d.rev_id)) is not None and wanted_tags.issubset(set(m.tags))
         ]
 
     if not docs:
@@ -1032,7 +1033,7 @@ def list_docs(
         return
 
     stale_ids = {
-        d.doc_id for d in docs if (m := meta_by_id.get(d.doc_id)) is not None and m.needs_reembed
+        d.rev_id for d in docs if (m := meta_by_id.get(d.rev_id)) is not None and m.needs_reembed
     }
 
     if chosen is not None:
@@ -1043,37 +1044,37 @@ def list_docs(
             shown.extend(f.name for f in registered if not f.builtin)
         # Revision columns only earn their width when a row has something in
         # them: most stores hold one unlabelled PDF per document.
-        metas = [m for d in docs if (m := meta_by_id.get(d.doc_id)) is not None]
+        metas = [m for d in docs if (m := meta_by_id.get(d.rev_id)) is not None]
         if not any(m.revision for m in metas) and "revision" in shown:
             shown.remove("revision")
         if not any(len(m.revisions) > 1 for m in metas) and "revisions" in shown:
             shown.remove("revisions")
-    # doc_id is the handle every other `rag` command takes, so a listing
+    # rev_id is the handle every other `rag` command takes, so a listing
     # without it is a dead end; the document id names what metadata is set
     # on. The stale marker is a health flag rather than metadata, and is
     # worth showing whatever view was asked for.
-    if "doc_id" not in shown:
-        shown.insert(0, "doc_id")
+    if "rev_id" not in shown:
+        shown.insert(0, "rev_id")
     if "document" not in shown:
         shown.insert(0, "document")
     if stale_ids and "stale" not in shown:
-        shown.insert(shown.index("doc_id") + 1, "stale")
+        shown.insert(shown.index("rev_id") + 1, "stale")
 
     table = Table(title="Ingested Documents")
     for name in shown:
         # The two handles every other command takes are never squeezed.
-        handle = name in ("doc_id", "document")
+        handle = name in ("rev_id", "document")
         table.add_column(
             name,
-            style="cyan" if name == "doc_id" else None,
+            style="cyan" if name == "rev_id" else None,
             justify="right" if name in _LIST_RIGHT_ALIGNED else "left",
             no_wrap=handle,
-            min_width=SHORT_DOC_ID_LEN if name == "doc_id" else None,
+            min_width=SHORT_REV_ID_LEN if name == "rev_id" else None,
         )
 
     marked = False
     for doc in docs:
-        meta = meta_by_id.get(doc.doc_id)
+        meta = meta_by_id.get(doc.rev_id)
         cells = []
         for name in shown:
             cell = _fmt_list_cell(_list_cell(name, doc, meta, project_id))
@@ -1091,7 +1092,7 @@ def list_docs(
             f"  [yellow]{len(stale_ids)} document(s) were repaired since they were "
             "last embedded[/] — their stored text has moved on from their vectors, "
             "so `rag search` still returns the old wording. Run "
-            "[cyan]rag repair embeddings <doc-id>[/] on each to catch them up."
+            "[cyan]rag repair embeddings <rev-id>[/] on each to catch them up."
         )
 
 
@@ -1108,12 +1109,12 @@ def list_docs(
     is_flag=True,
     help="Show stats across every project, ignoring any .rag.toml scoping.",
 )
-@click.option("--doc-id", default=None, help="Restrict to a single document.")
+@click.option("--rev-id", default=None, help="Restrict to one revision (rev_id).")
 @_db_option
 def stats_cmd(
     project_id: str | None,
     is_global: bool,
-    doc_id: str | None,
+    rev_id: str | None,
     db_path: Path | None,
 ) -> None:
     """Show chunk counts — total and by zoom level — for a scope.
@@ -1125,16 +1126,16 @@ def stats_cmd(
 
     project_id = resolve_cli_project_id(project_id, is_global=is_global)
     be = _backend_for(db_path)
-    if doc_id:
-        doc_id = _backend_resolve(be, doc_id)
+    if rev_id:
+        rev_id = _backend_resolve(be, rev_id)
 
-    result = be.stats(project_id=project_id, doc_id=doc_id)
+    result = be.stats(project_id=project_id, rev_id=rev_id)
 
     scope_bits = []
     if result.project_id:
         scope_bits.append(f"project={result.project_id}")
-    if result.doc_id:
-        scope_bits.append(f"doc={result.doc_id[:SHORT_DOC_ID_LEN]}")
+    if result.rev_id:
+        scope_bits.append(f"rev={result.rev_id[:SHORT_REV_ID_LEN]}")
     scope = ", ".join(scope_bits) if scope_bits else "all projects"
 
     table = Table(title=f"Chunk stats — {scope}")
@@ -1233,14 +1234,14 @@ def _local_ips() -> list[str]:
 
 
 @get_group.command("doc", short_help="Fetch a document's source PDF.")
-@click.argument("doc_id", type=str)
+@click.argument("rev_id", type=str)
 @click.option(
     "-o",
     "--output",
     "output_path",
     type=click.Path(path_type=Path),
     default=None,
-    help="Destination file or directory (default: ./<short_doc_id>.pdf). Ignored with --host.",
+    help="Destination file or directory (default: ./<short_rev_id>.pdf). Ignored with --host.",
 )
 @click.option(
     "--host",
@@ -1258,7 +1259,7 @@ def _local_ips() -> list[str]:
 )
 @_db_option
 def get_doc_cmd(
-    doc_id: str,
+    rev_id: str,
     output_path: Path | None,
     host: bool,
     page: int,
@@ -1277,7 +1278,7 @@ def get_doc_cmd(
     only works while this command stays alive — Ctrl+C to stop serving.
     """
     be = _backend_for(db_path)
-    doc_id = _backend_resolve(be, doc_id)
+    rev_id = _backend_resolve(be, rev_id)
 
     if host:
         import time
@@ -1288,16 +1289,16 @@ def get_doc_cmd(
         try:
             # Fetch via the backend (HTTP in remote mode) and prime the
             # viewer cache so the loopback server can serve it locally.
-            pdf_viewer.prime_pdf_cache(doc_id, be.get_pdf_bytes(doc_id))
+            pdf_viewer.prime_pdf_cache(rev_id, be.get_pdf_bytes(rev_id))
         except FileNotFoundError as exc:
             raise click.ClickException(str(exc)) from exc
 
         port = pdf_viewer.ensure_pdf_server()
-        local_url = f"http://127.0.0.1:{port}/viewer/{doc_id}#page={page}"
+        local_url = f"http://127.0.0.1:{port}/viewer/{rev_id}#page={page}"
 
         console.print("[green]PDF viewer running — pick whichever URL your browser can reach:[/]")
         for ip in _local_ips():
-            console.print(f"  http://{ip}:{port}/viewer/{doc_id}#page={page}", soft_wrap=True)
+            console.print(f"  http://{ip}:{port}/viewer/{rev_id}#page={page}", soft_wrap=True)
 
         if launch:
             webbrowser.open(local_url)
@@ -1317,14 +1318,14 @@ def get_doc_cmd(
             console.print("\n[dim]Stopped.[/]")
         return
 
-    title = be.get_doc_titles().get(doc_id)
+    title = be.get_doc_titles().get(rev_id)
 
     try:
-        data = be.get_pdf_bytes(doc_id)
+        data = be.get_pdf_bytes(rev_id)
     except FileNotFoundError as exc:
         raise click.ClickException(str(exc)) from exc
 
-    short_id = doc_id[:SHORT_DOC_ID_LEN]
+    short_id = rev_id[:SHORT_REV_ID_LEN]
     default_name = f"{_slugify(title) or short_id}.pdf"
     if output_path is None:
         dest = Path(default_name)
@@ -1338,7 +1339,7 @@ def get_doc_cmd(
 
 
 @get_group.command("page", short_help="Render a PDF page to a PNG.")
-@click.argument("doc_id", type=str)
+@click.argument("rev_id", type=str)
 @click.argument("page_arg", metavar="PAGE", type=int, required=False)
 @click.option(
     "--page",
@@ -1354,13 +1355,13 @@ def get_doc_cmd(
     type=click.Path(path_type=Path),
     default=None,
     help="Where to save the image. Defaults to a name derived from the "
-    "doc_id and page in the current directory. If a directory, the "
+    "rev_id and page in the current directory. If a directory, the "
     "default filename is placed inside it.",
 )
 @click.option("--dpi", default=150, type=int, help="Render DPI for the page image.")
 @_db_option
 def get_page_cmd(
-    doc_id: str,
+    rev_id: str,
     page_arg: int | None,
     page_opt: int | None,
     output_path: Path | None,
@@ -1369,8 +1370,8 @@ def get_page_cmd(
 ) -> None:
     """Render a single PDF page to a PNG and save it to disk.
 
-    PAGE may be given positionally (``rag get page <doc_id> 5``) or via
-    ``--page`` (``rag get page <doc_id> --page 5``) — pass exactly one. This
+    PAGE may be given positionally (``rag get page <rev_id> 5``) or via
+    ``--page`` (``rag get page <rev_id> --page 5``) — pass exactly one. This
     is the CLI equivalent of the MCP `show_page` tool, minus the inline
     chat rendering (see `rag get doc --host` for the interactive, scrollable
     viewer the MCP `show_pdf` tool uses).
@@ -1384,10 +1385,10 @@ def get_page_cmd(
     from pdf2image import convert_from_bytes
 
     be = _backend_for(db_path)
-    doc_id = _backend_resolve(be, doc_id)
+    rev_id = _backend_resolve(be, rev_id)
 
     try:
-        pdf_bytes = be.get_pdf_bytes(doc_id)
+        pdf_bytes = be.get_pdf_bytes(rev_id)
     except FileNotFoundError as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -1396,10 +1397,10 @@ def get_page_cmd(
     except Exception as exc:
         raise click.ClickException(f"Failed to render page {page}: {exc}") from exc
     if not images:
-        short_id = doc_id[:SHORT_DOC_ID_LEN]
+        short_id = rev_id[:SHORT_REV_ID_LEN]
         raise click.ClickException(f"Page {page} not found in document {short_id}.")
 
-    default_name = f"{doc_id[:SHORT_DOC_ID_LEN]}_p{page}.png"
+    default_name = f"{rev_id[:SHORT_REV_ID_LEN]}_p{page}.png"
     if output_path is None:
         dest = Path(default_name)
     elif output_path.is_dir() or str(output_path).endswith(("/", os.sep)):
@@ -1417,14 +1418,14 @@ def get_page_cmd(
 
 
 @cli.command("delete", short_help="Permanently delete a revision or a document.")
-@click.argument("doc_id", type=str)
+@click.argument("rev_id", type=str)
 @_db_option
 @click.option(
     "--dry-run", is_flag=True, help="Show what would be deleted without deleting anything."
 )
 @click.option("-y", "--yes", "assume_yes", is_flag=True, help="Skip the confirmation prompt.")
-def delete_doc_cmd(doc_id: str, db_path: Path | None, dry_run: bool, assume_yes: bool) -> None:
-    """Permanently delete one revision (a doc_id) or a whole document (D12).
+def delete_doc_cmd(rev_id: str, db_path: Path | None, dry_run: bool, assume_yes: bool) -> None:
+    """Permanently delete one revision (a rev_id) or a whole document (D12).
 
     Removes the chunks, vectors and revision metadata from the store, the
     local PDF and figure-crop files, cached pipeline artifacts, and (if S3
@@ -1433,16 +1434,16 @@ def delete_doc_cmd(doc_id: str, db_path: Path | None, dry_run: bool, assume_yes:
     a revision must be re-ingested from the source PDF to get it back.
     """
     be = _backend_for(db_path)
-    targets = _doc_ids_for(be, doc_id, all_revisions=True)
-    document = doc_id if parse_document_ref(doc_id) is not None else None
+    targets = _rev_ids_for(be, rev_id, all_revisions=True)
+    document = rev_id if parse_document_ref(rev_id) is not None else None
     titles = be.get_doc_titles()
-    chunk_count = sum(be.count_chunks(doc_id=d) for d in targets)
+    chunk_count = sum(be.count_chunks(rev_id=d) for d in targets)
     if document is not None:
         label = f"{document} ({len(targets)} revision(s))"
     else:
         did = targets[0]
         title = titles.get(did)
-        label = f"{title!r} ({did[:SHORT_DOC_ID_LEN]})" if title else did[:SHORT_DOC_ID_LEN]
+        label = f"{title!r} ({did[:SHORT_REV_ID_LEN]})" if title else did[:SHORT_REV_ID_LEN]
         meta = be.get_metadata(did)
         if meta is not None and len(meta.revisions) > 1:
             label += (
@@ -1480,10 +1481,10 @@ def delete_doc_cmd(doc_id: str, db_path: Path | None, dry_run: bool, assume_yes:
 # ---------------------------------------------------------------------------
 
 
-def _doc_ids_for(be: RagBackend, ref: str, *, all_revisions: bool) -> list[str]:
-    """``RagBackend.doc_ids_for``, a miss turned into a ClickException."""
+def _rev_ids_for(be: RagBackend, ref: str, *, all_revisions: bool) -> list[str]:
+    """``RagBackend.rev_ids_for``, a miss turned into a ClickException."""
     try:
-        return be.doc_ids_for(ref, all_revisions=all_revisions)
+        return be.rev_ids_for(ref, all_revisions=all_revisions)
     except ValueError as e:
         raise click.ClickException(str(e)) from e
 
@@ -1497,15 +1498,15 @@ def _list_revisions(be: RagBackend, ref: str) -> DocumentRevisions:
 
 def _print_revisions(revs: DocumentRevisions) -> None:
     table = Table(title=f"{revs.document_id} · {len(revs.revisions)} revision(s), newest first")
-    for name in ("", "doc_id", "revision", "ingested", "chunks", "title"):
+    for name in ("", "rev_id", "revision", "ingested", "chunks", "title"):
         table.add_column(
             name,
-            style="cyan" if name == "doc_id" else None,
+            style="cyan" if name == "rev_id" else None,
             justify="right" if name == "chunks" else "left",
         )
     marked = False
     for r in revs.revisions:
-        doc = r.doc_id[:SHORT_DOC_ID_LEN]
+        doc = r.rev_id[:SHORT_REV_ID_LEN]
         if r.overrides:
             doc += "*"
             marked = True
@@ -1520,7 +1521,7 @@ def _print_revisions(revs: DocumentRevisions) -> None:
     console.print(table)
     if marked:
         console.print(
-            "  * has values set on this revision only; `rag metadata <doc_id>` shows them"
+            "  * has values set on this revision only; `rag metadata <rev_id>` shows them"
         )
 
 
@@ -1542,16 +1543,16 @@ def revisions_group() -> None:
     """List and arrange the revisions of a document.
 
     A document (D12) groups the revisions of one datasheet; each revision is
-    one PDF with its own doc_id. Metadata belongs to the document. Search and
+    one PDF with its own rev_id. Metadata belongs to the document. Search and
     `rag list` show the newest revision unless asked for all. The order is
     the one you set; revision labels ("Rev C") are never parsed:
 
     \b
         rag revisions D12                       # list, newest first
         rag ingest new.pdf --new-revision-of D12
-        rag revisions add D12 <doc_id>          # an already stored PDF on top
-        rag revisions move <doc_id> --below <doc_id>
-        rag revisions unlink <doc_id>           # into a document of its own
+        rag revisions add D12 <rev_id>          # an already stored PDF on top
+        rag revisions move <rev_id> --below <rev_id>
+        rag revisions unlink <rev_id>           # into a document of its own
         rag revisions rule set "intel-id OR (acme-pn AND doc_type)"
     """
 
@@ -1560,18 +1561,18 @@ def revisions_group() -> None:
 @click.argument("ref", type=str)
 @_db_option
 def revisions_list_cmd(ref: str, db_path: Path | None) -> None:
-    """List the revisions of REF (a D12 or any revision's doc_id), newest first."""
+    """List the revisions of REF (a D12 or any revision's rev_id), newest first."""
     _print_revisions(_list_revisions(_backend_for(db_path), ref))
 
 
 @revisions_group.command("add", short_help="Make a stored PDF the newest revision of a document.")
 @click.argument("document", type=str)
-@click.argument("doc_id", type=str)
+@click.argument("rev_id", type=str)
 @_db_option
-def revisions_add_cmd(document: str, doc_id: str, db_path: Path | None) -> None:
-    """Put stored PDF DOC_ID on top of DOCUMENT's revisions, as its newest.
+def revisions_add_cmd(document: str, rev_id: str, db_path: Path | None) -> None:
+    """Put stored PDF REV_ID on top of DOCUMENT's revisions, as its newest.
 
-    DOCUMENT is a D12 or any of its revisions' doc_ids. A PDF that is alone
+    DOCUMENT is a D12 or any of its revisions' rev_ids. A PDF that is alone
     in its own document is merged in: projects and tags are joined, and the
     two documents must not hold different values for a field. A PDF that is
     one of several revisions of another document must be unlinked first.
@@ -1579,41 +1580,41 @@ def revisions_add_cmd(document: str, doc_id: str, db_path: Path | None) -> None:
     """
     be = _backend_for(db_path)
     try:
-        revs = be.add_revision(document, _backend_resolve(be, doc_id))
+        revs = be.add_revision(document, _backend_resolve(be, rev_id))
     except ValueError as e:
         raise click.ClickException(str(e)) from e
     console.print(
-        f"[green]{doc_id[:SHORT_DOC_ID_LEN]} is the newest revision of[/] {revs.document_id}"
+        f"[green]{rev_id[:SHORT_REV_ID_LEN]} is the newest revision of[/] {revs.document_id}"
     )
     _print_revisions(revs)
 
 
 @revisions_group.command("move", short_help="Change a revision's place in its document.")
-@click.argument("doc_id", type=str)
+@click.argument("rev_id", type=str)
 @click.option(
     "--above",
     default=None,
-    metavar="DOC_ID",
+    metavar="REV_ID",
     help="Put it directly above (newer than) this revision.",
 )
 @click.option(
     "--below",
     default=None,
-    metavar="DOC_ID",
+    metavar="REV_ID",
     help="Put it directly below (older than) this revision.",
 )
 @_db_option
 def revisions_move_cmd(
-    doc_id: str, above: str | None, below: str | None, db_path: Path | None
+    rev_id: str, above: str | None, below: str | None, db_path: Path | None
 ) -> None:
-    """Move revision DOC_ID directly above or below another revision of the
+    """Move revision REV_ID directly above or below another revision of the
     same document. The top one is the newest: the one search uses."""
     if (above is None) == (below is None):
         raise click.UsageError("give exactly one of --above / --below")
     be = _backend_for(db_path)
     try:
         revs = be.move_revision(
-            _backend_resolve(be, doc_id),
+            _backend_resolve(be, rev_id),
             above=_backend_resolve(be, above) if above else None,
             below=_backend_resolve(be, below) if below else None,
         )
@@ -1623,16 +1624,16 @@ def revisions_move_cmd(
 
 
 @revisions_group.command("unlink", short_help="Take a revision out into a document of its own.")
-@click.argument("doc_id", type=str)
+@click.argument("rev_id", type=str)
 @_db_option
-def revisions_unlink_cmd(doc_id: str, db_path: Path | None) -> None:
-    """Take revision DOC_ID out of its document into a new one.
+def revisions_unlink_cmd(rev_id: str, db_path: Path | None) -> None:
+    """Take revision REV_ID out of its document into a new one.
 
     The new document starts with a copy of the old one's projects, tags and
     field values, so the PDF stays where it was in every listing and filter.
     """
     be = _backend_for(db_path)
-    full = _backend_resolve(be, doc_id)
+    full = _backend_resolve(be, rev_id)
     try:
         before = be.get_metadata(full)
         revs = be.unlink_revision(full)
@@ -1640,7 +1641,7 @@ def revisions_unlink_cmd(doc_id: str, db_path: Path | None) -> None:
         raise click.ClickException(str(e)) from e
     old = before.document_id if before is not None else "its document"
     console.print(
-        f"[green]{full[:SHORT_DOC_ID_LEN]} is now[/] {revs.document_id} "
+        f"[green]{full[:SHORT_REV_ID_LEN]} is now[/] {revs.document_id} "
         f"[green](was a revision of[/] {old}[green])[/]"
     )
     _print_revisions(revs)
@@ -1702,7 +1703,7 @@ def revisions_rule_clear_cmd(db_path: Path | None) -> None:
 
 
 @get_group.command("text", short_help="Dump a document's extracted text.")
-@click.argument("doc_id", type=str)
+@click.argument("rev_id", type=str)
 @click.option(
     "--output",
     "-o",
@@ -1710,18 +1711,18 @@ def revisions_rule_clear_cmd(db_path: Path | None) -> None:
     default=None,
     help="Write the text to this file (default: print it to stdout).",
 )
-def get_text_cmd(doc_id: str, output: Path | None) -> None:
+def get_text_cmd(rev_id: str, output: Path | None) -> None:
     """Dump a document's extracted text in reading order.
 
-    DOC_ID is a doc_id (full hash or unambiguous prefix), resolved against
+    REV_ID is a rev_id (full hash or unambiguous prefix), resolved against
     whichever layout artifact the ingest backend cached — Docling's
-    ``{doc_id}_outline.json`` or Textract's ``{doc_id}_blocks.json``. An
-    explicit path to either is also accepted in place of a doc_id.
+    ``{rev_id}_outline.json`` or Textract's ``{rev_id}_blocks.json``. An
+    explicit path to either is also accepted in place of a rev_id.
 
     Section titles are emitted as headings so the dump keeps the document's
     structure rather than running together as one wall of prose.
     """
-    _, _, outline = _load_outline(doc_id)
+    _, _, outline = _load_outline(rev_id)
 
     parts: list[str] = []
     for section in outline.all_sections_flat:
@@ -1749,13 +1750,13 @@ def _resolve_layout_input(arg: str) -> tuple[str, str, Path]:
     """Resolve *arg* to a cached layout artifact from either ingestion backend.
 
     The two backends leave different layout artifacts on disk: Textract writes
-    ``{doc_id}_blocks.json`` (raw blocks) and Docling writes
-    ``{doc_id}_outline.json`` (a serialized `DocumentOutline`). *arg* is either
-    an explicit path to one of those, or a doc_id (full hash or unambiguous
+    ``{rev_id}_blocks.json`` (raw blocks) and Docling writes
+    ``{rev_id}_outline.json`` (a serialized `DocumentOutline`). *arg* is either
+    an explicit path to one of those, or a rev_id (full hash or unambiguous
     prefix) resolved against the cache — preferring the Docling outline when
     both exist, since Docling is the default backend.
 
-    Returns ``(doc_id, backend, path)`` where *backend* is ``"docling"`` or
+    Returns ``(rev_id, backend, path)`` where *backend* is ``"docling"`` or
     ``"textract"``.
     """
     p = Path(arg)
@@ -1782,11 +1783,11 @@ def _resolve_layout_input(arg: str) -> tuple[str, str, Path]:
 
     for suffix, backend in artifacts:
         if sorted(settings.output_dir.glob(f"{glob.escape(arg)}*{suffix}")):
-            doc_id = _resolve_cached_doc_id(arg, suffix)
-            return doc_id, backend, _cache_path(doc_id, suffix)
+            rev_id = _resolve_cached_rev_id(arg, suffix)
+            return rev_id, backend, _cache_path(rev_id, suffix)
 
     raise click.ClickException(
-        f"No cached layout artifact matching doc_id {arg!r} in "
+        f"No cached layout artifact matching rev_id {arg!r} in "
         f"{settings.output_dir}. Run `rag ingest` for this document first "
         "(Docling writes '_outline.json', Textract writes '_blocks.json')."
     )
@@ -1794,7 +1795,7 @@ def _resolve_layout_input(arg: str) -> tuple[str, str, Path]:
 
 def _load_outline(arg: str) -> tuple[str, str, DocumentOutline]:
     """Load a cached layout artifact as a `DocumentOutline`, whichever backend
-    produced it. Returns ``(doc_id, backend, outline)``.
+    produced it. Returns ``(rev_id, backend, outline)``.
 
     `DocumentOutline` is the backend-neutral representation the whole chunking
     pipeline already runs on — Docling builds one directly, and Textract blocks
@@ -1804,14 +1805,13 @@ def _load_outline(arg: str) -> tuple[str, str, DocumentOutline]:
     """
     from datasheet_rag.chunking.layout_parser import DocumentOutline, parse_textract_blocks
 
-    doc_id, backend, path = _resolve_layout_input(arg)
-    with open(path) as f:
-        data = json.load(f)
+    rev_id, backend, path = _resolve_layout_input(arg)
+    data = cache_files.load(path)
 
     if backend == "docling":
         # The cache wraps the outline alongside its figure regions.
-        return doc_id, backend, DocumentOutline.from_dict(data["outline"])
-    return doc_id, backend, parse_textract_blocks(data, doc_id=doc_id)
+        return rev_id, backend, DocumentOutline.from_dict(data["outline"])
+    return rev_id, backend, parse_textract_blocks(data, rev_id=rev_id)
 
 
 class _FlaggedTable(NamedTuple):
@@ -1898,7 +1898,7 @@ def _inspect_docling_layout(outline: DocumentOutline, full: bool = False) -> Non
 
 
 @inspect_group.command("layout", short_help="Summarise a document's parsed layout.")
-@click.argument("doc_id", type=str)
+@click.argument("rev_id", type=str)
 @click.option(
     "--full",
     is_flag=True,
@@ -1906,20 +1906,19 @@ def _inspect_docling_layout(outline: DocumentOutline, full: bool = False) -> Non
     help="Show the entire section/layout listing instead of the first "
     f"{_INSPECT_LAYOUT_PREVIEW} rows.",
 )
-def inspect_layout(doc_id: str, full: bool) -> None:
+def inspect_layout(rev_id: str, full: bool) -> None:
     """Show a summary of the parsed layout structure for a document.
 
     Works with either ingestion backend: the cached Docling
-    ``{doc_id}_outline.json`` (element types + section hierarchy) or the
-    Textract ``{doc_id}_blocks.json`` (block types + layout blocks). DOC_ID is
-    a doc_id (full hash or unambiguous prefix) resolved against the cache, or an
+    ``{rev_id}_outline.json`` (element types + section hierarchy) or the
+    Textract ``{rev_id}_blocks.json`` (block types + layout blocks). REV_ID is
+    a rev_id (full hash or unambiguous prefix) resolved against the cache, or an
     explicit path to one of those artifacts.
     """
-    resolved_id, backend, path = _resolve_layout_input(doc_id)
-    with open(path) as f:
-        data = json.load(f)
+    resolved_id, backend, path = _resolve_layout_input(rev_id)
+    data = cache_files.load(path)
 
-    console.print(f"doc_id [cyan]{resolved_id}[/] — [cyan]{backend}[/] backend")
+    console.print(f"rev_id [cyan]{resolved_id}[/] — [cyan]{backend}[/] backend")
 
     if backend == "docling":
         from datasheet_rag.chunking.layout_parser import DocumentOutline
@@ -1938,7 +1937,7 @@ def inspect_layout(doc_id: str, full: bool) -> None:
 
 
 @repair_group.command("chunks", short_help="Re-chunk a parsed document.")
-@click.argument("doc_id", type=str)
+@click.argument("rev_id", type=str)
 @click.option(
     "--figures-manifest",
     type=click.Path(exists=True, path_type=Path),
@@ -1959,10 +1958,10 @@ def inspect_layout(doc_id: str, full: bool) -> None:
     "-o",
     type=click.Path(path_type=Path),
     default=None,
-    help="Where to write the chunk graph (default: the cached {doc_id}_chunks.json).",
+    help="Where to write the chunk graph (default: the cached {rev_id}_chunks.json).",
 )
 def chunk_cmd(
-    doc_id: str,
+    rev_id: str,
     figures_manifest: Path | None,
     micro_tokens: int,
     meso_tokens: int,
@@ -1971,15 +1970,15 @@ def chunk_cmd(
 ) -> None:
     """Re-run multi-scale chunking against a document's cached layout.
 
-    DOC_ID is a doc_id (full hash or unambiguous prefix), resolved against
+    REV_ID is a rev_id (full hash or unambiguous prefix), resolved against
     whichever layout artifact the ingest backend cached — Docling's
-    ``{doc_id}_outline.json`` or Textract's ``{doc_id}_blocks.json``. An
-    explicit path to either is also accepted in place of a doc_id. Chunks are
-    written to ``{doc_id}_chunks.json`` unless --output is given.
+    ``{rev_id}_outline.json`` or Textract's ``{rev_id}_blocks.json``. An
+    explicit path to either is also accepted in place of a rev_id. Chunks are
+    written to ``{rev_id}_chunks.json`` unless --output is given.
 
     This is the cheap way to retune --micro-tokens / --meso-tokens: it reuses
     the cached layout analysis, where `rag ingest --force` would redo it.
-    Follow with `rag repair embeddings <doc-id>` to re-index the result.
+    Follow with `rag repair embeddings <rev-id>` to re-index the result.
 
     Produces a hierarchical chunk graph at three levels (MACRO/MESO/MICRO)
     with navigation links, context enrichment, and chapter summaries.
@@ -1990,19 +1989,18 @@ def chunk_cmd(
     )
     from datasheet_rag.chunking.splitter import SplitterConfig
 
-    doc_id, backend, outline = _load_outline(doc_id)
+    rev_id, backend, outline = _load_outline(rev_id)
 
     # Default to the manifest ingest wrote for this document — without it a
     # re-chunk would silently drop every figure from the graph.
     if figures_manifest is None:
-        cached_manifest = get_settings().figures_dir / doc_id / "manifest.json"
+        cached_manifest = get_settings().figures_dir / rev_id / "manifest.json"
         if cached_manifest.is_file():
             figures_manifest = cached_manifest
 
     figure_manifest = None
     if figures_manifest:
-        with open(figures_manifest) as f:
-            figure_manifest = json.load(f)
+        figure_manifest = cache_files.load(Path(figures_manifest))
 
     config = SplitterConfig(
         micro_max_tokens=micro_tokens,
@@ -2021,7 +2019,7 @@ def chunk_cmd(
     # Save
     settings = get_settings()
     if output is None:
-        output = settings.output_dir / f"{doc_id}_chunks.json"
+        output = settings.output_dir / f"{rev_id}_chunks.json"
 
     save_chunk_graph(graph, output)
 
@@ -2055,8 +2053,8 @@ def chunk_cmd(
 
     # Only nag when the graph landed where `repair embeddings` will look for
     # it — with an explicit --output this is a scratch dump, not a re-index.
-    if output == settings.output_dir / f"{doc_id}_chunks.json":
-        _next_steps(doc_id, rechunk=False)
+    if output == settings.output_dir / f"{rev_id}_chunks.json":
+        _next_steps(rev_id, rechunk=False)
 
 
 # ---------------------------------------------------------------------------
@@ -2065,7 +2063,7 @@ def chunk_cmd(
 
 
 @repair_group.command("embeddings", short_help="Re-embed a document into the store.")
-@click.argument("doc_id", type=str)
+@click.argument("rev_id", type=str)
 @_db_option
 @click.option(
     "--project-id",
@@ -2074,16 +2072,16 @@ def chunk_cmd(
 )
 @click.option("--verbose/--quiet", default=True, help="Print per-batch progress.")
 def embed(
-    doc_id: str,
+    rev_id: str,
     db_path: Path | None,
     project_id: str | None,
     verbose: bool,
 ) -> None:
     """Embed a document's chunk graph and store it.
 
-    DOC_ID is a doc_id (full hash or unambiguous prefix); the chunk graph is
-    read from the cached ``{doc_id}_chunks.json``. An explicit chunks-JSON path
-    is also accepted in place of a doc_id.
+    REV_ID is a rev_id (full hash or unambiguous prefix); the chunk graph is
+    read from the cached ``{rev_id}_chunks.json``. An explicit chunks-JSON path
+    is also accepted in place of a rev_id.
 
     Embedding + insert run through the backend, so this writes to the remote
     server when RAG_SERVER_URL is set, or the local sqlite store otherwise.
@@ -2096,7 +2094,7 @@ def embed(
     from datasheet_rag.ingest_pipeline import collect_figure_uploads
     from datasheet_rag.project_config import get_project_config
 
-    _, chunks_json = _doc_input(doc_id, "_chunks.json")
+    _, chunks_json = _doc_input(rev_id, "_chunks.json")
 
     proj_cfg = get_project_config()
     if proj_cfg is not None:
@@ -2113,7 +2111,7 @@ def embed(
     )
 
     be = _backend_for(db_path)
-    local_pdf = get_settings().pdf_dir / f"{graph.doc_id}.pdf"
+    local_pdf = get_settings().pdf_dir / f"{graph.rev_id}.pdf"
 
     # Remote: ship figure images so the server stores them and the embedded
     # context_text can fold in any server-side descriptions.
@@ -2142,7 +2140,7 @@ def embed(
     console.print(f"[green]Inserted[/] {result.inserted} chunks.")
     _report_pruned(result.pruned, indent="")
     # Vectors now match the stored text again.
-    _set_stale(result.doc_id or doc_id, False)
+    _set_stale(result.rev_id or rev_id, False)
 
 
 # ---------------------------------------------------------------------------
@@ -2179,10 +2177,10 @@ def embed(
     "(in any project with --global).",
 )
 @click.option(
-    "--doc-id",
-    "doc_ids",
+    "--rev-id",
+    "rev_ids",
     multiple=True,
-    help="Restrict to one or more revisions (doc_ids) or documents (D12: its "
+    help="Restrict to one or more revisions (rev_ids) or documents (D12: its "
     "newest revision, or every one with --all-revisions).",
 )
 @click.option(
@@ -2211,7 +2209,7 @@ def search(
     project_id: str | None,
     is_global: bool,
     subsystem: str | None,
-    doc_ids: tuple[str, ...],
+    rev_ids: tuple[str, ...],
     level: str | None,
     show_context: bool,
     all_revisions: bool,
@@ -2232,9 +2230,9 @@ def search(
     project_id = resolve_cli_project_id(project_id, is_global=is_global)
     be = _backend_for(db_path)
 
-    resolved_doc_ids: list[str] = []
-    for d in doc_ids:
-        resolved_doc_ids.extend(_doc_ids_for(be, d, all_revisions=all_revisions))
+    resolved_rev_ids: list[str] = []
+    for d in rev_ids:
+        resolved_rev_ids.extend(_rev_ids_for(be, d, all_revisions=all_revisions))
 
     level_enum = None
     if level:
@@ -2245,7 +2243,7 @@ def search(
         }[level]
 
     filters = SearchFilters(
-        doc_ids=resolved_doc_ids if resolved_doc_ids else None,
+        rev_ids=resolved_rev_ids if resolved_rev_ids else None,
         all_revisions=all_revisions,
         project_id=project_id,
         fields={"subsystem": subsystem} if subsystem is not None else None,
@@ -2273,7 +2271,7 @@ def search(
             str(i),
             f"{r.score:.4f}",
             r.chunk.level.name,
-            _short_chunk_id(r.chunk.id, r.chunk.doc_id),
+            _short_chunk_id(r.chunk.id, r.chunk.rev_id),
             (r.chunk.metadata.section_title or r.chunk.metadata.chapter_title or "")[:40],
             preview,
         )
@@ -2282,8 +2280,8 @@ def search(
     console.print("[dim]Fetch a full chunk with: rag get chunk <chunk_id>[/]")
 
 
-def _set_stale(doc_id: str | None, stale: bool) -> None:
-    """Best-effort flip of the stale marker on *doc_id*'s sidecar row.
+def _set_stale(rev_id: str | None, stale: bool) -> None:
+    """Best-effort flip of the stale marker on *rev_id*'s sidecar row.
 
     The marker (``needs_reembed``) says the document's stored text has moved
     on from its vectors. Set by the repairs that change embedded text, cleared
@@ -2294,16 +2292,16 @@ def _set_stale(doc_id: str | None, stale: bool) -> None:
     these commands legitimately run against documents that were parsed but
     never ingested, which have no sidecar row to write to.
     """
-    if not doc_id:
+    if not rev_id:
         return
     try:
         be = _backend_for()
-        be.set_needs_reembed(be.resolve_doc_id(doc_id), stale)
+        be.set_needs_reembed(be.resolve_rev_id(rev_id), stale)
     except Exception:
         pass
 
 
-def _next_steps(doc_id: str | None, *, rechunk: bool) -> None:
+def _next_steps(rev_id: str | None, *, rechunk: bool) -> None:
     """Print what still has to happen before a repair shows up in `rag search`.
 
     Every `repair` subcommand edits something upstream of the vectors, so none
@@ -2311,8 +2309,8 @@ def _next_steps(doc_id: str | None, *, rechunk: bool) -> None:
     outline need the chunk graph rebuilt first; repairs that edit chunk text
     in place only need re-embedding.
     """
-    _set_stale(doc_id, True)
-    target = doc_id[:SHORT_DOC_ID_LEN] if doc_id else "<doc-id>"
+    _set_stale(rev_id, True)
+    target = rev_id[:SHORT_REV_ID_LEN] if rev_id else "<rev-id>"
     console.print()
     console.rule("[bold yellow]Not searchable yet[/]")
     if rechunk:
@@ -2379,7 +2377,7 @@ def get_chunk_cmd(
 ) -> None:
     """Fetch one chunk by ID — the CLI equivalent of the MCP `get_chunk` tool.
 
-    CHUNK_ID accepts the full id or an abbreviated form using a doc_id
+    CHUNK_ID accepts the full id or an abbreviated form using a rev_id
     prefix, e.g. ``ab12cd34ef56:L2:143`` as printed by `rag search` /
     `rag inspect figures`.
     """
@@ -2416,7 +2414,7 @@ def _warn_unusable_figures(unusable: list[Any], listed: bool) -> None:
     """Point at figure chunks that exist but can never be shown."""
     if not unusable:
         return
-    docs = {c.doc_id for c in unusable}
+    docs = {c.rev_id for c in unusable}
     lead = (
         f"[yellow]{len(unusable)} figure chunk(s)[/] across {len(docs)} document(s) "
         f"have no usable image"
@@ -2431,7 +2429,7 @@ def _warn_unusable_figures(unusable: list[Any], listed: bool) -> None:
 
 
 @inspect_group.command("figures", short_help="List figure and formula chunks in the store.")
-@click.option("--doc-id", default=None, help="Restrict to a single document.")
+@click.option("--rev-id", default=None, help="Restrict to one revision (rev_id).")
 @click.option(
     "--project-id",
     default=None,
@@ -2454,7 +2452,7 @@ def _warn_unusable_figures(unusable: list[Any], listed: bool) -> None:
     "--include-unusable", is_flag=True, help="Also list figure chunks whose image cannot be served."
 )
 def list_figures_cmd(
-    doc_id: str | None,
+    rev_id: str | None,
     project_id: str | None,
     is_global: bool,
     db_path: Path | None,
@@ -2472,9 +2470,9 @@ def list_figures_cmd(
     project_id = resolve_cli_project_id(project_id, is_global=is_global)
 
     be = _backend_for(db_path)
-    if doc_id:
-        doc_id = _backend_resolve(be, doc_id)
-    figs = be.list_figure_chunks(doc_id=doc_id, project_id=project_id, only_with_image=False)
+    if rev_id:
+        rev_id = _backend_resolve(be, rev_id)
+    figs = be.list_figure_chunks(rev_id=rev_id, project_id=project_id, only_with_image=False)
     unusable = [c for c in figs if not c.figure_available]
     if not include_unusable:
         figs = [c for c in figs if c.figure_available]
@@ -2503,7 +2501,7 @@ def list_figures_cmd(
         else:
             src = "[red]missing[/]" if c.figure_image_path else "[red]none[/]"
         table.add_row(
-            _short_chunk_id(c.id, c.doc_id),
+            _short_chunk_id(c.id, c.rev_id),
             c.metadata.layout_type.value,
             page,
             (c.metadata.section_title or "")[:30],
@@ -2531,7 +2529,7 @@ def list_figures_cmd(
 def get_figure_cmd(chunk_id: str, output_path: Path | None, db_path: Path | None) -> None:
     """Fetch a figure chunk's image and save it to disk.
 
-    CHUNK_ID accepts the full id or an abbreviated form using a doc_id
+    CHUNK_ID accepts the full id or an abbreviated form using a rev_id
     prefix, e.g. ``ab12cd34ef56:L2:143`` as printed by `rag inspect figures` /
     `rag search`. This is the CLI equivalent of the MCP `get_figure` tool.
     """
@@ -2543,7 +2541,7 @@ def get_figure_cmd(chunk_id: str, output_path: Path | None, db_path: Path | None
     except (ValueError, FileNotFoundError) as e:
         raise click.ClickException(str(e)) from e
 
-    default_name = _short_chunk_id(fig.chunk_id, fig.doc_id).replace(":", "_") + f".{fig.format}"
+    default_name = _short_chunk_id(fig.chunk_id, fig.rev_id).replace(":", "_") + f".{fig.format}"
     if output_path is None:
         dest = Path(default_name)
     elif output_path.is_dir() or str(output_path).endswith(("/", os.sep)):
@@ -2561,7 +2559,7 @@ def get_figure_cmd(chunk_id: str, output_path: Path | None, db_path: Path | None
         console.print(f"  description: {fig.description}")
 
     citation = fig.citation
-    loc_bits = [f"doc={citation.doc_id[:SHORT_DOC_ID_LEN]}"]
+    loc_bits = [f"rev={citation.rev_id[:SHORT_REV_ID_LEN]}"]
     if citation.page:
         loc_bits.append(f"page={citation.page}")
     if citation.section:
@@ -2575,7 +2573,7 @@ def get_figure_cmd(chunk_id: str, output_path: Path | None, db_path: Path | None
 
 
 @repair_group.command("figures", short_help="Describe figures and formulas with a vision LLM.")
-@click.option("--doc-id", default=None, help="Restrict to a single document.")
+@click.option("--rev-id", default=None, help="Restrict to one revision (rev_id).")
 @click.option("--project-id", default=None, help="Restrict to a single project.")
 @click.option(
     "--missing-only/--all", default=True, help="Skip figures that already have a description."
@@ -2590,7 +2588,7 @@ def get_figure_cmd(chunk_id: str, output_path: Path | None, db_path: Path | None
 @_db_option
 @click.option("--verbose/--quiet", default=True, help="Print per-figure progress.")
 def describe_figures_cmd(
-    doc_id: str | None,
+    rev_id: str | None,
     project_id: str | None,
     missing_only: bool,
     limit: int | None,
@@ -2613,19 +2611,19 @@ def describe_figures_cmd(
     search:
 
     \b
-        rag repair figures --doc-id <doc>
+        rag repair figures --rev-id <doc>
         rag repair embeddings <doc>
     """
     be = _backend_for(db_path)
-    if doc_id:
-        doc_id = _backend_resolve(be, doc_id)
+    if rev_id:
+        rev_id = _backend_resolve(be, rev_id)
 
     from datasheet_rag.backend import compute_mode
 
     where = "on this machine" if compute_mode() == "client" else "on the server"
     console.print(f"Describing figures via the backend (the vision model runs {where})…")
     descriptions, s = be.describe_figures(
-        doc_id=doc_id,
+        rev_id=rev_id,
         project_id=project_id,
         missing_only=missing_only,
         limit=limit,
@@ -2647,7 +2645,7 @@ def describe_figures_cmd(
             console.print(f"  {desc}\n")
     elif descriptions:
         console.print("[green]Descriptions written to chunks + context_text.[/]")
-        _next_steps(doc_id, rechunk=False)
+        _next_steps(rev_id, rechunk=False)
 
 
 # ---------------------------------------------------------------------------
@@ -2656,7 +2654,7 @@ def describe_figures_cmd(
 
 
 def _relink_plan(
-    conn: sqlite3.Connection, doc_id: str
+    conn: sqlite3.Connection, rev_id: str
 ) -> tuple[list[tuple[str, Path, str]], list[str]]:
     """Match a document's cropped figures on disk to its figure chunks.
 
@@ -2671,7 +2669,6 @@ def _relink_plan(
     being logo-sized, say) is skipped rather than guessed at, and so is any
     pair whose captions are both present and different.
     """
-    import json as _json
 
     from datasheet_rag.models.chunk import IMAGE_LAYOUT_TYPES, ChunkLevel, LayoutType
     from datasheet_rag.store import resolve_figure_path
@@ -2680,21 +2677,21 @@ def _relink_plan(
     image_types = sorted(t.value for t in IMAGE_LAYOUT_TYPES)
     type_marks = ",".join("?" * len(image_types))
     orphans = conn.execute(
-        f"SELECT COUNT(*) AS n FROM chunks WHERE doc_id = ? AND layout_type IN ({type_marks}) "
+        f"SELECT COUNT(*) AS n FROM chunks WHERE rev_id = ? AND layout_type IN ({type_marks}) "
         "AND level = ? AND COALESCE(figure_image_path, '') = '' "
         "AND COALESCE(figure_s3_key, '') = ''",
-        (doc_id, *image_types, int(ChunkLevel.MICRO)),
+        (rev_id, *image_types, int(ChunkLevel.MICRO)),
     ).fetchone()["n"]
     if not orphans:
         # Coarser levels inherit their image from the MICRO chunk they wrap,
         # which the chunker now does at ingest — a re-chunk carries it up.
         return [], []
 
-    manifest_path = settings.figures_dir / doc_id / "manifest.json"
+    manifest_path = settings.figures_dir / rev_id / "manifest.json"
     if not manifest_path.is_file():
         return [], [f"no manifest at {manifest_path} — re-ingest the PDF to re-crop"]
 
-    manifest = _json.loads(manifest_path.read_text())
+    manifest = cache_files.load(manifest_path)
     # Keyed by (layout_type, page): a formula crop only pairs with a formula
     # chunk, so a page holding both kinds still lines up.
     by_page: dict[tuple[str, int], list[dict[str, Any]]] = {}
@@ -2720,9 +2717,9 @@ def _relink_plan(
 
     chunks_by_page: dict[tuple[str, int], list[Any]] = {}
     for row in conn.execute(
-        f"SELECT * FROM chunks WHERE doc_id = ? AND layout_type IN ({type_marks}) "
+        f"SELECT * FROM chunks WHERE rev_id = ? AND layout_type IN ({type_marks}) "
         "AND level = ? ORDER BY rowid",
-        (doc_id, *image_types, int(ChunkLevel.MICRO)),
+        (rev_id, *image_types, int(ChunkLevel.MICRO)),
     ).fetchall():
         pages = json.loads(row["page_numbers"] or "[]")
         key = (row["layout_type"], pages[0] if pages else 1)
@@ -2758,12 +2755,12 @@ def _relink_plan(
 
 
 @repair_group.command("figure-links", short_help="Reattach cropped images to figure chunks.")
-@click.option("--doc-id", default=None, help="Restrict to a single document.")
+@click.option("--rev-id", default=None, help="Restrict to one revision (rev_id).")
 @click.option(
     "--apply", "do_apply", is_flag=True, help="Write the links (default: report what would change)."
 )
 @_db_option
-def relink_figures_cmd(doc_id: str | None, do_apply: bool, db_path: Path | None) -> None:
+def relink_figures_cmd(rev_id: str | None, do_apply: bool, db_path: Path | None) -> None:
     """Reattach cropped figure images to figure chunks that lost their link.
 
     Formula chunks are repaired the same way, from the formula crops.
@@ -2771,7 +2768,7 @@ def relink_figures_cmd(doc_id: str | None, do_apply: bool, db_path: Path | None)
     A document ingested with `--skip-figures`, or restored from a backup
     written before figure links existed, leaves chunks that search can find
     and `show_figure` cannot serve. When the crops are still on disk under
-    `figures_dir/<doc_id>/` with their manifest, this pairs them back up per
+    `figures_dir/<rev_id>/` with their manifest, this pairs them back up per
     page in reading order and writes the link.
 
     Runs against a local store only — it reads the figures directory and
@@ -2780,7 +2777,7 @@ def relink_figures_cmd(doc_id: str | None, do_apply: bool, db_path: Path | None)
 
     \b
         rag repair figure-links                 # report across every document
-        rag repair figure-links --doc-id ab12 --apply
+        rag repair figure-links --rev-id ab12 --apply
 
     Documents with no crops on disk cannot be repaired this way — re-ingest
     the PDF (without --skip-figures) instead.
@@ -2791,31 +2788,31 @@ def relink_figures_cmd(doc_id: str | None, do_apply: bool, db_path: Path | None)
     path = _require_local_db(db_path)
     conn = connect(path)
 
-    if doc_id:
-        doc_id = _resolve_doc_id(conn, doc_id)
-        doc_ids = [doc_id]
+    if rev_id:
+        rev_id = _resolve_rev_id(conn, rev_id)
+        rev_ids = [rev_id]
     else:
         image_types = sorted(t.value for t in IMAGE_LAYOUT_TYPES)
-        doc_ids = [
-            r["doc_id"]
+        rev_ids = [
+            r["rev_id"]
             for r in conn.execute(
-                "SELECT DISTINCT doc_id FROM chunks "
+                "SELECT DISTINCT rev_id FROM chunks "
                 f"WHERE layout_type IN ({','.join('?' * len(image_types))}) "
                 "AND COALESCE(figure_image_path, '') = '' "
-                "AND COALESCE(figure_s3_key, '') = '' ORDER BY doc_id",
+                "AND COALESCE(figure_s3_key, '') = '' ORDER BY rev_id",
                 image_types,
             ).fetchall()
         ]
 
-    if not doc_ids:
+    if not rev_ids:
         console.print("[green]Every figure chunk already has an image source.[/]")
         return
 
     total_linked = 0
     quiet = 0
-    for did in doc_ids:
+    for did in rev_ids:
         plan, notes = _relink_plan(conn, did)
-        head = f"[cyan]{did[:SHORT_DOC_ID_LEN]}[/]"
+        head = f"[cyan]{did[:SHORT_REV_ID_LEN]}[/]"
         if not plan and not notes:
             quiet += 1
             continue
@@ -2854,6 +2851,40 @@ def relink_figures_cmd(doc_id: str | None, do_apply: bool, db_path: Path | None)
             )
     else:
         console.print("[yellow]Dry run — pass --apply to write the links.[/]")
+
+
+@repair_group.command("caches", short_help="Update cached files to the rev_id name.")
+@click.option("--apply", is_flag=True, help="Rewrite the files. Without it, only list them.")
+def repair_caches_cmd(apply: bool) -> None:
+    """Rewrite cached pipeline files that still say `doc_id` (GH #124).
+
+    The chunk graphs and layouts under the output directory and the figure
+    manifests under the figures directory name a revision by id. Files
+    written before the id was renamed `rev_id` say `doc_id`, and every
+    command that reads one stops and points here. This renames the key in
+    place. It reads no PDFs and touches no store; it is safe to run again.
+
+    Caches live on the machine that ran the pipeline, so run it there: on a
+    client that computes locally as well as on the server.
+
+    \b
+        rag repair caches           # list the files that need it
+        rag repair caches --apply   # rewrite them
+    """
+    settings = get_settings()
+    stale = cache_files.repair_caches(settings.output_dir, settings.figures_dir, apply=apply)
+    if not stale:
+        console.print("[green]All cached files use rev_id[/] — nothing to do.")
+        return
+    for path in stale:
+        console.print(f"  {path}")
+    if apply:
+        console.print(f"[green]Rewrote {len(stale)} cached file(s)[/] to use rev_id.")
+    else:
+        console.print(
+            f"[yellow]{len(stale)} cached file(s) still say doc_id.[/] "
+            "Run [cyan]rag repair caches --apply[/] to rewrite them."
+        )
 
 
 @repair_group.command("fts", short_help="Rebuild the keyword (BM25) search index.")
@@ -2951,7 +2982,7 @@ def _print_cost_table(cost: CostEstimate, heading: str = "Estimated AWS cost") -
 
 @cli.command(short_help="Ingest a PDF end to end.")
 @click.argument("pdf_path", type=click.Path(exists=True, path_type=Path))
-@click.option("--doc-id", default=None, help="Explicit document ID (default: content hash).")
+@click.option("--rev-id", default=None, help="Explicit document ID (default: content hash).")
 @click.option(
     "--project-id",
     default=None,
@@ -2981,7 +3012,7 @@ def _print_cost_table(cost: CostEstimate, heading: str = "Estimated AWS cost") -
     help="Free-text tag for this document, e.g. --tag mcu --tag "
     "reviewed (repeatable). Sets the sidecar's whole tag list "
     "for this ingest. Change it later without a re-ingest via "
-    "`rag metadata <doc-id> --tag ...`; for name=value metadata "
+    "`rag metadata <rev-id> --tag ...`; for name=value metadata "
     "use --field.",
 )
 @click.option(
@@ -2999,7 +3030,7 @@ def _print_cost_table(cost: CostEstimate, heading: str = "Estimated AWS cost") -
     default=None,
     metavar="DOC",
     help="Make the PDF the newest revision of this document (a D12 or any of "
-    "its revisions' doc_ids). Without it the identity rule decides, if the "
+    "its revisions' rev_ids). Without it the identity rule decides, if the "
     "store has one (`rag revisions rule`); else the PDF is a new document.",
 )
 @click.option(
@@ -3098,7 +3129,7 @@ def _print_cost_table(cost: CostEstimate, heading: str = "Estimated AWS cost") -
 )
 def ingest(
     pdf_path: Path,
-    doc_id: str | None,
+    rev_id: str | None,
     project_id: str | None,
     mpn: tuple[str, ...],
     manufacturer: str | None,
@@ -3139,7 +3170,7 @@ def ingest(
 
     PDF_PATH may also be a directory, in which case every *.pdf found
     under it (recursively) is ingested one by one with the same options.
-    Documents already in the store under their content-hash doc_id are
+    Documents already in the store under their content-hash rev_id are
     skipped unless --force is given, and --show-cost prints a combined
     estimate across all of them in addition to each document's breakdown.
     """
@@ -3181,13 +3212,13 @@ def ingest(
     )
 
     if not pdf_path.is_dir():
-        _ingest_one(pdf_path, doc_id=doc_id, **common)
+        _ingest_one(pdf_path, rev_id=rev_id, **common)
         return
 
-    if doc_id:
+    if rev_id:
         raise click.ClickException(
-            "--doc-id can't be used with a directory — each PDF gets its own "
-            "content-hash doc_id. Drop --doc-id for bulk ingestion."
+            "--rev-id can't be used with a directory — each PDF gets its own "
+            "content-hash rev_id. Drop --rev-id for bulk ingestion."
         )
     if new_revision_of is not None or revision_label is not None:
         raise click.ClickException(
@@ -3207,7 +3238,7 @@ def ingest(
     if not show_cost:
         try:
             ingested_ids = {
-                d.doc_id for d in (store_backend or _backend_for(db_path)).get_ingested_docs()
+                d.rev_id for d in (store_backend or _backend_for(db_path)).get_ingested_docs()
             }
         except Exception:
             ingested_ids = set()
@@ -3221,13 +3252,13 @@ def ingest(
         did = content_hash(pdf)
         if did in ingested_ids and not force:
             console.print(
-                f"  [dim]Already ingested and up to date (doc_id={did}) — "
+                f"  [dim]Already ingested and up to date (rev_id={did}) — "
                 "skipping. Pass --force to re-ingest.[/]"
             )
             skipped += 1
             continue
         try:
-            result = _ingest_one(pdf, doc_id=None, **common)
+            result = _ingest_one(pdf, rev_id=None, **common)
         except click.ClickException as e:
             console.print(f"  [red]Failed:[/] {e.format_message()}")
             failed.append((pdf, e.format_message()))
@@ -3271,7 +3302,7 @@ def ingest(
 def _ingest_one(
     pdf_path: Path,
     *,
-    doc_id: str | None,
+    rev_id: str | None,
     store_backend: RagBackend | None,
     field_registry: _FieldRegistry | None,
     project_id: str | None,
@@ -3359,7 +3390,7 @@ def _ingest_one(
 
         try:
             planned = backend_obj.plan_ingest_link(
-                doc_id=doc_id or content_hash(pdf_path),
+                rev_id=rev_id or content_hash(pdf_path),
                 metadata=meta_patch,
                 new_revision_of=new_revision_of,
             )
@@ -3416,7 +3447,7 @@ def _ingest_one(
         try:
             result = backend_obj.ingest_pdf(
                 pdf_path,
-                doc_id=doc_id,
+                rev_id=rev_id,
                 project_id=project_id,
                 metadata=meta_patch,
                 backend=backend,
@@ -3441,7 +3472,7 @@ def _ingest_one(
     try:
         parsed = parse_pdf_to_graph(
             pdf_path,
-            doc_id=doc_id,
+            rev_id=rev_id,
             backend=backend,
             skip_figures=skip_figures,
             upload_figures=upload_figures,
@@ -3458,7 +3489,7 @@ def _ingest_one(
     except OcrRequiredError as e:
         # Cost estimation on a scanned PDF with no cached OCR: only the OCR
         # line item can be priced (the rest depends on its output).
-        console.print(f"  doc_id = [cyan]{e.doc_id}[/]")
+        console.print(f"  rev_id = [cyan]{e.rev_id}[/]")
         cost.items.append(estimate_textract_cost(e.pages))
         cost.notes.append(
             "No cached Textract OCR results for this PDF — only the "
@@ -3470,7 +3501,7 @@ def _ingest_one(
         _print_cost_table(cost)
         return cost
 
-    did = parsed.doc_id
+    did = parsed.rev_id
     graph = parsed.graph
     figure_count = parsed.figure_count
 
@@ -3498,7 +3529,7 @@ def _ingest_one(
         console.print("[yellow]Dry run — not writing to the store.[/]")
         elapsed = time.monotonic() - t0
         console.rule(f"[bold green]Done (dry run)[/] — {elapsed:.0f}s")
-        console.print(f"  doc_id = [cyan]{did}[/]")
+        console.print(f"  rev_id = [cyan]{did}[/]")
         return None
 
     step_state["n"] += 1
@@ -3553,7 +3584,7 @@ def _report_ingest(result: IngestResult, t0: float) -> None:
         console.print(f"  [green]Inferred title:[/] {result.title}")
     elapsed = time.monotonic() - t0
     console.rule(f"[bold green]Done[/] — {elapsed:.0f}s")
-    console.print(f"  doc_id = [cyan]{result.doc_id}[/]")
+    console.print(f"  rev_id = [cyan]{result.rev_id}[/]")
     if result.link is not None:
         console.print(f"  {result.link.describe()}")
 
@@ -3599,7 +3630,7 @@ def _parse_page_range(spec: str) -> tuple[int, int]:
     required=True,
     help="1-based inclusive page range to re-run, e.g. '36' or '36-40'.",
 )
-@click.option("--doc-id", default=None, help="Override the content-hash doc_id.")
+@click.option("--rev-id", default=None, help="Override the content-hash rev_id.")
 @click.option(
     "--accurate-tables/--fast-tables",
     default=True,
@@ -3613,7 +3644,7 @@ def _parse_page_range(spec: str) -> tuple[int, int]:
 def reconvert_tables_cmd(
     pdf_path: Path,
     pages_spec: str,
-    doc_id: str | None,
+    rev_id: str | None,
     accurate_tables: bool,
     dry_run: bool,
 ) -> None:
@@ -3630,9 +3661,9 @@ def reconvert_tables_cmd(
     those table cells/text in place.
 
     Requires the document to already be ingested with the Docling backend
-    (so a cached `<doc_id>_outline.json` exists) — Textract exposes no
+    (so a cached `<rev_id>_outline.json` exists) — Textract exposes no
     equivalent re-run. On success it deletes the cached chunk graph; follow
-    with `rag repair chunks <doc-id>` and `rag repair embeddings <doc-id>` to
+    with `rag repair chunks <rev-id>` and `rag repair embeddings <rev-id>` to
     re-derive from the patched outline. Docling layout analysis itself is NOT
     re-run for the rest of the document.
     """
@@ -3641,20 +3672,19 @@ def reconvert_tables_cmd(
 
     page_range = _parse_page_range(pages_spec)
     settings = get_settings()
-    did = doc_id or content_hash(pdf_path)
+    did = rev_id or content_hash(pdf_path)
     outline_path = settings.output_dir / f"{did}_outline.json"
     chunks_path = settings.output_dir / f"{did}_chunks.json"
 
     if not outline_path.exists():
         raise click.ClickException(
-            f"No cached layout outline for doc_id={did} at {outline_path}. "
+            f"No cached layout outline for rev_id={did} at {outline_path}. "
             "`repair reconvert` is Docling-only and patches an existing "
             "outline — it does not do a first-time conversion. Run "
             "`rag ingest --backend docling` on this PDF first."
         )
 
-    with open(outline_path) as f:
-        cached = json.load(f)
+    cached = cache_files.load(outline_path)
     outline = DocumentOutline.from_dict(cached["outline"])
 
     mode_label = "accurate" if accurate_tables else "fast"
@@ -3663,7 +3693,7 @@ def reconvert_tables_cmd(
         f"with TableFormer [cyan]{mode_label}[/] mode…"
     )
     report = reconvert_tables_in_range(
-        pdf_path, outline, doc_id=did, page_range=page_range, accurate_tables=accurate_tables
+        pdf_path, outline, rev_id=did, page_range=page_range, accurate_tables=accurate_tables
     )
 
     if not report:
@@ -3736,7 +3766,7 @@ def reconvert_tables_cmd(
 
 
 @inspect_group.command("tables", short_help="Report tables that parsed badly.")
-@click.argument("doc_id", type=str)
+@click.argument("rev_id", type=str)
 @click.option(
     "--list-flagged",
     is_flag=True,
@@ -3756,7 +3786,7 @@ def reconvert_tables_cmd(
         "so repeated runs show the same tables."
     ),
 )
-def table_structure_sweep_cmd(doc_id: str, list_flagged: bool, sample_n: int) -> None:
+def table_structure_sweep_cmd(rev_id: str, list_flagged: bool, sample_n: int) -> None:
     """Report how many of a document's tables parsed with untrustworthy structure.
 
     Sweeps every table in the cached layout outline and counts the ones whose
@@ -3766,12 +3796,12 @@ def table_structure_sweep_cmd(doc_id: str, list_flagged: bool, sample_n: int) ->
     asserts the wrong column meanings — the failure worth catching before it
     reaches search results.
 
-    Costs nothing: pure Python over `<doc_id>_outline.json`, no Docling re-run
+    Costs nothing: pure Python over `<rev_id>_outline.json`, no Docling re-run
     and no AWS calls. Run it before `rag repair tables`, which does spend
     money, to see how much there is to fix and to spot-check (with --sample)
     whether the flags are accurate on this document.
 
-    DOC_ID is a full hash or unambiguous prefix, looked up in the layout cache
+    REV_ID is a full hash or unambiguous prefix, looked up in the layout cache
     rather than the ingest registry — like `repair reconvert`, this works on a
     document whose layout was converted but whose ingest never completed.
     Docling-only; see `rag repair tables` for what to do about what it finds.
@@ -3783,11 +3813,10 @@ def table_structure_sweep_cmd(doc_id: str, list_flagged: bool, sample_n: int) ->
         _table_cells_to_compact_text,
     )
 
-    did = _require_docling_outline(doc_id)
+    did = _require_docling_outline(rev_id)
     outline_path = _cache_path(did, "_outline.json")
 
-    with open(outline_path) as f:
-        cached = json.load(f)
+    cached = cache_files.load(outline_path)
     outline = DocumentOutline.from_dict(cached["outline"])
 
     tables = [
@@ -3797,7 +3826,7 @@ def table_structure_sweep_cmd(doc_id: str, list_flagged: bool, sample_n: int) ->
         if el.element_type == ElementType.TABLE
     ]
     if not tables:
-        console.print(f"[yellow]No cached tables found for doc_id={did}.[/]")
+        console.print(f"[yellow]No cached tables found for rev_id={did}.[/]")
         return
 
     flagged: list[_FlaggedTable] = []
@@ -3826,7 +3855,7 @@ def table_structure_sweep_cmd(doc_id: str, list_flagged: bool, sample_n: int) ->
     total = len(tables)
     flagged_count = len(flagged)
     summary = Table(
-        title=f"Table-structure sweep — {did[:SHORT_DOC_ID_LEN]} ({total:,} cached tables)"
+        title=f"Table-structure sweep — {did[:SHORT_REV_ID_LEN]} ({total:,} cached tables)"
     )
     summary.add_column("Detector")
     summary.add_column("Flagged", justify="right")
@@ -3888,7 +3917,7 @@ _MAX_HEADER_FRACTION = 0.3
 
 
 @repair_group.command("tables", short_help="LLM-repair tables flagged untrustworthy.")
-@click.argument("doc_id", type=str)
+@click.argument("rev_id", type=str)
 @click.option(
     "--limit",
     type=int,
@@ -3918,7 +3947,7 @@ _MAX_HEADER_FRACTION = 0.3
 )
 @click.option("-v", "--verbose", is_flag=True, help="Print rejection reasons as they happen.")
 def repair_tables_cmd(
-    doc_id: str,
+    rev_id: str,
     limit: int | None,
     model_id: str | None,
     dpi: int,
@@ -3946,10 +3975,10 @@ def repair_tables_cmd(
     band is implausibly large to crop reliably — repair is additive, never a
     regression; the existing structure-free rendering is kept.
 
-    Like `repair reconvert`, this patches the cached `<doc_id>_outline.json`
+    Like `repair reconvert`, this patches the cached `<rev_id>_outline.json`
     in place and invalidates the cached chunk graph; follow with
-    `rag repair chunks <doc_id>` and `rag repair embeddings <doc_id>` to
-    re-derive from the repaired structure. Run `rag inspect tables <doc_id>`
+    `rag repair chunks <rev_id>` and `rag repair embeddings <rev_id>` to
+    re-derive from the repaired structure. Run `rag inspect tables <rev_id>`
     first to see what would be touched and at roughly what volume.
     """
     import io
@@ -3983,12 +4012,11 @@ def repair_tables_cmd(
             return "data rows disagree on column count — can't trust C"
         return None
 
-    did = _require_docling_outline(doc_id)
+    did = _require_docling_outline(rev_id)
     outline_path = _cache_path(did, "_outline.json")
     chunks_path = _cache_path(did, "_chunks.json")
 
-    with open(outline_path) as f:
-        cached = json.load(f)
+    cached = cache_files.load(outline_path)
     outline = DocumentOutline.from_dict(cached["outline"])
 
     tables: list[ContentElement] = [
@@ -4012,7 +4040,7 @@ def repair_tables_cmd(
     if not candidates:
         hint = "pass --force to re-repair cached ones" if not force else "all are already repaired"
         console.print(
-            f"[green]Nothing to repair[/] for doc_id={did[:SHORT_DOC_ID_LEN]} — "
+            f"[green]Nothing to repair[/] for rev_id={did[:SHORT_REV_ID_LEN]} — "
             f"no untrustworthy tables without a cached repair ({hint}). "
             "Run `rag inspect tables` to confirm the flagged count."
         )
@@ -4133,7 +4161,7 @@ def repair_tables_cmd(
 
 
 @cli.command("metadata", short_help="Show or set a document's metadata.")
-@click.argument("doc_id", type=str)
+@click.argument("rev_id", type=str)
 @click.option(
     "--title",
     "doc_title",
@@ -4220,7 +4248,7 @@ def repair_tables_cmd(
 @click.option(
     "--this-revision",
     is_flag=True,
-    help="Write --tag/--clear-tags and the fields on this one revision (a doc_id) "
+    help="Write --tag/--clear-tags and the fields on this one revision (a rev_id) "
     "instead of on its document. Clearing a field or the tags then removes the "
     "override, so the revision holds the document's value again.",
 )
@@ -4230,11 +4258,11 @@ def repair_tables_cmd(
     default=None,
     metavar="LABEL",
     help="Set this revision's label, e.g. 'Rev C' (free text; '' clears it). "
-    "Needs a doc_id, not a D12.",
+    "Needs a rev_id, not a D12.",
 )
 @_db_option
 def metadata_cmd(
-    doc_id: str,
+    rev_id: str,
     doc_title: str | None,
     add_projects: tuple[str, ...],
     remove_projects: tuple[str, ...],
@@ -4254,26 +4282,26 @@ def metadata_cmd(
 ) -> None:
     """Show a document's metadata, or update it.
 
-    DOC_ID is a document (D12) or any of its revisions' doc_ids (prefix ok).
+    REV_ID is a document (D12) or any of its revisions' rev_ids (prefix ok).
     Metadata belongs to the document, so a write through any revision's
-    doc_id changes it for every revision. With no options this prints the
+    rev_id changes it for every revision. With no options this prints the
     current metadata. Pass any option to update instead — only what you pass
     is touched:
 
     \b
         rag metadata D12                      # show
         rag metadata D12 --mpn INA226         # set, on every revision
-        rag metadata <doc_id> --revision 'Rev C'
+        rag metadata <rev_id> --revision 'Rev C'
 
     To give one revision a different value, write it with --this-revision.
     Listings mark such values with *:
 
-        rag metadata <doc_id> --this-revision --field doc_type=errata
+        rag metadata <rev_id> --this-revision --field doc_type=errata
 
     A document's mpn is a list (variants/aliases). --mpn replaces the list,
     --mpn-alias appends to it:
 
-        rag metadata <doc_id> --mpn INA226 --mpn-alias INA226A --mpn-alias INA226B
+        rag metadata <rev_id> --mpn INA226 --mpn-alias INA226A --mpn-alias INA226B
 
     Filtering with --mpn on `rag list` or via the MCP tools matches any
     entry in the list. --mpn, --manufacturer and --doc-type are shortcuts
@@ -4282,7 +4310,7 @@ def metadata_cmd(
     A document can belong to several projects. --add-project and
     --remove-project change one membership each and keep the rest:
 
-        rag metadata <doc_id> --add-project board-b --remove-project board-a
+        rag metadata <rev_id> --add-project board-b --remove-project board-a
 
     In a folder with a .rag.toml, a write with neither option adds the
     document to the .rag.toml project.
@@ -4292,7 +4320,7 @@ def metadata_cmd(
     in; without it the .rag.toml project is used. The project is never
     guessed from the document's memberships:
 
-        rag metadata <doc_id> --project board-b --subsystem aux
+        rag metadata <rev_id> --project board-b --subsystem aux
     """
     from datasheet_rag.backend import MetadataPatch
     from datasheet_rag.project_config import get_project_config
@@ -4321,9 +4349,9 @@ def metadata_cmd(
         if this_revision:
             raise click.UsageError("--this-revision says where a write goes; give something to set")
         be = _backend_for(db_path)
-        existing = be.get_metadata(_metadata_target(be, doc_id))
+        existing = be.get_metadata(_metadata_target(be, rev_id))
         if existing is None:
-            console.print(f"[yellow]No metadata recorded for[/] {doc_id}")
+            console.print(f"[yellow]No metadata recorded for[/] {rev_id}")
             return
         console.print(existing.model_dump_json(indent=2, exclude_none=True))
         _note_overrides(existing)
@@ -4392,8 +4420,8 @@ def metadata_cmd(
             tags = tuple(proj_cfg.tags)
 
     be = _backend_for(db_path)
-    doc_id = _metadata_target(be, doc_id)
-    if parse_document_ref(doc_id) is not None:
+    rev_id = _metadata_target(be, rev_id)
+    if parse_document_ref(rev_id) is not None:
         what = next(
             (
                 flag
@@ -4408,16 +4436,16 @@ def metadata_cmd(
         )
         if what is not None:
             raise click.UsageError(
-                f"{doc_id} is a whole document; {what} needs one revision's doc_id "
-                f"(see rag revisions {doc_id})"
+                f"{rev_id} is a whole document; {what} needs one revision's rev_id "
+                f"(see rag revisions {rev_id})"
             )
     elif document_write and not this_revision:
-        # A doc_id may mean just that PDF; writing to every revision of its
+        # A rev_id may mean just that PDF; writing to every revision of its
         # document needs the D12 (GH #124).
-        current = be.get_metadata(doc_id)
+        current = be.get_metadata(rev_id)
         if current is not None and len(current.revisions) > 1:
             raise click.UsageError(
-                f"{doc_id[:SHORT_DOC_ID_LEN]} is one of {len(current.revisions)} revisions "
+                f"{rev_id[:SHORT_REV_ID_LEN]} is one of {len(current.revisions)} revisions "
                 f"of {current.document_id}. Use {current.document_id} to change all of them, "
                 "or --this-revision for this one (fields and tags only)."
             )
@@ -4443,9 +4471,9 @@ def metadata_cmd(
             elif fields_project != cfg_project:
                 in_cfg, why_not = False, f"this write goes to project {fields_project!r}"
             elif cfg_project not in add_projects:
-                stored = be.get_metadata(doc_id)
+                stored = be.get_metadata(rev_id)
                 if stored is None or cfg_project not in stored.projects:
-                    in_cfg, why_not = False, f"{doc_id} is not in that project"
+                    in_cfg, why_not = False, f"{rev_id} is not in that project"
         fields = _merge_config_fields(
             proj_cfg, fields, scopes=scopes, in_config_project=in_cfg, why_not=why_not
         )
@@ -4456,7 +4484,7 @@ def metadata_cmd(
         if fields.get("mpn") is not None:
             base = fields["mpn"]
         else:
-            existing_meta = be.get_metadata(doc_id)
+            existing_meta = be.get_metadata(rev_id)
             # A whole-document write builds on the document's list, not on
             # one revision's override of it.
             if (
@@ -4474,7 +4502,7 @@ def metadata_cmd(
         fields["mpn"] = all_mpns
 
     if doc_title is not None:
-        updated = be.set_doc_title(doc_id, doc_title)
+        updated = be.set_doc_title(rev_id, doc_title)
         console.print(f"[green]Title set[/] on {updated} chunk rows: {doc_title!r}")
 
     if tags:
@@ -4486,7 +4514,7 @@ def metadata_cmd(
 
     try:
         meta = be.set_metadata(
-            doc_id,
+            rev_id,
             MetadataPatch(
                 add_projects=list(add_projects) or None,
                 remove_projects=list(remove_projects) or None,
@@ -4500,11 +4528,11 @@ def metadata_cmd(
     except ValueError as e:
         raise click.ClickException(str(e)) from e
     if this_revision:
-        where = f"revision {doc_id[:SHORT_DOC_ID_LEN]} only"
+        where = f"revision {rev_id[:SHORT_REV_ID_LEN]} only"
     elif len(meta.revisions) > 1:
         where = f"{meta.document_id} (all {len(meta.revisions)} revisions)"
     else:
-        where = meta.document_id or doc_id
+        where = meta.document_id or rev_id
     console.print(f"[green]Saved metadata for[/] {where}")
     _note_clears_outside_project(be, meta, fields, fields_project, remove_projects)
     console.print(meta.model_dump_json(indent=2, exclude_none=True))
@@ -4556,7 +4584,7 @@ def _note_clears_outside_project(
     names = project_scoped_names(scopes_of(specs), cleared)
     if names:
         console.print(
-            f"[yellow]Note:[/] {meta.doc_id} is not in project {project!r}, so it holds "
+            f"[yellow]Note:[/] {meta.rev_id} is not in project {project!r}, so it holds "
             f"no {', '.join(names)} there; nothing was cleared."
         )
 
@@ -4679,7 +4707,7 @@ _BLANK_TITLES = (None, "", "—")
 
 
 @repair_group.command("titles", short_help="Backfill missing document titles.")
-@click.option("--doc-id", default=None, help="Restrict to a single document.")
+@click.option("--rev-id", default=None, help="Restrict to one revision (rev_id).")
 @click.option(
     "--force",
     is_flag=True,
@@ -4692,7 +4720,7 @@ _BLANK_TITLES = (None, "", "—")
 @click.option("--dry-run", is_flag=True, help="Infer and print titles but do not persist them.")
 @_db_option
 def fix_titles_cmd(
-    doc_id: str | None,
+    rev_id: str | None,
     force: bool,
     model_id: str | None,
     dry_run: bool,
@@ -4700,14 +4728,14 @@ def fix_titles_cmd(
 ) -> None:
     """Infer and backfill document titles with a small Bedrock Claude call.
 
-    Without --doc-id, scans every ingested document and infers a title for
-    those showing as "—" (blank) in `rag list`. Pass --doc-id to target one
+    Without --rev-id, scans every ingested document and infers a title for
+    those showing as "—" (blank) in `rag list`. Pass --rev-id to target one
     document, and add --force to replace a generic-but-present title (e.g.
     "Contents", "Disclaimer") that the heuristic above wouldn't flag.
 
     Inferred titles are written to every chunk row for the document and
     marked `title_source: inferred` in the metadata sidecar (`rag metadata
-    <doc_id>`) so they're distinguishable from titles Docling extracted
+    <rev_id>`) so they're distinguishable from titles Docling extracted
     directly, and so a later re-ingest can't demote them. A title set by
     hand outranks an inferred one and is left alone — pass --force to
     replace it anyway, or to overwrite an existing inferred title.
@@ -4716,9 +4744,9 @@ def fix_titles_cmd(
 
     be = _backend_for(db_path)
 
-    if doc_id:
-        doc_id = _backend_resolve(be, doc_id)
-        docs = [d for d in be.get_ingested_docs() if d.doc_id == doc_id]
+    if rev_id:
+        rev_id = _backend_resolve(be, rev_id)
+        docs = [d for d in be.get_ingested_docs() if d.rev_id == rev_id]
     else:
         docs = be.get_ingested_docs()
 
@@ -4727,7 +4755,7 @@ def fix_titles_cmd(
         docs = [d for d in docs if d.doc_title in _BLANK_TITLES]
         if skipped and len(skipped) == 1 and not docs:
             console.print(
-                f"[yellow]{skipped[0].doc_id[:SHORT_DOC_ID_LEN]}[/] already has a title "
+                f"[yellow]{skipped[0].rev_id[:SHORT_REV_ID_LEN]}[/] already has a title "
                 f"({skipped[0].doc_title!r}). Pass --force to re-infer it anyway."
             )
 
@@ -4741,9 +4769,9 @@ def fix_titles_cmd(
     console.print(f"Inferring titles for {len(docs)} document(s) (the LLM runs {where})…")
 
     for d in docs:
-        short_id = d.doc_id[:SHORT_DOC_ID_LEN]
+        short_id = d.rev_id[:SHORT_REV_ID_LEN]
         current = d.doc_title
-        md = be.get_metadata(d.doc_id)
+        md = be.get_metadata(d.rev_id)
         source = md.title_source if md is not None else "auto"
         # Say why we're leaving a hand-set title alone, rather than letting
         # the store's refusal surface as an indistinguishable "could not
@@ -4754,7 +4782,7 @@ def fix_titles_cmd(
                 f"({current!r}); pass --force to replace it"
             )
             continue
-        title = be.infer_title(d.doc_id, model_id=model_id, dry_run=dry_run, force=force)
+        title = be.infer_title(d.rev_id, model_id=model_id, dry_run=dry_run, force=force)
         if title is None:
             console.print(f"  [yellow]could not infer[/] {short_id} (was: {current!r})")
             continue
@@ -4926,7 +4954,7 @@ def _paired_vs_baseline(
 @eval_group.command("generate", short_help="Generate a golden set from the corpus.")
 @_db_option
 @click.option("--per-category", default=4, type=int, help="Items to generate per category.")
-@click.option("--doc-id", default=None, help="Restrict sampling to one document.")
+@click.option("--rev-id", default=None, help="Restrict sampling to one document.")
 @click.option("--project-id", default=None, help="Restrict sampling to one project.")
 @click.option("--model", "model_id", default=None, help="Bedrock model ID for generation.")
 @click.option("--seed", default=0, type=int, help="Sampling seed (reproducible).")
@@ -4945,7 +4973,7 @@ def _paired_vs_baseline(
 def eval_generate(
     db_path: Path | None,
     per_category: int,
-    doc_id: str | None,
+    rev_id: str | None,
     project_id: str | None,
     model_id: str | None,
     seed: int,
@@ -4958,12 +4986,12 @@ def eval_generate(
     from datasheet_rag.store import connect
 
     conn = connect(_require_local_db(db_path))
-    if doc_id:
-        doc_id = _resolve_doc_id(conn, doc_id)
+    if rev_id:
+        rev_id = _resolve_rev_id(conn, rev_id)
     eval_set = generate_golden_set(
         conn,
         per_category=per_category,
-        doc_id=doc_id,
+        rev_id=rev_id,
         project_id=project_id,
         model_id=model_id,
         seed=seed,
@@ -5113,7 +5141,7 @@ def eval_run(
 )
 @click.option("--limit", default=None, type=int, help="Cap chunks re-embedded (index ablation).")
 @click.option(
-    "--doc-id",
+    "--rev-id",
     default=None,
     help="Document to re-summarize (required for --index-ablation macro-summarizer).",
 )
@@ -5132,7 +5160,7 @@ def eval_ablate(
     index_ablation: str | None,
     variant_db: Path,
     limit: int | None,
-    doc_id: str | None,
+    rev_id: str | None,
     summarizer_model: str,
     verbose: bool,
 ) -> None:
@@ -5174,9 +5202,9 @@ def eval_ablate(
         return
 
     if index_ablation == "macro-summarizer":
-        if not doc_id:
+        if not rev_id:
             raise click.ClickException(
-                "--index-ablation macro-summarizer requires --doc-id "
+                "--index-ablation macro-summarizer requires --rev-id "
                 "(it re-summarizes one document's chapters with Bedrock Claude)."
             )
         from datasheet_rag.chunking.summarizer import AbstractiveSummarizer
@@ -5184,7 +5212,7 @@ def eval_ablate(
 
         console.print(
             f"[yellow]Index ablation[/] 'macro-summarizer': re-summarizing "
-            f"{doc_id} chapters abstractively (model={summarizer_model}) "
+            f"{rev_id} chapters abstractively (model={summarizer_model}) "
             f"and re-embedding — this calls Bedrock Claude per chapter."
         )
         summarizer = AbstractiveSummarizer(
@@ -5194,16 +5222,16 @@ def eval_ablate(
         variant_conn = build_macro_summarizer_variant_store(
             conn,
             variant_db,
-            doc_id,
+            rev_id,
             summarizer,
             embedder,
             verbose=verbose,
         )
 
-        # The variant store only contains doc_id's chunks (by design — see
+        # The variant store only contains rev_id's chunks (by design — see
         # build_macro_summarizer_variant_store), so items targeting other
         # docs would score 0 by construction. Scope the eval set to match.
-        scoped_set = EvalSet(items=[i for i in eval_set.items if i.doc_id == doc_id])
+        scoped_set = EvalSet(items=[i for i in eval_set.items if i.rev_id == rev_id])
 
         base_cfg = RunConfig(
             mode="hybrid", k=top_k, level="macro", label="baseline (extractive macro)"
@@ -5481,7 +5509,7 @@ def _shared_project(backend: Any, needs: list[Any]) -> str:
     eval cannot tell which project's catalogue to hand the agent. A needed
     document missing from the store is skipped.
     """
-    found = (backend.get_document(i) for i in sorted({n.doc_id for n in needs if n.doc_id}))
+    found = (backend.get_document(i) for i in sorted({n.rev_id for n in needs if n.rev_id}))
     project_lists: list[list[str]] = [d.projects for d in found if d is not None]
     shared: set[str] = set(project_lists[0]) if project_lists else set()
     for projects in project_lists[1:]:
@@ -5581,7 +5609,7 @@ def _run_answer_eval(
     listing = local.list_documents(project_id=project).documents
     docs = [
         {
-            "doc_id": d.doc_id,
+            "rev_id": d.rev_id,
             "title": d.doc_title,
             "mpn": display_value(d.fields.get("mpn")),
             "manufacturer": display_value(d.fields.get("manufacturer")),
@@ -5866,7 +5894,7 @@ def eval_claude_code(
 
         listing = backend.list_documents(project_id=project).documents
         docs = [
-            {"doc_id": d.doc_id, "title": d.doc_title, "mpn": display_value(d.fields.get("mpn"))}
+            {"rev_id": d.rev_id, "title": d.doc_title, "mpn": display_value(d.fields.get("mpn"))}
             for d in listing
         ]
         copied = ws.prepare(docs, backend.get_pdf_bytes, project)
@@ -6213,15 +6241,15 @@ def key_revoke(key_id: str, token: str | None) -> None:
 
 
 @admin.command("audit", short_help="Show the ingest-path audit trail.")
-@click.option("--doc-id", default=None, help="Filter to one document.")
+@click.option("--rev-id", default=None, help="Filter to one document.")
 @click.option("--since", default=None, help="ISO timestamp lower bound (e.g. 2026-06-01).")
 @click.option("--limit", default=50, type=int, help="Max rows (newest first).")
 @click.option("--token", default=None, help="Admin token (default: RAG_SERVER_TOKEN).")
-def audit_cmd(doc_id: str | None, since: str | None, limit: int, token: str | None) -> None:
+def audit_cmd(rev_id: str | None, since: str | None, limit: int, token: str | None) -> None:
     """Show the ingest-path audit trail."""
     params: dict[str, Any] = {"limit": limit}
-    if doc_id:
-        params["doc_id"] = doc_id
+    if rev_id:
+        params["rev_id"] = rev_id
     if since:
         params["since"] = since
     data = _admin_request("GET", "/audit", token=token, params=params)
@@ -6230,7 +6258,7 @@ def audit_cmd(doc_id: str | None, since: str | None, limit: int, token: str | No
         console.print("[yellow]No audit entries.[/]")
         return
     table = Table(title=f"Audit · {len(entries)} entries")
-    for col in ("ts", "action", "status", "key_label", "client_ip", "doc_id", "detail"):
+    for col in ("ts", "action", "status", "key_label", "client_ip", "rev_id", "detail"):
         table.add_column(col, overflow="fold")
     for e in entries:
         table.add_row(
@@ -6239,7 +6267,7 @@ def audit_cmd(doc_id: str | None, since: str | None, limit: int, token: str | No
             e.get("status") or "",
             e.get("key_label") or "—",
             e.get("client_ip") or "—",
-            (e.get("doc_id") or "—")[:12],
+            (e.get("rev_id") or "—")[:12],
             e.get("detail_json") or (e.get("error") or "—"),
         )
     console.print(table)

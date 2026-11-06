@@ -57,7 +57,7 @@ class EchoTools:
         return "Use echo."
 
 
-SUBMIT = {"answer": "5.25 V", "value": 5.25, "unit": "V", "citations": [{"doc_id": "d", "page": 3}]}
+SUBMIT = {"answer": "5.25 V", "value": 5.25, "unit": "V", "citations": [{"rev_id": "d", "page": 3}]}
 
 
 def test_temperature_is_sent_only_when_set() -> None:
@@ -181,7 +181,7 @@ class FixedText(PdfText):
         self._pages = pages
 
 
-DOCS = [{"doc_id": "docA", "title": "Part A", "mpn": "A1", "manufacturer": "X", "pages": 3}]
+DOCS = [{"rev_id": "docA", "title": "Part A", "mpn": "A1", "manufacturer": "X", "pages": 3}]
 
 
 def _pdf_tools() -> PdfTools:
@@ -190,7 +190,7 @@ def _pdf_tools() -> PdfTools:
 
 
 def test_find_text_reports_pages() -> None:
-    blocks, failed = _pdf_tools().call("find_text", {"doc_id": "docA", "pattern": "vbus"})
+    blocks, failed = _pdf_tools().call("find_text", {"rev_id": "docA", "pattern": "vbus"})
     assert not failed
     text = blocks[0]["text"]
     assert text.splitlines()[0] == "2 matching line(s)"
@@ -199,18 +199,18 @@ def test_find_text_reports_pages() -> None:
 
 def test_read_pages_marks_pages_and_checks_range() -> None:
     tools = _pdf_tools()
-    blocks, failed = tools.call("read_pages", {"doc_id": "docA", "first": 2, "last": 3})
+    blocks, failed = tools.call("read_pages", {"rev_id": "docA", "first": 2, "last": 3})
     assert not failed
     assert "=== page 2 ===\nVBUS max" in blocks[0]["text"]
     assert "=== page 3 ===" in blocks[0]["text"]
-    _, failed = tools.call("read_pages", {"doc_id": "docA", "first": 3, "last": 9})
+    _, failed = tools.call("read_pages", {"rev_id": "docA", "first": 3, "last": 9})
     assert failed
 
 
 def test_pdf_tools_reject_unknown_doc_and_bad_regex() -> None:
     tools = _pdf_tools()
-    assert tools.call("find_text", {"doc_id": "nope", "pattern": "x"})[1]
-    assert tools.call("find_text", {"doc_id": "docA", "pattern": "("})[1]
+    assert tools.call("find_text", {"rev_id": "nope", "pattern": "x"})[1]
+    assert tools.call("find_text", {"rev_id": "docA", "pattern": "("})[1]
 
 
 def test_list_pdfs() -> None:
@@ -233,11 +233,11 @@ def test_rag_tools_expose_the_server_and_scope_to_the_project() -> None:
     for doc, project in (("docA", "p1"), ("docB", "p2")):
         chunk = Chunk(
             id=f"{doc}:0",
-            doc_id=doc,
+            rev_id=doc,
             level=ChunkLevel.MICRO,
             text="t",
             context_text="t",
-            metadata=ChunkMetadata(doc_id=doc, page_numbers=[1]),
+            metadata=ChunkMetadata(rev_id=doc, page_numbers=[1]),
         )
         insert_chunks(conn, [chunk])
         set_metadata(conn, doc, add_projects=[project])

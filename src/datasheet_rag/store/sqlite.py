@@ -105,7 +105,7 @@ def figure_source_available(figure_image_path: str | None, figure_s3_key: str | 
 # tuple aligned is the single source of truth for the row shape.
 _INSERT_SQL = """
 INSERT INTO chunks (
-    id, doc_id, level,
+    id, rev_id, level,
     text, context_text, token_count, layout_type, page_numbers,
     chapter_title, section_title, doc_title,
     parent_id, prev_id, next_id, chapter_root_id,
@@ -120,7 +120,7 @@ INSERT INTO chunks (
     ?
 )
 ON CONFLICT(id) DO UPDATE SET
-    doc_id            = excluded.doc_id,
+    rev_id            = excluded.rev_id,
     level            = excluded.level,
     text              = excluded.text,
     context_text      = excluded.context_text,
@@ -198,7 +198,7 @@ def _chunk_row(
 
     return (
         chunk.id,
-        chunk.doc_id,
+        chunk.rev_id,
         int(chunk.level),
         chunk.text,
         chunk.context_text,
@@ -240,10 +240,10 @@ class InsertStats(NamedTuple):
 _PRUNE_BATCH = 500
 
 
-def _prune_stale_chunks(cur: sqlite3.Cursor, doc_id: str, keep: set[str]) -> int:
-    """Delete rows of ``doc_id`` whose ids the incoming chunk set does not carry.
+def _prune_stale_chunks(cur: sqlite3.Cursor, rev_id: str, keep: set[str]) -> int:
+    """Delete rows of ``rev_id`` whose ids the incoming chunk set does not carry.
 
-    Chunk ids are positional (``<doc_id>:L<level>:<index>``), so a re-chunk
+    Chunk ids are positional (``<rev_id>:L<level>:<index>``), so a re-chunk
     that changes the count shifts every id after the change and strands the
     tail of the previous graph — rows the upsert never touches, still in
     ``chunk_fts`` and ``chunk_vecs``, still returned by search (GH #44).
@@ -257,7 +257,7 @@ def _prune_stale_chunks(cur: sqlite3.Cursor, doc_id: str, keep: set[str]) -> int
     """
     stale = [
         row[0]
-        for row in cur.execute("SELECT id FROM chunks WHERE doc_id = ?", (doc_id,)).fetchall()
+        for row in cur.execute("SELECT id FROM chunks WHERE rev_id = ?", (rev_id,)).fetchall()
         if row[0] not in keep
     ]
     for start in range(0, len(stale), _PRUNE_BATCH):
@@ -297,7 +297,7 @@ def insert_chunks_stats(
         incoming title regardless.
     prune:
         Opt-in whole-document mode: after the upsert, delete any remaining
-        row of every ``doc_id`` covered here whose id is not in ``chunks``
+        row of every ``rev_id`` covered here whose id is not in ``chunks``
         (GH #44). Only pass it when ``chunks`` is the *complete* content for
         those documents — a partial insert with ``prune=True`` would wipe
         everything it did not ship. Off by default for that reason.
@@ -316,18 +316,18 @@ def insert_chunks_stats(
     count = 0
     pruned = 0
     # One provenance lookup per document rather than per chunk — a graph is
-    # thousands of chunks over (almost always) a single doc_id.
+    # thousands of chunks over (almost always) a single rev_id.
     keep_title: dict[str, bool] = {}
-    # doc_id -> ids shipped in this call; only collected when pruning needs it.
+    # rev_id -> ids shipped in this call; only collected when pruning needs it.
     incoming: dict[str, set[str]] = {}
     try:
         for chunk in chunks:
-            keep = keep_title.get(chunk.doc_id)
+            keep = keep_title.get(chunk.rev_id)
             if keep is None:
                 keep = force_title or title_rank(title_source) >= title_rank(
-                    get_title_source(conn, chunk.doc_id)
+                    get_title_source(conn, chunk.rev_id)
                 )
-                keep_title[chunk.doc_id] = keep
+                keep_title[chunk.rev_id] = keep
 
             row = _chunk_row(chunk, keep_title=keep)
             cur.execute(_INSERT_SQL, row)
@@ -339,11 +339,11 @@ def insert_chunks_stats(
                     (chunk.id, _vector_to_bytes(vectors[chunk.id])),
                 )
             if prune:
-                incoming.setdefault(chunk.doc_id, set()).add(chunk.id)
+                incoming.setdefault(chunk.rev_id, set()).add(chunk.id)
             count += 1
 
-        for doc_id, keep_ids in incoming.items():
-            dropped = _prune_stale_chunks(cur, doc_id, keep_ids)
+        for rev_id, keep_ids in incoming.items():
+            dropped = _prune_stale_chunks(cur, rev_id, keep_ids)
             if dropped:
                 # INFO, not WARNING: the CLI has no logging config, so a
                 # WARNING would print unformatted on stderr in the middle of
@@ -353,7 +353,7 @@ def insert_chunks_stats(
                     "insert: pruned %d stale chunk(s) from %s left behind by a "
                     "previous graph (re-chunk changed the chunk count)",
                     dropped,
-                    doc_id,
+                    rev_id,
                 )
             pruned += dropped
         # Every stored PDF is a revision of some document (GH #124). One the
@@ -399,7 +399,7 @@ def insert_chunk_graph(
 
     Always prunes, and offers no way not to: a :class:`ChunkGraph` *is* a
     whole document (see its docstring, and every site that builds one), so
-    rows of ``graph.doc_id`` this graph does not carry are leftovers from a
+    rows of ``graph.rev_id`` this graph does not carry are leftovers from a
     previous chunking — stale text that keeps competing in search, which
     nobody wants kept (GH #44). Partial inserts go through
     :func:`insert_chunks_stats`, which does not prune.
@@ -434,7 +434,7 @@ def _row_to_chunk(row: sqlite3.Row) -> Chunk:
         page_numbers_raw = row["page_numbers"]
         page_numbers = json.loads(page_numbers_raw) if page_numbers_raw else []
         metadata = ChunkMetadata(
-            doc_id=row["doc_id"],
+            rev_id=row["rev_id"],
             doc_title=row["doc_title"] or "",
             chapter_title=row["chapter_title"] or "",
             section_title=row["section_title"] or "",
@@ -449,7 +449,7 @@ def _row_to_chunk(row: sqlite3.Row) -> Chunk:
 
     return Chunk(
         id=row["id"],
-        doc_id=row["doc_id"],
+        rev_id=row["rev_id"],
         level=ChunkLevel(int(row["level"])),
         text=row["text"],
         context_text=row["context_text"] or "",
@@ -492,8 +492,8 @@ def get_chunk(conn: sqlite3.Connection, chunk_id: str) -> Chunk | None:
     return _row_to_chunk(row)
 
 
-def delete_doc(conn: sqlite3.Connection, doc_id: str) -> int:
-    """Delete every chunk belonging to ``doc_id``.
+def delete_doc(conn: sqlite3.Connection, rev_id: str) -> int:
+    """Delete every chunk belonging to ``rev_id``.
 
     The ``chunks_ad`` AFTER DELETE trigger (see
     :mod:`datasheet_rag.store.schema`) cascades the delete to ``chunk_vecs``
@@ -502,7 +502,7 @@ def delete_doc(conn: sqlite3.Connection, doc_id: str) -> int:
     Returns the number of chunk rows deleted.
     """
     cur = conn.cursor()
-    cur.execute("DELETE FROM chunks WHERE doc_id = ?", (doc_id,))
+    cur.execute("DELETE FROM chunks WHERE rev_id = ?", (rev_id,))
     deleted = cur.rowcount
     conn.commit()
     return int(deleted)
@@ -511,7 +511,7 @@ def delete_doc(conn: sqlite3.Connection, doc_id: str) -> int:
 def list_figure_chunks(
     conn: sqlite3.Connection,
     *,
-    doc_id: str | None = None,
+    rev_id: str | None = None,
     project_id: str | None = None,
     only_with_image: bool = True,
 ) -> list[Chunk]:
@@ -531,16 +531,16 @@ def list_figure_chunks(
     types = sorted(t.value for t in IMAGE_LAYOUT_TYPES)
     sql = f"SELECT * FROM chunks WHERE layout_type IN ({','.join('?' * len(types))})"
     params: list[object] = list(types)
-    if doc_id:
-        sql += " AND doc_id = ?"
-        params.append(doc_id)
+    if rev_id:
+        sql += " AND rev_id = ?"
+        params.append(rev_id)
     if project_id:
-        clause, clause_params = project_scope_sql(project_id, doc_id_column="doc_id")
+        clause, clause_params = project_scope_sql(project_id, rev_id_column="rev_id")
         sql += f" AND {clause}"
         params.extend(clause_params)
     if only_with_image:
         sql += " AND (COALESCE(figure_image_path, '') <> '' OR COALESCE(figure_s3_key, '') <> '')"
-    sql += " ORDER BY doc_id, rowid"
+    sql += " ORDER BY rev_id, rowid"
 
     rows = conn.execute(sql, params).fetchall()
     return [_row_to_chunk(row) for row in rows]
@@ -616,22 +616,22 @@ def update_figure_description(
 
 
 def get_doc_titles(conn: sqlite3.Connection) -> dict[str, str]:
-    """Return a mapping of doc_id → doc_title from the chunks table."""
+    """Return a mapping of rev_id → doc_title from the chunks table."""
     rows = conn.execute(
-        "SELECT doc_id, doc_title FROM chunks WHERE doc_title IS NOT NULL GROUP BY doc_id"
+        "SELECT rev_id, doc_title FROM chunks WHERE doc_title IS NOT NULL GROUP BY rev_id"
     ).fetchall()
-    return {row["doc_id"]: row["doc_title"] for row in rows}
+    return {row["rev_id"]: row["doc_title"] for row in rows}
 
 
 def set_doc_title(
     conn: sqlite3.Connection,
-    doc_id: str,
+    rev_id: str,
     title: str,
     *,
     source: str = "manual",
     force: bool = False,
 ) -> int:
-    """Overwrite ``doc_title`` on every chunk row for *doc_id*.
+    """Overwrite ``doc_title`` on every chunk row for *rev_id*.
 
     ``source`` records where the title came from and decides whether the
     write is allowed: it lands only if it ranks at least as high as the
@@ -654,49 +654,49 @@ def set_doc_title(
     # uncommitted on a connection someone else is about to commit.
     validate_title_source(source)
 
-    stored = get_title_source(conn, doc_id)
+    stored = get_title_source(conn, rev_id)
     if not force and title_rank(source) < title_rank(stored):
         return 0
 
-    cur = conn.execute("UPDATE chunks SET doc_title = ? WHERE doc_id = ?", (title, doc_id))
-    set_title_source(conn, doc_id, source)  # commits both statements
+    cur = conn.execute("UPDATE chunks SET doc_title = ? WHERE rev_id = ?", (title, rev_id))
+    set_title_source(conn, rev_id, source)  # commits both statements
     return cur.rowcount
 
 
-def resolve_doc_id(conn: sqlite3.Connection, doc_id: str) -> str:
-    """Resolve a possibly-abbreviated doc_id (à la `git` short SHAs) to its full form.
+def resolve_rev_id(conn: sqlite3.Connection, rev_id: str) -> str:
+    """Resolve a possibly-abbreviated rev_id (à la `git` short SHAs) to its full form.
 
-    doc_ids are full SHA-256 content hashes (64 hex chars) — too long to
+    rev_ids are full SHA-256 content hashes (64 hex chars) — too long to
     read or copy comfortably. Any unambiguous prefix that matches exactly
-    one ingested document resolves to that document's full doc_id.
+    one ingested document resolves to that document's full rev_id.
 
     A document id (``D12``, GH #124) resolves to its newest revision.
 
     Raises ``ValueError`` if the prefix matches zero or more than one document.
     """
-    n = parse_document_ref(doc_id)
+    n = parse_document_ref(rev_id)
     if n is not None:
         newest = newest_revision(conn, n)
         if newest is None:
             raise ValueError(f"No document {format_document_id(n)}.")
         return newest
     # A full id wins over longer ids that start with it (`lm317` vs `lm317a`).
-    if conn.execute("SELECT 1 FROM chunks WHERE doc_id = ? LIMIT 1", (doc_id,)).fetchone():
-        return doc_id
+    if conn.execute("SELECT 1 FROM chunks WHERE rev_id = ? LIMIT 1", (rev_id,)).fetchone():
+        return rev_id
     # A byte range, not LIKE: it is case-sensitive, has no wildcards to escape,
-    # and can use ix_chunks_doc_id. U+10FFFF sorts after every other character.
+    # and can use ix_chunks_rev_id. U+10FFFF sorts after every other character.
     rows = conn.execute(
-        "SELECT DISTINCT doc_id FROM chunks WHERE doc_id >= ? AND doc_id < ?",
-        (doc_id, doc_id + "\U0010ffff"),
+        "SELECT DISTINCT rev_id FROM chunks WHERE rev_id >= ? AND rev_id < ?",
+        (rev_id, rev_id + "\U0010ffff"),
     ).fetchall()
-    matches: list[str] = [row["doc_id"] for row in rows]
+    matches: list[str] = [row["rev_id"] for row in rows]
 
     if len(matches) == 1:
         return matches[0]
     if not matches:
-        raise ValueError(f"No ingested document matches doc_id '{doc_id}'.")
+        raise ValueError(f"No ingested revision matches rev_id '{rev_id}'.")
     raise ValueError(
-        f"doc_id '{doc_id}' is ambiguous — matches {len(matches)} documents: "
+        f"rev_id '{rev_id}' is ambiguous — matches {len(matches)} revisions: "
         + ", ".join(m[:12] for m in matches)
     )
 
@@ -714,31 +714,31 @@ def get_ingested_docs(
     documents that belong to that project.
     """
     sql = """
-        SELECT doc_id,
+        SELECT rev_id,
                COUNT(*) AS chunk_count,
                MIN(created_at) AS ingested_at
           FROM chunks
         """
     params: list[Any] = []
     if project_id:
-        clause, clause_params = project_scope_sql(project_id, doc_id_column="doc_id")
+        clause, clause_params = project_scope_sql(project_id, rev_id_column="rev_id")
         sql += f" WHERE {clause}"
         params.extend(clause_params)
-    sql += " GROUP BY doc_id ORDER BY doc_id"
+    sql += " GROUP BY rev_id ORDER BY rev_id"
     rows = conn.execute(sql, params).fetchall()
 
     titles = get_doc_titles(conn)
     docs: list[dict[str, Any]] = []
     for row in rows:
-        doc_id = row["doc_id"]
+        rev_id = row["rev_id"]
         page_row = conn.execute(
             """
             SELECT page_numbers FROM chunks
-             WHERE doc_id = ? AND page_numbers IS NOT NULL AND page_numbers != '[]'
+             WHERE rev_id = ? AND page_numbers IS NOT NULL AND page_numbers != '[]'
              ORDER BY rowid DESC
              LIMIT 1
             """,
-            (doc_id,),
+            (rev_id,),
         ).fetchone()
         page_count: int | None = None
         if page_row:
@@ -751,8 +751,8 @@ def get_ingested_docs(
 
         docs.append(
             {
-                "doc_id": doc_id,
-                "doc_title": titles.get(doc_id, "—"),
+                "rev_id": rev_id,
+                "doc_title": titles.get(rev_id, "—"),
                 "chunk_count": row["chunk_count"],
                 "page_count": page_count,
                 "ingested_at": row["ingested_at"],
@@ -764,17 +764,17 @@ def get_ingested_docs(
 def count_chunks(
     conn: sqlite3.Connection,
     *,
-    doc_id: str | None = None,
+    rev_id: str | None = None,
     project_id: str | None = None,
 ) -> int:
     """Count rows in ``chunks`` matching the optional filters."""
     clauses: list[str] = []
     params: list[object] = []
-    if doc_id is not None:
-        clauses.append("doc_id = ?")
-        params.append(doc_id)
+    if rev_id is not None:
+        clauses.append("rev_id = ?")
+        params.append(rev_id)
     if project_id is not None:
-        clause, clause_params = project_scope_sql(project_id, doc_id_column="doc_id")
+        clause, clause_params = project_scope_sql(project_id, rev_id_column="rev_id")
         clauses.append(clause)
         params.extend(clause_params)
 

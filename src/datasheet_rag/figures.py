@@ -136,13 +136,13 @@ class ExtractedFigure:
 class FigureManifest:
     """Manifest of all figures extracted from a document."""
 
-    doc_id: str
+    rev_id: str
     source_pdf: str
     figures: list[ExtractedFigure] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "doc_id": self.doc_id,
+            "rev_id": self.rev_id,
             "source_pdf": self.source_pdf,
             "figure_count": len(self.figures),
             "figures": [
@@ -812,7 +812,7 @@ def _compute_adjacent_crop_caps(
 def extract_figures_from_regions(
     pdf_path: Path,
     regions: list[FigureRegion],
-    doc_id: str,
+    rev_id: str,
     *,
     output_dir: Path | None = None,
     dpi: int = 300,
@@ -829,13 +829,13 @@ def extract_figures_from_regions(
     if output_dir is None:
         from datasheet_rag.config import get_settings
 
-        output_dir = get_settings().figures_dir / doc_id
+        output_dir = get_settings().figures_dir / rev_id
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if not regions:
         console.print("[yellow]No figures/formulas detected in this document.[/]")
-        return FigureManifest(doc_id=doc_id, source_pdf=str(pdf_path))
+        return FigureManifest(rev_id=rev_id, source_pdf=str(pdf_path))
 
     n_figs = sum(1 for r in regions if r.kind == "figure")
     n_formulas = sum(1 for r in regions if r.kind == "formula")
@@ -860,7 +860,7 @@ def extract_figures_from_regions(
     try:
         from datasheet_rag.config import get_settings
 
-        render_cache_dir = get_settings().rag_home / "page_render_cache" / doc_id
+        render_cache_dir = get_settings().rag_home / "page_render_cache" / rev_id
     except Exception:
         pass
 
@@ -868,7 +868,7 @@ def extract_figures_from_regions(
     if crop_caps:
         console.print(f"[yellow]Column caps:[/] padding capped on {len(crop_caps)} regions")
 
-    manifest = FigureManifest(doc_id=doc_id, source_pdf=str(pdf_path))
+    manifest = FigureManifest(rev_id=rev_id, source_pdf=str(pdf_path))
     extracted: list[tuple[int, ExtractedFigure]] = []
 
     # Streamed, one page at a time: holding every rendered page until the crop
@@ -925,7 +925,7 @@ def extract_figures_from_regions(
 def extract_figures(
     pdf_path: Path,
     blocks: list[dict[str, Any]],
-    doc_id: str,
+    rev_id: str,
     *,
     output_dir: Path | None = None,
     dpi: int = 300,
@@ -938,7 +938,7 @@ def extract_figures(
     return extract_figures_from_regions(
         pdf_path,
         regions,
-        doc_id,
+        rev_id,
         output_dir=output_dir,
         dpi=dpi,
         image_format=image_format,
@@ -969,7 +969,7 @@ def upload_figures_to_s3(
         if fig.image_path is None or not fig.image_path.is_file():
             continue
 
-        s3_key = f"{s3_prefix}{manifest.doc_id}/{fig.image_path.name}"
+        s3_key = f"{s3_prefix}{manifest.rev_id}/{fig.image_path.name}"
         suffix = fig.image_path.suffix.lower()
         content_type = {
             ".png": "image/png",
@@ -988,6 +988,6 @@ def upload_figures_to_s3(
 
     uploaded = sum(1 for f in manifest.figures if f.s3_key)
     console.print(
-        f"[green]Uploaded {uploaded} figures[/] → s3://{bucket}/{s3_prefix}{manifest.doc_id}/"
+        f"[green]Uploaded {uploaded} figures[/] → s3://{bucket}/{s3_prefix}{manifest.rev_id}/"
     )
     return manifest

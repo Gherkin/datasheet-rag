@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from datasheet_rag.cli import SHORT_DOC_ID_LEN, cli
+from datasheet_rag.cli import SHORT_REV_ID_LEN, cli
 from datasheet_rag.config import get_settings
 from datasheet_rag.models.chunk import Chunk, ChunkLevel, ChunkMetadata, LayoutType
 from datasheet_rag.project_config import get_project_config
@@ -25,10 +25,10 @@ DOC_A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 DOC_B = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
 
-def _chunk(doc_id: str, level: ChunkLevel, index: int) -> Chunk:
+def _chunk(rev_id: str, level: ChunkLevel, index: int) -> Chunk:
     md = ChunkMetadata(
-        doc_id=doc_id,
-        doc_title=f"Doc {doc_id[:8]}",
+        rev_id=rev_id,
+        doc_title=f"Doc {rev_id[:8]}",
         chapter_title="",
         section_title="",
         page_numbers=[1],
@@ -36,8 +36,8 @@ def _chunk(doc_id: str, level: ChunkLevel, index: int) -> Chunk:
         context_string="",
     )
     return Chunk(
-        id=f"{doc_id}:L{level.value}:{index}",
-        doc_id=doc_id,
+        id=f"{rev_id}:L{level.value}:{index}",
+        rev_id=rev_id,
         level=level,
         text=f"chunk {index}",
         context_text=f"chunk {index}",
@@ -107,27 +107,27 @@ def test_stats_scoped_to_other_project(db_path: Path) -> None:
     assert any("TOTAL" in line and "5" in line for line in lines)
 
 
-def test_stats_scoped_to_doc_id_full(db_path: Path) -> None:
-    result = _run(db_path, "--global", "--doc-id", DOC_A)
+def test_stats_scoped_to_rev_id_full(db_path: Path) -> None:
+    result = _run(db_path, "--global", "--rev-id", DOC_A)
     assert result.exit_code == 0, result.output
-    assert f"doc={DOC_A[:SHORT_DOC_ID_LEN]}" in result.output
+    assert f"rev={DOC_A[:SHORT_REV_ID_LEN]}" in result.output
     assert "TOTAL" in result.output and "6" in result.output
 
 
-def test_stats_scoped_to_doc_id_abbreviated(db_path: Path) -> None:
-    result = _run(db_path, "--global", "--doc-id", DOC_A[:SHORT_DOC_ID_LEN])
+def test_stats_scoped_to_rev_id_abbreviated(db_path: Path) -> None:
+    result = _run(db_path, "--global", "--rev-id", DOC_A[:SHORT_REV_ID_LEN])
     assert result.exit_code == 0, result.output
-    assert f"doc={DOC_A[:SHORT_DOC_ID_LEN]}" in result.output
+    assert f"rev={DOC_A[:SHORT_REV_ID_LEN]}" in result.output
     assert "TOTAL" in result.output and "6" in result.output
 
 
-def test_stats_ambiguous_doc_id_prefix_rejected(db_path: Path) -> None:
+def test_stats_ambiguous_rev_id_prefix_rejected(db_path: Path) -> None:
     # "a" and "b" are the shared leading chars — a truly ambiguous prefix
-    # would need overlapping doc_ids. Instead assert the ordinary resolver
+    # would need overlapping rev_ids. Instead assert the ordinary resolver
     # error surfaces for an unmatched prefix.
-    result = _run(db_path, "--global", "--doc-id", "zzzzzzzzzzzz")
+    result = _run(db_path, "--global", "--rev-id", "zzzzzzzzzzzz")
     assert result.exit_code != 0
-    assert "No ingested document matches" in result.output
+    assert "No ingested revision matches" in result.output
 
 
 def test_stats_empty_project_shows_zero_totals(db_path: Path) -> None:

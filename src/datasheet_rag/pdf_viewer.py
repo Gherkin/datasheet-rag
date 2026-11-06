@@ -20,7 +20,7 @@ _pdf_server_lock = Lock()
 _pdf_server_port: int | None = None
 
 _pdf_cache_lock = Lock()
-_pdf_cache: dict[str, bytes] = {}  # doc_id → raw PDF bytes (in-process cache)
+_pdf_cache: dict[str, bytes] = {}  # rev_id → raw PDF bytes (in-process cache)
 
 _pdfjs_cache_lock = Lock()
 _pdfjs_cache: dict[str, bytes] = {}  # filename → JS bytes
@@ -36,7 +36,7 @@ PDFJS_FILES = {"pdf.min.js", "pdf.worker.min.js"}
 
 
 class _PDFHandler(http.server.BaseHTTPRequestHandler):
-    """Minimal handler: GET /pdf/<doc_id>, /viewer/<doc_id>, /static/<file>."""
+    """Minimal handler: GET /pdf/<rev_id>, /viewer/<rev_id>, /static/<file>."""
 
     def log_message(self, *args: Any) -> None:
         pass  # suppress per-request stderr noise
@@ -52,16 +52,16 @@ class _PDFHandler(http.server.BaseHTTPRequestHandler):
         else:
             self.send_error(404)
 
-    def _serve_pdf(self, doc_id: str) -> None:
+    def _serve_pdf(self, rev_id: str) -> None:
         try:
-            data = load_pdf_bytes(doc_id)
+            data = load_pdf_bytes(rev_id)
         except Exception as exc:
             self.send_error(404, str(exc))
             return
         self._respond(data, "application/pdf")
 
-    def _serve_viewer(self, doc_id: str) -> None:
-        html = _build_viewer_html(doc_id).encode("utf-8")
+    def _serve_viewer(self, rev_id: str) -> None:
+        html = _build_viewer_html(rev_id).encode("utf-8")
         self._respond(html, "text/html; charset=utf-8")
 
     def _serve_static(self, filename: str) -> None:
@@ -84,8 +84,8 @@ class _PDFHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(data)
 
 
-def _build_viewer_html(doc_id: str) -> str:
-    """Return a standalone PDF.js viewer page for *doc_id*.
+def _build_viewer_html(rev_id: str) -> str:
+    """Return a standalone PDF.js viewer page for *rev_id*.
 
     All assets (PDF.js lib + worker, PDF bytes) are loaded from the loopback
     server itself (same origin), so fetch() is unrestricted.
@@ -136,7 +136,7 @@ def _build_viewer_html(doc_id: str) -> str:
 <script>
 (function () {{
   pdfjsLib.GlobalWorkerOptions.workerSrc = '/static/pdf.worker.min.js';
-  var url = '/pdf/{doc_id}';
+  var url = '/pdf/{rev_id}';
   var pdfDoc = null, cur = 1, scale = 1.5, busy = false;
   var cv = document.getElementById('cv');
   var ctx = cv.getContext('2d');
@@ -189,7 +189,7 @@ def _build_viewer_html(doc_id: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def prime_pdf_cache(doc_id: str, body: bytes) -> None:
+def prime_pdf_cache(rev_id: str, body: bytes) -> None:
     """Seed the process PDF cache so ``load_pdf_bytes``/``viewer_url`` resolve
     a doc whose bytes live on a remote server rather than the local store.
 
@@ -198,32 +198,32 @@ def prime_pdf_cache(doc_id: str, body: bytes) -> None:
     without a local file.
     """
     with _pdf_cache_lock:
-        _pdf_cache[doc_id] = body
+        _pdf_cache[rev_id] = body
 
 
-def load_pdf_bytes(doc_id: str) -> bytes:
-    """Return the raw PDF bytes for *doc_id*, using a process-level cache.
+def load_pdf_bytes(rev_id: str) -> bytes:
+    """Return the raw PDF bytes for *rev_id*, using a process-level cache.
 
     Lookup order:
     1. In-process cache (instant on repeat calls).
-    2. Local PDF store — ``<pdf_dir>/<doc_id>.pdf`` (doc_id is a content
+    2. Local PDF store — ``<pdf_dir>/<rev_id>.pdf`` (rev_id is a content
        hash, so the filename doubles as the lookup key — direct path join,
        no scanning or hashing).
-    3. S3 — ``s3_pdf_prefix/{doc_id}/*.pdf``, for stores that were
+    3. S3 — ``s3_pdf_prefix/{rev_id}/*.pdf``, for stores that were
        explicitly uploaded remotely.
     """
     with _pdf_cache_lock:
-        cached = _pdf_cache.get(doc_id)
+        cached = _pdf_cache.get(rev_id)
     if cached is not None:
         return cached
 
     settings = get_settings()
 
-    local_path = settings.pdf_dir / f"{doc_id}.pdf"
+    local_path = settings.pdf_dir / f"{rev_id}.pdf"
     if local_path.is_file():
         body = local_path.read_bytes()
         with _pdf_cache_lock:
-            _pdf_cache[doc_id] = body
+            _pdf_cache[rev_id] = body
         return body
 
     if settings.s3_bucket:
@@ -233,7 +233,7 @@ def load_pdf_bytes(doc_id: str) -> bytes:
             client = _s3_client()
             resp = client.list_objects_v2(
                 Bucket=settings.s3_bucket,
-                Prefix=f"{settings.s3_pdf_prefix}{doc_id}/",
+                Prefix=f"{settings.s3_pdf_prefix}{rev_id}/",
             )
             for obj in resp.get("Contents", []):
                 if obj["Key"].lower().endswith(".pdf"):
@@ -241,13 +241,13 @@ def load_pdf_bytes(doc_id: str) -> bytes:
                         "Body"
                     ].read()
                     with _pdf_cache_lock:
-                        _pdf_cache[doc_id] = body
+                        _pdf_cache[rev_id] = body
                     return body
         except Exception:
             pass
 
     raise FileNotFoundError(
-        f"PDF not found for doc_id={doc_id!r}. Expected it at {local_path} "
+        f"PDF not found for rev_id={rev_id!r}. Expected it at {local_path} "
         "(or in S3 if RAG_S3_BUCKET is configured)."
     )
 
@@ -317,11 +317,11 @@ def ensure_pdf_server() -> int:
         return port
 
 
-def viewer_url(doc_id: str, *, page: int = 1) -> str:
-    """Ensure the loopback server is running and return a viewer URL for *doc_id*.
+def viewer_url(rev_id: str, *, page: int = 1) -> str:
+    """Ensure the loopback server is running and return a viewer URL for *rev_id*.
 
     Raises ``FileNotFoundError`` if the PDF can't be located (S3 or local).
     """
-    load_pdf_bytes(doc_id)  # validate + warm cache before handing out a URL
+    load_pdf_bytes(rev_id)  # validate + warm cache before handing out a URL
     port = ensure_pdf_server()
-    return f"http://127.0.0.1:{port}/viewer/{doc_id}#page={page}"
+    return f"http://127.0.0.1:{port}/viewer/{rev_id}#page={page}"

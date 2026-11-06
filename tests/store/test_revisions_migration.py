@@ -17,14 +17,14 @@ from tests.store._legacy import to_v5_layout
 EMBED_DIM = 4
 
 
-def _chunk(doc_id: str) -> Chunk:
+def _chunk(rev_id: str) -> Chunk:
     return Chunk(
-        id=f"{doc_id}:L2:0",
-        doc_id=doc_id,
+        id=f"{rev_id}:L2:0",
+        rev_id=rev_id,
         level=ChunkLevel.MICRO,
         text="text",
         context_text="text",
-        metadata=ChunkMetadata(doc_id=doc_id, page_numbers=[1]),
+        metadata=ChunkMetadata(rev_id=rev_id, page_numbers=[1]),
     )
 
 
@@ -56,7 +56,7 @@ def test_v5_store_gets_one_document_per_pdf(tmp_path: Path) -> None:
         assert c.execute("SELECT version FROM schema_version").fetchone()[0] == SCHEMA_VERSION
         tables = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         assert not {"doc_projects", "doc_project_field_values"} & tables
-        assert c.execute("SELECT COUNT(*) FROM doc_field_values").fetchone()[0] == 0
+        assert c.execute("SELECT COUNT(*) FROM revision_field_values").fetchone()[0] == 0
 
         d1, d2, d3 = (get_metadata(c, d) for d in ("d1", "d2", "d3"))
         assert d1 is not None and d2 is not None and d3 is not None
@@ -69,10 +69,35 @@ def test_v5_store_gets_one_document_per_pdf(tmp_path: Path) -> None:
         assert d3.projects == [] and d3.fields == {}
 
         assert count_chunks(c, project_id="b") == 1
-        assert [m.doc_id for m in list_docs(c, fields={"mpn": "x2"})] == ["d1"]
-        assert [m.doc_id for m in list_docs(c, project_id="a", fields={"subsystem": "power"})] == [
+        assert [m.rev_id for m in list_docs(c, fields={"mpn": "x2"})] == ["d1"]
+        assert [m.rev_id for m in list_docs(c, project_id="a", fields={"subsystem": "power"})] == [
             "d1"
         ]
+
+        # The PDF is a revision now: rev_id, not doc_id, everywhere it is stored.
+        assert "revisions" in tables and "doc_metadata" not in tables
+        assert "doc_field_values" not in tables
+        for table in ("revisions", "chunks", "revision_field_values", "audit_log"):
+            cols = {r[1] for r in c.execute(f"PRAGMA table_info({table})")}
+            assert "rev_id" in cols and "doc_id" not in cols, table
+        indexes = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+        assert {"ix_chunks_rev_id", "ix_revisions_document", "ix_audit_rev"} <= indexes
+        assert not {"ix_chunks_doc_id", "ix_doc_metadata_document", "ix_audit_doc"} & indexes
+        # The stored ChunkMetadata blob reads back under the new name.
+        assert (
+            c.execute("SELECT COUNT(*) FROM chunks WHERE metadata_json LIKE '%doc_id%'").fetchone()[
+                0
+            ]
+            == 0
+        )
+        from datasheet_rag.store.sqlite import get_chunk
+
+        chunk = get_chunk(c, "d1:L2:0")
+        assert chunk is not None and chunk.metadata.rev_id == "d1"
+        # The FTS triggers still fire on the renamed table.
+        insert_chunks(c, [_chunk("d4")])
+        hits = c.execute("SELECT COUNT(*) FROM chunk_fts WHERE chunk_fts MATCH 'text'").fetchone()
+        assert hits[0] == 4
 
         # A second process that read v5 before this one migrated does nothing.
         _migrate_to_v6(c)

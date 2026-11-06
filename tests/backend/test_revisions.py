@@ -39,15 +39,15 @@ def backend(conn: sqlite3.Connection) -> LocalBackend:
 
 
 def _graph(did: str, text: str = "output voltage accuracy") -> ChunkGraph:
-    g = ChunkGraph(doc_id=did)
+    g = ChunkGraph(rev_id=did)
     g.add(
         Chunk(
             id=f"{did}:L2:0",
-            doc_id=did,
+            rev_id=did,
             level=ChunkLevel.MICRO,
             text=text,
             context_text=text,
-            metadata=ChunkMetadata(doc_id=did, doc_title=f"Title {did}", page_numbers=[1]),
+            metadata=ChunkMetadata(rev_id=did, doc_title=f"Title {did}", page_numbers=[1]),
         )
     )
     return g
@@ -80,7 +80,7 @@ def test_new_revision_of_puts_the_pdf_on_top_and_metadata_on_the_document(
     assert second.link is not None and second.link.action == "explicit"
     assert second.document_id == first.document_id
     revs = backend.list_revisions(first.document_id)
-    assert [(r.doc_id, r.revision, r.newest) for r in revs.revisions] == [
+    assert [(r.rev_id, r.revision, r.newest) for r in revs.revisions] == [
         ("rev_b", "Rev B", True),
         ("rev_a", None, False),
     ]
@@ -126,7 +126,7 @@ def test_new_revision_is_checked_against_its_document_before_any_write(
             metadata=MetadataPatch(fields={"refdes": "U4"}, project="other"),
         )
     assert not conn.in_transaction
-    assert [r.doc_id for r in backend.list_revisions(first.document_id).revisions] == [
+    assert [r.rev_id for r in backend.list_revisions(first.document_id).revisions] == [
         "rev_b",
         "rev_a",
     ]
@@ -150,7 +150,7 @@ def test_a_failed_embed_leaves_no_revision_behind(
         backend.ingest_chunk_graph(_graph("rev_b"), new_revision_of=first.document_id)
     conn.commit()  # what a later, unrelated write on this connection would do
     revs = backend.list_revisions(first.document_id)
-    assert [r.doc_id for r in revs.revisions] == ["rev_a"]
+    assert [r.rev_id for r in revs.revisions] == ["rev_a"]
 
 
 def test_the_rule_links_one_match(backend: LocalBackend, conn: sqlite3.Connection) -> None:
@@ -180,20 +180,20 @@ def test_two_rule_matches_stop_the_ingest_before_any_write(
     patch = MetadataPatch(fields={"intel-id": "1", "ti-id": "2"})
 
     with pytest.raises(RevisionError, match="matches D1 .* and D2"):
-        backend.plan_ingest_link(doc_id="c", metadata=patch)
+        backend.plan_ingest_link(rev_id="c", metadata=patch)
     with pytest.raises(RevisionError, match="nothing was ingested"):
         _ingest(backend, "c", metadata=patch)
-    assert backend.count_chunks(doc_id="c") == 0
+    assert backend.count_chunks(rev_id="c") == 0
     assert backend.get_metadata("c") is None
 
 
 def test_plan_ingest_link_writes_nothing(backend: LocalBackend) -> None:
     first = _ingest(backend, "rev_a")
-    plan = backend.plan_ingest_link(doc_id="rev_b", new_revision_of=first.document_id)
+    plan = backend.plan_ingest_link(rev_id="rev_b", new_revision_of=first.document_id)
     assert plan.action == "explicit" and plan.document_id == first.document_id
     assert backend.get_metadata("rev_b") is None
     with pytest.raises(RevisionError, match="no document D99"):
-        backend.plan_ingest_link(doc_id="rev_b", new_revision_of="D99")
+        backend.plan_ingest_link(rev_id="rev_b", new_revision_of="D99")
 
 
 # ---- listing ---------------------------------------------------------------
@@ -204,10 +204,10 @@ def test_list_documents_shows_one_row_per_document(backend: LocalBackend) -> Non
     _ingest(backend, "rev_b", new_revision_of=first.document_id)
     _ingest(backend, "other")
     page = backend.list_documents()
-    assert [(d.doc_id, len(d.revisions)) for d in page.documents] == [("other", 1), ("rev_b", 2)]
+    assert [(d.rev_id, len(d.revisions)) for d in page.documents] == [("other", 1), ("rev_b", 2)]
     assert page.total == 2
     every = backend.list_documents(all_revisions=True)
-    assert [d.doc_id for d in every.documents] == ["other", "rev_a", "rev_b"]
+    assert [d.rev_id for d in every.documents] == ["other", "rev_a", "rev_b"]
 
 
 # ---- HTTP server -----------------------------------------------------------
@@ -230,16 +230,16 @@ def test_server_revision_routes(client: Any, backend: LocalBackend) -> None:
     a = _ingest(backend, "rev_a").document_id
     b = _ingest(backend, "rev_b").document_id
 
-    r = client.post("/revisions/add", json={"document": a, "doc_id": "rev_b"})
+    r = client.post("/revisions/add", json={"document": a, "rev_id": "rev_b"})
     assert r.status_code == 200, r.text
-    assert [x["doc_id"] for x in r.json()["revisions"]] == ["rev_b", "rev_a"]
-    assert client.get(f"/documents/resolve/{a}").json() == {"doc_id": "rev_b", "document_id": a}
+    assert [x["rev_id"] for x in r.json()["revisions"]] == ["rev_b", "rev_a"]
+    assert client.get(f"/documents/resolve/{a}").json() == {"rev_id": "rev_b", "document_id": a}
     assert client.get("/documents/rev_a/revisions").json()["document_id"] == a
 
-    r = client.post("/revisions/move", json={"doc_id": "rev_b", "below": "rev_a"})
-    assert [x["doc_id"] for x in r.json()["revisions"]] == ["rev_a", "rev_b"]
+    r = client.post("/revisions/move", json={"rev_id": "rev_b", "below": "rev_a"})
+    assert [x["rev_id"] for x in r.json()["revisions"]] == ["rev_a", "rev_b"]
 
-    r = client.post("/revisions/unlink", json={"doc_id": "rev_b"})
+    r = client.post("/revisions/unlink", json={"rev_id": "rev_b"})
     assert r.status_code == 200, r.text
     assert r.json()["document_id"] not in (a, b)
 
@@ -253,7 +253,7 @@ def test_server_metadata_by_document_and_per_revision(client: Any, backend: Loca
 
     r = client.patch(f"/documents/{a}/metadata", json={"tags": ["mcu"]})
     assert r.status_code == 200, r.text
-    assert r.json()["document_id"] == a and r.json()["doc_id"] == "rev_b"
+    assert r.json()["document_id"] == a and r.json()["rev_id"] == "rev_b"
     r = client.patch(
         "/documents/rev_a/metadata", json={"this_revision": True, "tags": ["old"], "revision": "A"}
     )
@@ -276,7 +276,7 @@ def test_server_identity_rule_and_link_plan(
     a = _ingest(backend, "rev_a", metadata=MetadataPatch(fields={"intel-id": "7"})).document_id
     r = client.post(
         "/ingest/link-plan",
-        json={"doc_id": "rev_b", "metadata": {"fields": {"intel-id": "7"}}},
+        json={"rev_id": "rev_b", "metadata": {"fields": {"intel-id": "7"}}},
     )
     assert r.json() == {"action": "rule", "document_id": a, "fields": ["intel-id"]}
     assert client.put("/identity-rule", json={"rule": None}).json() == {"rule": None}
@@ -293,22 +293,22 @@ def test_mcp_search_newest_by_default_and_tags_each_hit(backend: LocalBackend) -
     backend.set_metadata("rev_b", MetadataPatch(revision="Rev B"))
 
     hits = _search_impl("output voltage", mode="keyword", backend=backend)["items"]
-    assert {h["doc_id"] for h in hits} == {"rev_b"}
+    assert {h["rev_id"] for h in hits} == {"rev_b"}
     assert hits[0]["document_id"] == a and hits[0]["revision"] == "Rev B"
     assert "newest_revision" not in hits[0]
 
     hits = _search_impl("output voltage", mode="keyword", all_revisions=True, backend=backend)
-    by_doc = {h["doc_id"]: h for h in hits["items"]}
+    by_doc = {h["rev_id"]: h for h in hits["items"]}
     assert set(by_doc) == {"rev_a", "rev_b"}
     assert by_doc["rev_a"]["newest_revision"] is False
 
-    # A document id as doc_id: its newest revision, or all of them.
-    hits = _search_impl("output voltage", mode="keyword", doc_id=a, backend=backend)["items"]
-    assert {h["doc_id"] for h in hits} == {"rev_b"}
+    # A document id as rev_id: its newest revision, or all of them.
+    hits = _search_impl("output voltage", mode="keyword", rev_id=a, backend=backend)["items"]
+    assert {h["rev_id"] for h in hits} == {"rev_b"}
     hits = _search_impl(
-        "output voltage", mode="keyword", doc_id=a, all_revisions=True, backend=backend
+        "output voltage", mode="keyword", rev_id=a, all_revisions=True, backend=backend
     )["items"]
-    assert {h["doc_id"] for h in hits} == {"rev_a", "rev_b"}
+    assert {h["rev_id"] for h in hits} == {"rev_a", "rev_b"}
 
 
 def test_mcp_documents_and_revisions(backend: LocalBackend) -> None:
@@ -316,14 +316,14 @@ def test_mcp_documents_and_revisions(backend: LocalBackend) -> None:
     _ingest(backend, "rev_b", new_revision_of=a)
 
     items = _list_documents_impl(backend=backend)["items"]
-    assert [(i["document_id"], i["doc_id"], i["revision_count"]) for i in items] == [
+    assert [(i["document_id"], i["rev_id"], i["revision_count"]) for i in items] == [
         (a, "rev_b", 2)
     ]
     revs = _list_revisions_impl(a, backend=backend)
-    assert [r["doc_id"] for r in revs["revisions"]] == ["rev_b", "rev_a"]
+    assert [r["rev_id"] for r in revs["revisions"]] == ["rev_b", "rev_a"]
     meta = _get_document_metadata_impl(a, backend=backend)
     assert meta is not None and meta["document_id"] == a
-    assert [r["doc_id"] for r in meta["revisions"]] == ["rev_b", "rev_a"]
+    assert [r["rev_id"] for r in meta["revisions"]] == ["rev_b", "rev_a"]
 
 
 def test_remote_backend_round_trips_every_revision_call(
@@ -340,12 +340,12 @@ def test_remote_backend_round_trips_every_revision_call(
     assert rb.resolve_document("rev_a") == a
     assert rb.set_identity_rule("intel-id") == "intel-id"
     assert rb.get_identity_rule() == "intel-id"
-    plan = rb.plan_ingest_link(doc_id="new", metadata=MetadataPatch(fields={"intel-id": "7"}))
+    plan = rb.plan_ingest_link(rev_id="new", metadata=MetadataPatch(fields={"intel-id": "7"}))
     assert plan.action == "rule" and plan.document_id == a
-    assert [r.doc_id for r in rb.add_revision(a, "rev_b").revisions] == ["rev_b", "rev_a"]
+    assert [r.rev_id for r in rb.add_revision(a, "rev_b").revisions] == ["rev_b", "rev_a"]
     moved = rb.move_revision("rev_a", above="rev_b")
-    assert [r.doc_id for r in moved.revisions] == ["rev_a", "rev_b"]
-    assert [r.doc_id for r in rb.list_revisions(a).revisions] == ["rev_a", "rev_b"]
+    assert [r.rev_id for r in moved.revisions] == ["rev_a", "rev_b"]
+    assert [r.rev_id for r in rb.list_revisions(a).revisions] == ["rev_a", "rev_b"]
     assert len(rb.list_documents().documents) == 1
     assert len(rb.list_documents(all_revisions=True).documents) == 2
     assert len(rb.list_docs(all_revisions=True)) == 2

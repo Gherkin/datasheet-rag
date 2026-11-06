@@ -26,7 +26,7 @@ from datasheet_rag.store.search import SearchResult
 def _chunk(
     chunk_id: str,
     *,
-    doc_id: str = "doc1",
+    rev_id: str = "doc1",
     pages: list[int] | None = None,
     level: ChunkLevel = ChunkLevel.MICRO,
     parent_id: str | None = None,
@@ -35,7 +35,7 @@ def _chunk(
 ) -> Chunk:
     return Chunk(
         id=chunk_id,
-        doc_id=doc_id,
+        rev_id=rev_id,
         level=level,
         text="x",
         context_text="x",
@@ -43,7 +43,7 @@ def _chunk(
         prev_id=prev_id,
         next_id=next_id,
         metadata=ChunkMetadata(
-            doc_id=doc_id, page_numbers=pages or [1], layout_type=LayoutType.TEXT
+            rev_id=rev_id, page_numbers=pages or [1], layout_type=LayoutType.TEXT
         ),
     )
 
@@ -53,7 +53,7 @@ def _result(chunk: Chunk, score: float = 1.0) -> SearchResult:
 
 
 def _item(**kw) -> GoldenItem:
-    base = dict(question="q", category="identifier", doc_id="doc1")
+    base = dict(question="q", category="identifier", rev_id="doc1")
     base.update(kw)
     return GoldenItem(**base)  # type: ignore[arg-type]
 
@@ -72,7 +72,7 @@ def test_is_hit_page_overlap_same_doc() -> None:
     # Different chunk id, but shares page 12 in the same doc — credit.
     assert is_hit(_chunk("doc1:1:0", pages=[11, 12]), item)
     # Same page but different doc — no credit.
-    assert not is_hit(_chunk("docX:1:0", doc_id="docX", pages=[12]), item)
+    assert not is_hit(_chunk("docX:1:0", rev_id="docX", pages=[12]), item)
     # Same doc, non-overlapping page — no credit.
     assert not is_hit(_chunk("doc1:1:9", pages=[99]), item)
 

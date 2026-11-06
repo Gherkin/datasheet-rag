@@ -1,7 +1,7 @@
 """Page render cache integrity (GH #40) and the memory bound on rendering (GH #59).
 
 An interrupted ingest used to leave half-written PNGs in
-``<RAG_HOME>/page_render_cache/<doc_id>/``. The next run trusted them on
+``<RAG_HOME>/page_render_cache/<rev_id>/``. The next run trusted them on
 existence alone, Pillow blew up decoding the first damaged one, and --force
 did not help because it never reached the render cache.
 
@@ -117,8 +117,8 @@ def test_extract_figures_force_refreshes_the_documents_cache(
 
     settings = get_settings()
     monkeypatch.setattr(settings, "rag_home", tmp_path / "home")
-    doc_id = "d" * 64
-    cache_dir = settings.rag_home / "page_render_cache" / doc_id
+    rev_id = "d" * 64
+    cache_dir = settings.rag_home / "page_render_cache" / rev_id
     cache_dir.mkdir(parents=True)
     damaged = _cache_file(cache_dir, 1, dpi=100)
     damaged.write_bytes(b"\x89PNG\r\n\x1a\n truncated")
@@ -130,7 +130,7 @@ def test_extract_figures_force_refreshes_the_documents_cache(
     manifest = extract_figures_from_regions(
         pdf,
         regions,
-        doc_id,
+        rev_id,
         output_dir=tmp_path / "figs",
         dpi=100,
         force=True,

@@ -61,7 +61,7 @@ def test_builtin_fields_ship_registered(conn: sqlite3.Connection) -> None:
         ("needs_reembed", "reserved"),
         ("pdf_meta_title", "reserved"),
         ("running_header", "reserved"),
-        ("id", "reserved"),  # `rag list --columns` alias of doc_id
+        ("id", "reserved"),  # `rag list --columns` alias of rev_id
         ("chunk_count", "reserved"),
         ("project_fields", "reserved"),
         ("mpn", "already registered"),
@@ -109,7 +109,7 @@ def test_project_field_holds_one_value_per_project(conn: sqlite3.Connection) -> 
     assert "subsystem" not in md.fields
 
     def ids(project: str | None, value: str) -> list[str]:
-        return [m.doc_id for m in list_docs(conn, project_id=project, fields={"subsystem": value})]
+        return [m.rev_id for m in list_docs(conn, project_id=project, fields={"subsystem": value})]
 
     assert ids("netdaq", "power") == ["ldo"]
     assert ids("netdaq", "aux") == []
@@ -330,10 +330,10 @@ def test_v2_store_migrates_onto_fields_and_bookkeeping_columns(tmp_path: Path) -
     c = connect(path, embedding_dim=EMBED_DIM)
     try:
         assert c.execute("SELECT version FROM schema_version").fetchone()[0] == SCHEMA_VERSION
-        cols = {r["name"] for r in c.execute("PRAGMA table_info(doc_metadata)")}
+        cols = {r["name"] for r in c.execute("PRAGMA table_info(revisions)")}
         assert not cols & {"mpn", "manufacturer", "doc_type", "attributes"}
         assert {"title_source", "needs_reembed", "pdf_meta_title", "running_header"} <= cols
-        indexes = {r["name"] for r in c.execute("PRAGMA index_list(doc_metadata)")}
+        indexes = {r["name"] for r in c.execute("PRAGMA index_list(revisions)")}
         assert "ix_doc_metadata_mpn" not in indexes
 
         d1 = get_metadata(c, "d1")
@@ -351,10 +351,10 @@ def test_v2_store_migrates_onto_fields_and_bookkeeping_columns(tmp_path: Path) -
         assert d5 is not None and d5.needs_reembed is True
         # One encoding of "not stale": NULL, as set_needs_reembed writes it.
         stale = c.execute(
-            "SELECT needs_reembed, pdf_meta_title FROM doc_metadata WHERE doc_id = 'd6'"
+            "SELECT needs_reembed, pdf_meta_title FROM revisions WHERE rev_id = 'd6'"
         ).fetchone()
         assert stale[0] is None and stale[1] is None  # "" becomes NULL too
-        assert [m.doc_id for m in list_docs(c, fields={"mpn": "B"})] == ["d1"]
+        assert [m.rev_id for m in list_docs(c, fields={"mpn": "B"})] == ["d1"]
 
         # A second process that read v2 before this one migrated re-checks
         # under the write lock and does nothing.

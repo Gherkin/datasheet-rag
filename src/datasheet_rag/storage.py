@@ -22,10 +22,10 @@ def _content_hash(path: Path) -> str:
     return h.hexdigest()
 
 
-def upload_pdf(pdf_path: Path, *, doc_id: str | None = None) -> tuple[str, str]:
-    """Upload a PDF to S3 and return (doc_id, s3_key).
+def upload_pdf(pdf_path: Path, *, rev_id: str | None = None) -> tuple[str, str]:
+    """Upload a PDF to S3 and return (rev_id, s3_key).
 
-    If *doc_id* is not supplied, a content-hash is used so the same file
+    If *rev_id* is not supplied, a content-hash is used so the same file
     is never uploaded twice.
     """
     settings = get_settings()
@@ -35,16 +35,16 @@ def upload_pdf(pdf_path: Path, *, doc_id: str | None = None) -> tuple[str, str]:
     if not pdf_path.is_file():
         raise FileNotFoundError(pdf_path)
 
-    if doc_id is None:
-        doc_id = _content_hash(pdf_path)
+    if rev_id is None:
+        rev_id = _content_hash(pdf_path)
 
-    s3_key = f"{settings.s3_pdf_prefix}{doc_id}/{pdf_path.name}"
+    s3_key = f"{settings.s3_pdf_prefix}{rev_id}/{pdf_path.name}"
 
     # Check if already uploaded
     try:
         client.head_object(Bucket=bucket, Key=s3_key)
         console.print(f"[yellow]Already exists:[/] s3://{bucket}/{s3_key}")
-        return doc_id, s3_key
+        return rev_id, s3_key
     except client.exceptions.ClientError:
         pass
 
@@ -55,21 +55,21 @@ def upload_pdf(pdf_path: Path, *, doc_id: str | None = None) -> tuple[str, str]:
         Key=s3_key,
         ExtraArgs={"ContentType": "application/pdf"},
     )
-    console.print(f"[green]Uploaded[/] doc_id={doc_id}")
-    return doc_id, s3_key
+    console.print(f"[green]Uploaded[/] rev_id={rev_id}")
+    return rev_id, s3_key
 
 
-def save_pdf_locally(pdf_path: Path, doc_id: str) -> Path:
-    """Copy *pdf_path* into the local PDF store as ``<pdf_dir>/<doc_id>.pdf``.
+def save_pdf_locally(pdf_path: Path, rev_id: str) -> Path:
+    """Copy *pdf_path* into the local PDF store as ``<pdf_dir>/<rev_id>.pdf``.
 
-    ``doc_id`` is a content hash, so the filename doubles as the lookup key —
+    ``rev_id`` is a content hash, so the filename doubles as the lookup key —
     ``pdf_render``/``pdf_viewer`` can fetch bytes with a direct path join,
     no scanning or re-hashing required. No-op if already present.
     """
     import shutil
 
     settings = get_settings()
-    dest = settings.pdf_dir / f"{doc_id}.pdf"
+    dest = settings.pdf_dir / f"{rev_id}.pdf"
     if dest.resolve() == pdf_path.resolve():
         return dest
     if not dest.is_file():
@@ -78,8 +78,8 @@ def save_pdf_locally(pdf_path: Path, doc_id: str) -> Path:
     return dest
 
 
-def save_pdf_bytes(data: bytes, doc_id: str) -> Path:
-    """Write raw PDF *data* into the local PDF store as ``<pdf_dir>/<doc_id>.pdf``.
+def save_pdf_bytes(data: bytes, rev_id: str) -> Path:
+    """Write raw PDF *data* into the local PDF store as ``<pdf_dir>/<rev_id>.pdf``.
 
     The bytes-in counterpart to :func:`save_pdf_locally`, for a server that
     receives a PDF over the wire rather than reading one off its own disk.
@@ -88,13 +88,13 @@ def save_pdf_bytes(data: bytes, doc_id: str) -> Path:
     no-op in practice.
     """
     settings = get_settings()
-    # doc_id lands in a filename, and it is caller-supplied on the ingest
+    # rev_id lands in a filename, and it is caller-supplied on the ingest
     # routes. Anything that could climb out of pdf_dir is rejected outright
     # rather than sanitised, so a mangled id fails loudly instead of writing
     # to a surprising path.
-    if not doc_id or "/" in doc_id or "\\" in doc_id or doc_id.startswith("."):
-        raise ValueError(f"invalid doc_id for PDF storage: {doc_id!r}")
-    dest = settings.pdf_dir / f"{doc_id}.pdf"
+    if not rev_id or "/" in rev_id or "\\" in rev_id or rev_id.startswith("."):
+        raise ValueError(f"invalid rev_id for PDF storage: {rev_id!r}")
+    dest = settings.pdf_dir / f"{rev_id}.pdf"
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(data)
     return dest
@@ -114,7 +114,7 @@ def list_documents() -> list[dict[str, str]]:
     settings = get_settings()
     client = s3_client()
     paginator = client.get_paginator("list_objects_v2")
-    docs: dict[str, str] = {}  # doc_id → s3_key of first object
+    docs: dict[str, str] = {}  # rev_id → s3_key of first object
 
     for page in paginator.paginate(
         Bucket=settings.require_s3_bucket(),
@@ -123,7 +123,7 @@ def list_documents() -> list[dict[str, str]]:
     ):
         for prefix_info in page.get("CommonPrefixes", []):
             prefix = prefix_info["Prefix"]
-            doc_id = prefix.rstrip("/").rsplit("/", 1)[-1]
-            docs[doc_id] = prefix
+            rev_id = prefix.rstrip("/").rsplit("/", 1)[-1]
+            docs[rev_id] = prefix
 
-    return [{"doc_id": k, "prefix": v} for k, v in sorted(docs.items())]
+    return [{"rev_id": k, "prefix": v} for k, v in sorted(docs.items())]

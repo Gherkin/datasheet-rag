@@ -106,7 +106,7 @@ def record_audit(
     status: str,
     key_label: str | None = None,
     client_ip: str | None = None,
-    doc_id: str | None = None,
+    rev_id: str | None = None,
     project_id: str | None = None,
     detail: dict[str, Any] | None = None,
     error: str | None = None,
@@ -115,7 +115,7 @@ def record_audit(
     conn.execute(
         """
         INSERT INTO audit_log(
-            ts, key_label, client_ip, action, doc_id, project_id,
+            ts, key_label, client_ip, action, rev_id, project_id,
             detail_json, status, error
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
@@ -124,7 +124,7 @@ def record_audit(
             key_label,
             client_ip,
             action,
-            doc_id,
+            rev_id,
             project_id,
             json.dumps(detail) if detail is not None else None,
             status,
@@ -137,16 +137,16 @@ def record_audit(
 def list_audit(
     conn: sqlite3.Connection,
     *,
-    doc_id: str | None = None,
+    rev_id: str | None = None,
     since: str | None = None,
     limit: int = 200,
 ) -> list[dict[str, Any]]:
     sql = "SELECT * FROM audit_log"
     clauses: list[str] = []
     params: list[str | int] = []
-    if doc_id:
-        clauses.append("doc_id = ?")
-        params.append(doc_id)
+    if rev_id:
+        clauses.append("rev_id = ?")
+        params.append(rev_id)
     if since:
         clauses.append("ts >= ?")
         params.append(since)

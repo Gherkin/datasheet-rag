@@ -5,7 +5,7 @@ sometimes picks up a generic heading ("Contents", "Disclaimer", "Technical
 manual") as the title instead of the document's actual name. This module
 asks a small Claude model to read the first page and infer a real title,
 then backfills it onto every chunk for that document plus the
-`doc_metadata` sidecar (marked `title_source: inferred` so it can be
+`revisions` sidecar (marked `title_source: inferred` so it can be
 reviewed or overridden later via `rag metadata`, and so a later
 re-ingest cannot demote it back to the parser's guess).
 """
@@ -98,11 +98,11 @@ class TitleInferer:
         return title
 
 
-def first_page_text(conn: sqlite3.Connection, doc_id: str) -> str:
+def first_page_text(conn: sqlite3.Connection, rev_id: str) -> str:
     """Concatenate MICRO-level chunk text from page 1, in document order."""
     rows = conn.execute(
-        "SELECT text, page_numbers FROM chunks WHERE doc_id = ? AND level = ? ORDER BY rowid",
-        (doc_id, int(ChunkLevel.MICRO)),
+        "SELECT text, page_numbers FROM chunks WHERE rev_id = ? AND level = ? ORDER BY rowid",
+        (rev_id, int(ChunkLevel.MICRO)),
     ).fetchall()
 
     fragments: list[str] = []
@@ -127,16 +127,16 @@ def first_page_text(conn: sqlite3.Connection, doc_id: str) -> str:
 
 def infer_and_backfill_title(
     conn: sqlite3.Connection,
-    doc_id: str,
+    rev_id: str,
     *,
     inferer: TitleInferer | None = None,
     dry_run: bool = False,
     force: bool = False,
 ) -> str | None:
-    """Infer a title for `doc_id` from its first page and persist it.
+    """Infer a title for `rev_id` from its first page and persist it.
 
     Persists the inferred title onto every `chunks` row for the document
-    and records `title_source: inferred` in the `doc_metadata` sidecar.
+    and records `title_source: inferred` in the `revisions` sidecar.
     Returns the inferred title, or None if no title could be
     inferred (in which case nothing is written).
 
@@ -145,7 +145,7 @@ def infer_and_backfill_title(
     :mod:`datasheet_rag.store.metadata`). Pass `force=True` to overrule
     that, which is what `rag repair titles --force` does.
 
-    Two extra hints captured at ingest time (`doc_metadata` columns,
+    Two extra hints captured at ingest time (`revisions` columns,
     see `ingest --infer-title`/the Docling path) are passed alongside the
     first-page text when present, since cover pages are often mostly
     imagery and leave the model with very little to go on:
@@ -160,12 +160,12 @@ def infer_and_backfill_title(
     from datasheet_rag.store.metadata import get_metadata, get_title_source, title_rank
     from datasheet_rag.store.sqlite import set_doc_title
 
-    if not force and title_rank("inferred") < title_rank(get_title_source(conn, doc_id)):
+    if not force and title_rank("inferred") < title_rank(get_title_source(conn, rev_id)):
         return None
 
-    meta = get_metadata(conn, doc_id)
+    meta = get_metadata(conn, rev_id)
     text = build_title_prompt(
-        first_page_text(conn, doc_id),
+        first_page_text(conn, rev_id),
         {
             "running_header": meta.running_header if meta else None,
             "pdf_meta_title": meta.pdf_meta_title if meta else None,
@@ -180,7 +180,7 @@ def infer_and_backfill_title(
         return None
 
     if not dry_run:
-        set_doc_title(conn, doc_id, title, source="inferred", force=force)
+        set_doc_title(conn, rev_id, title, source="inferred", force=force)
 
     return title
 
@@ -253,7 +253,7 @@ def infer_title_from_graph(
 
 def infer_title_via_backend(
     backend: Any,
-    doc_id: str,
+    rev_id: str,
     *,
     inferer: TitleInferer | None = None,
     dry_run: bool = False,
@@ -268,7 +268,7 @@ def infer_title_via_backend(
     """
     from datasheet_rag.store.metadata import title_rank
 
-    context = backend.get_title_context(doc_id)
+    context = backend.get_title_context(rev_id)
     if not force and title_rank("inferred") < title_rank(context.title_source):
         return None
     text = build_title_prompt(
@@ -281,5 +281,5 @@ def infer_title_via_backend(
     if not title:
         return None
     if not dry_run:
-        backend.set_doc_title(doc_id, title, source="inferred", force=force)
+        backend.set_doc_title(rev_id, title, source="inferred", force=force)
     return title

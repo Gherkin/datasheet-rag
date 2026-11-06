@@ -46,26 +46,26 @@ def backend(conn: sqlite3.Connection) -> LocalBackend:
 
 
 def _graph_with_figure(did: str) -> ChunkGraph:
-    g = ChunkGraph(doc_id=did)
+    g = ChunkGraph(rev_id=did)
     g.add(
         Chunk(
             id=f"{did}:L0:0",
-            doc_id=did,
+            rev_id=did,
             level=ChunkLevel.MACRO,
             text="Power supply overview section",
-            metadata=ChunkMetadata(doc_id=did, doc_title="Test Doc", page_numbers=[1]),
+            metadata=ChunkMetadata(rev_id=did, doc_title="Test Doc", page_numbers=[1]),
         )
     )
     g.add(
         Chunk(
             id=f"{did}:L2:0",
-            doc_id=did,
+            rev_id=did,
             level=ChunkLevel.MICRO,
             text="Figure: functional block diagram of the regulator",
             parent_id=f"{did}:L0:0",
             figure_image_path="/client/only/path/fig.png",
             metadata=ChunkMetadata(
-                doc_id=did,
+                rev_id=did,
                 doc_title="Test Doc",
                 page_numbers=[2],
                 layout_type=LayoutType.FIGURE,
@@ -80,14 +80,14 @@ def _graph_with_figure(did: str) -> ChunkGraph:
 
 def test_local_ingest_no_figures_trusts_existing_paths(backend: LocalBackend) -> None:
     did = "a" * 64
-    g = ChunkGraph(doc_id=did)
+    g = ChunkGraph(rev_id=did)
     g.add(
         Chunk(
             id=f"{did}:L2:0",
-            doc_id=did,
+            rev_id=did,
             level=ChunkLevel.MICRO,
             text="SCL clock stretching by the slave device",
-            metadata=ChunkMetadata(doc_id=did, page_numbers=[1]),
+            metadata=ChunkMetadata(rev_id=did, page_numbers=[1]),
         )
     )
     res = backend.ingest_chunk_graph(
@@ -114,7 +114,7 @@ def test_reingest_under_another_project_adds_it(backend: LocalBackend) -> None:
     assert md is not None and md.projects == ["board-a", "board-b", "board-c"]
     for project in ("board-a", "board-b", "board-c"):
         assert backend.stats(project_id=project).total_chunks == 1
-        assert [d.doc_id for d in backend.list_documents(project_id=project).documents] == [did]
+        assert [d.rev_id for d in backend.list_documents(project_id=project).documents] == [did]
 
     backend.set_metadata(did, MetadataPatch(remove_projects=["board-a"]))
     assert backend.stats(project_id="board-a").total_chunks == 0
@@ -175,7 +175,7 @@ def test_ingest_joins_the_project_with_the_chunks(
     assert _doc_projects(backend, did) == ["p1"]
     md = backend.get_metadata(did)
     assert md is not None and md.projects == ["p1"]
-    assert [d.doc_id for d in backend.list_docs(project_id="p1")] == [did]
+    assert [d.rev_id for d in backend.list_docs(project_id="p1")] == [did]
 
 
 def test_failed_ingest_before_any_chunk_leaves_no_project_row(
@@ -221,39 +221,39 @@ def test_local_reingest_title_hints_none_keeps_dict_replaces(backend: LocalBacke
     assert md is not None and md.pdf_meta_title is None and md.running_header is None
 
 
-def test_resolve_doc_id_treats_like_wildcards_literally(backend: LocalBackend) -> None:
+def test_resolve_rev_id_treats_like_wildcards_literally(backend: LocalBackend) -> None:
     did = "c" * 64
     backend.ingest_chunk_graph(_graph_with_figure(did), embed=False)
-    assert backend.resolve_doc_id("ccc") == did
+    assert backend.resolve_rev_id("ccc") == did
     for wildcard in ("_", "%", "c_c"):
-        with pytest.raises(ValueError, match="No ingested document"):
-            backend.resolve_doc_id(wildcard)
+        with pytest.raises(ValueError, match="No ingested revision"):
+            backend.resolve_rev_id(wildcard)
 
 
 def _plain_graph(did: str) -> ChunkGraph:
-    g = ChunkGraph(doc_id=did)
+    g = ChunkGraph(rev_id=did)
     g.add(
         Chunk(
             id=f"{did}:L2:0",
-            doc_id=did,
+            rev_id=did,
             level=ChunkLevel.MICRO,
             text="text",
-            metadata=ChunkMetadata(doc_id=did, page_numbers=[1]),
+            metadata=ChunkMetadata(rev_id=did, page_numbers=[1]),
         )
     )
     return g
 
 
-def test_resolve_doc_id_exact_wins_and_is_case_sensitive(backend: LocalBackend) -> None:
+def test_resolve_rev_id_exact_wins_and_is_case_sensitive(backend: LocalBackend) -> None:
     for did in ("lm317", "lm317a", "ABC"):
         backend.ingest_chunk_graph(_plain_graph(did), embed=False)
-    assert backend.resolve_doc_id("lm317") == "lm317"
-    assert backend.resolve_doc_id("lm317a") == "lm317a"
+    assert backend.resolve_rev_id("lm317") == "lm317"
+    assert backend.resolve_rev_id("lm317a") == "lm317a"
     with pytest.raises(ValueError, match="ambiguous"):
-        backend.resolve_doc_id("lm3")
-    assert backend.resolve_doc_id("AB") == "ABC"
-    with pytest.raises(ValueError, match="No ingested document"):
-        backend.resolve_doc_id("ab")
+        backend.resolve_rev_id("lm3")
+    assert backend.resolve_rev_id("AB") == "ABC"
+    with pytest.raises(ValueError, match="No ingested revision"):
+        backend.resolve_rev_id("ab")
 
 
 def test_local_reingest_prunes_and_reports_stale_chunks(
@@ -264,15 +264,15 @@ def test_local_reingest_prunes_and_reports_stale_chunks(
     did = "c" * 64
 
     def graph(n: int) -> ChunkGraph:
-        g = ChunkGraph(doc_id=did)
+        g = ChunkGraph(rev_id=did)
         for i in range(n):
             g.add(
                 Chunk(
                     id=f"{did}:L2:{i}",
-                    doc_id=did,
+                    rev_id=did,
                     level=ChunkLevel.MICRO,
                     text=f"Thermal shutdown paragraph {i}",
-                    metadata=ChunkMetadata(doc_id=did, page_numbers=[1]),
+                    metadata=ChunkMetadata(rev_id=did, page_numbers=[1]),
                 )
             )
         return g
@@ -308,7 +308,7 @@ def test_local_ingest_rewrites_uploaded_figure_path(
     # and not absolute.
     assert "/client/only/path" not in (ch.figure_image_path or "")
     assert not Path(ch.figure_image_path).is_absolute()
-    assert ch.figure_image_path.startswith(did)  # <doc_id>/<chunk>.png
+    assert ch.figure_image_path.startswith(did)  # <rev_id>/<chunk>.png
     # Resolution joins figures_dir, so the bytes still come back.
     fig = backend.get_figure_bytes(f"{did}:L2:0")
     assert fig.image_bytes() == png
@@ -336,7 +336,7 @@ def test_local_delete_doc_purges_local_files(backend: LocalBackend, tmp_path, mo
     )
 
     # Artifacts a real ingest run would also leave behind: the source PDF
-    # and pipeline caches, both keyed by doc_id alone (no DB lookup needed).
+    # and pipeline caches, both keyed by rev_id alone (no DB lookup needed).
     pdf_path = settings.pdf_dir / f"{did}.pdf"
     pdf_path.write_bytes(b"%PDF-1.4 fake")
     cache_path = settings.output_dir / f"{did}_chunks.json"
@@ -352,7 +352,7 @@ def test_local_delete_doc_purges_local_files(backend: LocalBackend, tmp_path, mo
     deleted = backend.delete_doc(did)
 
     assert deleted == 2
-    assert backend.count_chunks(doc_id=did) == 0
+    assert backend.count_chunks(rev_id=did) == 0
     assert backend.get_metadata(did) is None
     assert not pdf_path.exists()
     assert not figures_dir.exists()
@@ -458,7 +458,7 @@ def test_server_metadata_fields_routes_and_field_filters(client) -> None:
     # survives, since names cannot hold one.
     params = {"field": _field_params({"acme-id": "D:7"})}
     docs = client.get("/documents", params=params).json()["documents"]
-    assert [d["doc_id"] for d in docs] == [did]
+    assert [d["rev_id"] for d in docs] == [did]
     assert client.get("/documents", params={"field": "acme-id:other"}).json()["documents"] == []
     assert client.get("/documents", params={"field": "no-colon"}).status_code == 400
 
@@ -471,7 +471,7 @@ def test_server_metadata_fields_routes_and_field_filters(client) -> None:
             "filters": {"fields": {"acme-id": "d:7"}},
         },
     ).json()["results"]
-    assert hit and all(h["chunk"]["doc_id"] == did for h in hit)
+    assert hit and all(h["chunk"]["rev_id"] == did for h in hit)
     miss = client.post(
         "/search",
         json={"query": "block diagram", "mode": "keyword", "filters": {"fields": {"acme-id": "x"}}},
@@ -532,7 +532,7 @@ def test_server_subsystem_is_per_project_and_group_name_is_refused(client) -> No
     hits = client.get(
         "/documents", params={"project_id": "netdaq", "field": "subsystem:power"}
     ).json()["documents"]
-    assert [d["doc_id"] for d in hits] == [did]
+    assert [d["rev_id"] for d in hits] == [did]
 
     # Registering a project-scoped field over HTTP.
     r = client.post("/metadata/fields", json={"name": "board-ref", "scope": "project"})
@@ -577,13 +577,13 @@ def test_server_ingest_pdf_streams_sse(client, monkeypatch) -> None:
         if progress:
             progress(ProgressEvent(kind="step", text="Docling layout analysis", step=1))
             progress(ProgressEvent(kind="detail", text="10 chunks", step=1))
-        return ParseResult(graph=ChunkGraph(doc_id=did), doc_id=did, resolved_backend="docling")
+        return ParseResult(graph=ChunkGraph(rev_id=did), rev_id=did, resolved_backend="docling")
 
     monkeypatch.setattr(ip, "parse_pdf_to_graph", fake_parse)
     monkeypatch.setattr(
         LocalBackend,
         "ingest_chunk_graph",
-        lambda self, g, **kw: IngestResult(doc_id=g.doc_id, inserted=10, described=0),
+        lambda self, g, **kw: IngestResult(rev_id=g.rev_id, inserted=10, described=0),
     )
 
     r = client.post(
@@ -607,7 +607,7 @@ def test_server_ingest_pdf_streams_sse(client, monkeypatch) -> None:
             data_line = [ln for ln in block.splitlines() if ln.startswith("data:")][0]
             result = json.loads(data_line[len("data:") :].strip())
     assert result == {
-        "doc_id": did,
+        "rev_id": did,
         # The store step is stubbed, so the link fields keep their defaults.
         "document_id": "",
         "link": None,
@@ -698,12 +698,12 @@ def test_check_backend_prerequisites_allows_cached_textract_blocks(monkeypatch, 
     pdf.write_bytes(b"%PDF-1.4 fake")
     (tmp_path / "doc1_blocks.json").write_text("[]")
 
-    check_backend_prerequisites(pdf, backend="textract", doc_id="doc1", force=False)
-    check_backend_prerequisites(pdf, backend="docling", doc_id="doc2", force=False)
+    check_backend_prerequisites(pdf, backend="textract", rev_id="doc1", force=False)
+    check_backend_prerequisites(pdf, backend="docling", rev_id="doc2", force=False)
     with pytest.raises(BackendUnavailableError, match="RAG_S3_BUCKET"):
-        check_backend_prerequisites(pdf, backend="textract", doc_id="doc1", force=True)
+        check_backend_prerequisites(pdf, backend="textract", rev_id="doc1", force=True)
     with pytest.raises(BackendUnavailableError):
-        check_backend_prerequisites(pdf, backend="textract", doc_id="doc2", force=False)
+        check_backend_prerequisites(pdf, backend="textract", rev_id="doc2", force=False)
 
 
 def test_server_token_required_when_set(conn, monkeypatch) -> None:
@@ -817,7 +817,7 @@ def test_admin_key_lifecycle_and_ingest(conn, monkeypatch) -> None:
     # Audit row recorded with the key's label, never the token.
     audit = c.get("/audit", headers=_auth(admin_token)).json()["entries"]
     ing = [e for e in audit if e["action"] == "ingest" and e["status"] == "ok"]
-    assert ing and ing[0]["key_label"] == "alice" and ing[0]["doc_id"] == did
+    assert ing and ing[0]["key_label"] == "alice" and ing[0]["rev_id"] == did
     assert all(ingest_token not in json.dumps(e) for e in audit)
 
     # Revoke → immediately locked out, no restart.
@@ -961,19 +961,19 @@ def _three_children(conn: sqlite3.Connection) -> None:
             [
                 Chunk(
                     id=f"{did}:L0:0",
-                    doc_id=did,
+                    rev_id=did,
                     level=ChunkLevel.MACRO,
                     text=f"{did} overview",
-                    metadata=ChunkMetadata(doc_id=did),
+                    metadata=ChunkMetadata(rev_id=did),
                 ),
                 *(
                     Chunk(
                         id=f"{did}:L2:{i}",
-                        doc_id=did,
+                        rev_id=did,
                         level=ChunkLevel.MICRO,
                         text=f"{did} paragraph {i}",
                         parent_id=f"{did}:L0:0",
-                        metadata=ChunkMetadata(doc_id=did),
+                        metadata=ChunkMetadata(rev_id=did),
                     )
                     for i in range(3)
                 ),
@@ -990,19 +990,19 @@ def test_server_pages_children_and_documents(client, conn: sqlite3.Connection) -
     assert r.json()["total"] == 3
 
     r = client.get("/documents", params={"limit": 1, "offset": 2})
-    assert [d["doc_id"] for d in r.json()["documents"]] == ["d3"]
+    assert [d["rev_id"] for d in r.json()["documents"]] == ["d3"]
     assert r.json()["total"] == 3
 
     assert client.get("/documents", params={"limit": 0}).status_code == 422
 
 
 def test_server_answers_one_document_summary(client, conn: sqlite3.Connection) -> None:
-    """``/documents/{doc_id}/summary`` returns one row, 204 for no such document (GH #86)."""
+    """``/documents/{rev_id}/summary`` returns one row, 204 for no such document (GH #86)."""
     _three_children(conn)
 
     r = client.get("/documents/d2/summary")
     assert r.status_code == 200
-    assert r.json()["doc_id"] == "d2"
+    assert r.json()["rev_id"] == "d2"
     assert client.get("/documents/nope/summary").status_code == 204
 
 
@@ -1089,7 +1089,7 @@ def test_remote_get_document_reads_the_summary_route(client, conn: sqlite3.Conne
     be._client = client
 
     doc = be.get_document("d2")
-    assert doc is not None and doc.doc_id == "d2"
+    assert doc is not None and doc.rev_id == "d2"
     assert be.get_document("nope") is None
 
 
@@ -1104,10 +1104,10 @@ def test_remote_get_document_falls_back_on_an_old_server() -> None:
         raise RagServerError(404, "Not Found")
 
     be._request = _request  # type: ignore[method-assign]
-    be._json = lambda *a, **kw: {"documents": [{"doc_id": "d1"}, {"doc_id": "d2"}]}  # type: ignore[method-assign]
+    be._json = lambda *a, **kw: {"documents": [{"rev_id": "d1"}, {"rev_id": "d2"}]}  # type: ignore[method-assign]
 
     doc = be.get_document("d2")
-    assert doc is not None and doc.doc_id == "d2"
+    assert doc is not None and doc.rev_id == "d2"
     assert be.get_document("nope") is None
 
 
@@ -1116,11 +1116,11 @@ def test_remote_backend_pages_a_server_that_does_not() -> None:
     from datasheet_rag.backend.remote import RemoteBackend
 
     be = RemoteBackend.__new__(RemoteBackend)
-    old_answer = {"documents": [{"doc_id": f"d{i}"} for i in range(5)]}
+    old_answer = {"documents": [{"rev_id": f"d{i}"} for i in range(5)]}
     be._json = lambda *a, **kw: old_answer  # type: ignore[method-assign]
 
     page = be.list_documents(limit=2, offset=2)
-    assert [d.doc_id for d in page.documents] == ["d2", "d3"]
+    assert [d.rev_id for d in page.documents] == ["d2", "d3"]
     assert page.total == 5
 
 
@@ -1143,10 +1143,10 @@ def test_remote_backend_trusts_a_paging_server() -> None:
 def _result(chunk_id: str) -> dict[str, object]:
     chunk = Chunk(
         id=chunk_id,
-        doc_id="d",
+        rev_id="d",
         level=ChunkLevel.MICRO,
         text="t",
-        metadata=ChunkMetadata(doc_id="d"),
+        metadata=ChunkMetadata(rev_id="d"),
     )
     return {
         "chunk_id": chunk_id,

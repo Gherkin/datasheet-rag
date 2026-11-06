@@ -73,7 +73,7 @@ _ANSWER_SCHEMA: dict[str, Any] = {
                 "properties": {
                     "document": {
                         "type": "string",
-                        "description": "The doc_id, or the PDF file name.",
+                        "description": "The rev_id, or the PDF file name.",
                     },
                     "page": {"type": "integer", "description": "1-based PDF page."},
                 },
@@ -106,7 +106,7 @@ _SOURCES: dict[Condition, str] = {
     "B": "The project's datasheets and application notes are the PDF files in ./pdfs. Cite a "
     "page by the PDF file name and its 1-based page.",
     "C": "The project's datasheets and application notes are indexed in datasheet-rag; use its "
-    "tools. Every chunk result carries a doc_id and a 1-based PDF page; cite by doc_id.",
+    "tools. Every chunk result carries a rev_id and a 1-based PDF page; cite by rev_id.",
 }
 
 
@@ -328,7 +328,7 @@ def to_final(structured: dict[str, Any]) -> FinalAnswer:
         m = _FILE_ID.search(Path(doc).name)
         page = c.get("page")
         cites.append(
-            Citation(doc_id=m.group(1) if m else doc, page=page if isinstance(page, int) else None)
+            Citation(rev_id=m.group(1) if m else doc, page=page if isinstance(page, int) else None)
         )
     value = structured.get("value")
     return FinalAnswer(
@@ -470,7 +470,7 @@ class Workspace:
     """The directory every run starts in.
 
     ``pdfs/`` holds real copies of the project's PDFs (Claude Code's Glob and
-    Grep do not follow symlinks), named ``<part>__<doc_id[:8]>.pdf`` so a B
+    Grep do not follow symlinks), named ``<part>__<rev_id[:8]>.pdf`` so a B
     citation maps back to its document. ``mcp-c.json`` starts the user's own
     datasheet-rag MCP command, pinned to the project.
     """
@@ -499,9 +499,9 @@ class Workspace:
         copied = 0
         for d in documents:
             label = re.sub(r"[^A-Za-z0-9._-]+", "_", d.get("mpn") or d.get("title") or "document")
-            path = self.pdf_dir / f"{label.strip('_')[:60]}__{d['doc_id'][:8]}.pdf"
+            path = self.pdf_dir / f"{label.strip('_')[:60]}__{d['rev_id'][:8]}.pdf"
             if not path.exists():
-                path.write_bytes(load_pdf(d["doc_id"]))
+                path.write_bytes(load_pdf(d["rev_id"]))
                 copied += 1
         command = shutil.which(mcp_command) or mcp_command
         self.mcp_config.write_text(

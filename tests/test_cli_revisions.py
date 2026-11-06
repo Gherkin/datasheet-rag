@@ -24,15 +24,15 @@ DOC_B = "b" * 64
 DOC_C = "c" * 64
 
 
-def _chunk(doc_id: str) -> Chunk:
+def _chunk(rev_id: str) -> Chunk:
     return Chunk(
-        id=f"{doc_id}:L2:0",
-        doc_id=doc_id,
+        id=f"{rev_id}:L2:0",
+        rev_id=rev_id,
         level=ChunkLevel.MICRO,
         text="chunk 0",
         context_text="chunk 0",
         token_count=2,
-        metadata=ChunkMetadata(doc_id=doc_id, doc_title=f"Doc {doc_id[:4]}", page_numbers=[1]),
+        metadata=ChunkMetadata(rev_id=rev_id, doc_title=f"Doc {rev_id[:4]}", page_numbers=[1]),
     )
 
 
@@ -129,8 +129,8 @@ def test_this_revision_is_marked_everywhere(db_path: Path) -> None:
     assert "set on this revision only" in listed.output
 
 
-def test_a_doc_id_write_to_a_document_with_revisions_needs_the_d12(db_path: Path) -> None:
-    # One revision: the doc_id and the document are the same thing.
+def test_a_rev_id_write_to_a_document_with_revisions_needs_the_d12(db_path: Path) -> None:
+    # One revision: the rev_id and the document are the same thing.
     assert _rag(db_path, "metadata", DOC_A, "--tag", "mcu").exit_code == 0
     _rag(db_path, "revisions", "add", "D1", DOC_B)
     for args in (("--tag", "x"), ("--mpn", "A"), ("--add-project", "p")):
@@ -173,7 +173,7 @@ def test_revision_label_shows_in_list(db_path: Path) -> None:
     _rag(db_path, "metadata", DOC_B, "--revision", "Rev C")
     listed = _rag(db_path, "list", "--global")
     assert listed.exit_code == 0, listed.output
-    header = next(ln for ln in listed.output.splitlines() if "doc_id" in ln)
+    header = next(ln for ln in listed.output.splitlines() if "rev_id" in ln)
     assert "document" in header and "revision" in header and "revisions" in header
     rows = [ln for ln in listed.output.splitlines() if DOC_A[:12] in ln or DOC_B[:12] in ln]
     assert len(rows) == 1 and DOC_B[:12] in rows[0] and "Rev C" in rows[0]
@@ -230,7 +230,7 @@ class _FakeBackend:
 
     def ingest_pdf(self, pdf_path: Path, **kwargs: Any) -> IngestResult:
         self.calls.append(kwargs)
-        return IngestResult(doc_id="d" * 64, document_id="D7", link=self.link)
+        return IngestResult(rev_id="d" * 64, document_id="D7", link=self.link)
 
 
 @pytest.fixture()

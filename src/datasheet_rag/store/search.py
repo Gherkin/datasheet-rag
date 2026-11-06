@@ -36,11 +36,11 @@ class SearchFilters(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    #: Revisions (PDF doc_ids) to search. Named revisions are always
+    #: Revisions (PDF rev_ids) to search. Named revisions are always
     #: searched, newest or not; a caller expands a D12 first.
-    doc_ids: list[str] | None = None
+    rev_ids: list[str] | None = None
     #: Search every revision of each document, not just the newest (GH #124).
-    #: Has no effect with doc_ids.
+    #: Has no effect with rev_ids.
     all_revisions: bool = False
     #: Keep chunks of documents that belong to this project (among others).
     project_id: str | None = None
@@ -67,21 +67,21 @@ class SearchFilters(BaseModel):
         clauses: list[str] = []
         params: list[object] = []
 
-        if self.doc_ids:
-            placeholders = ",".join(["?"] * len(self.doc_ids))
-            clauses.append(f"c.doc_id IN ({placeholders})")
-            params.extend(self.doc_ids)
+        if self.rev_ids:
+            placeholders = ",".join(["?"] * len(self.rev_ids))
+            clauses.append(f"c.rev_id IN ({placeholders})")
+            params.extend(self.rev_ids)
         elif not self.all_revisions:
-            clauses.append(older_revisions_sql("c.doc_id"))
+            clauses.append(older_revisions_sql("c.rev_id"))
 
         if self.project_id is not None:
-            clause, clause_params = project_scope_sql(self.project_id, doc_id_column="c.doc_id")
+            clause, clause_params = project_scope_sql(self.project_id, rev_id_column="c.rev_id")
             clauses.append(clause)
             params.extend(clause_params)
 
         if self.fields:
             field_clauses, field_params = field_filter_sql(
-                self.fields, doc_id_column="c.doc_id", project_id=self.project_id
+                self.fields, rev_id_column="c.rev_id", project_id=self.project_id
             )
             clauses.extend(field_clauses)
             params.extend(field_params)

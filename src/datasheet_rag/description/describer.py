@@ -714,7 +714,7 @@ def _run_description_plan(
 def describe_figures_in_store(
     conn: sqlite3.Connection,
     *,
-    doc_id: str | None = None,
+    rev_id: str | None = None,
     project_id: str | None = None,
     missing_only: bool = True,
     limit: int | None = None,
@@ -736,7 +736,7 @@ def describe_figures_in_store(
     """
     from datasheet_rag.store import list_figure_chunks, update_figure_description
 
-    targets = list_figure_chunks(conn, doc_id=doc_id, project_id=project_id)
+    targets = list_figure_chunks(conn, rev_id=rev_id, project_id=project_id)
     # A row can name an image that is not on this host (a store restored
     # without its figures). Reading it would fail per chunk; skip it instead.
     targets = [c for c in targets if c.figure_available]
@@ -759,7 +759,7 @@ def describe_figures_in_store(
 def describe_figures_via_backend(
     backend: Any,
     *,
-    doc_id: str | None = None,
+    rev_id: str | None = None,
     project_id: str | None = None,
     missing_only: bool = True,
     limit: int | None = None,
@@ -773,7 +773,7 @@ def describe_figures_via_backend(
     the vision model runs in *this* process against a store that may live on
     another host (``RAG_COMPUTE=client``, GH #43).
     """
-    targets = backend.list_figure_chunks(doc_id=doc_id, project_id=project_id, only_with_image=True)
+    targets = backend.list_figure_chunks(rev_id=rev_id, project_id=project_id, only_with_image=True)
     descriptions = _run_description_plan(
         plan_figure_descriptions(targets, missing_only=missing_only, limit=limit),
         BackendFigureSource(backend),

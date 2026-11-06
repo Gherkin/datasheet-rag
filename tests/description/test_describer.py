@@ -59,7 +59,7 @@ def _figure_chunk(
     next_id: str | None = None,
 ) -> Chunk:
     md = ChunkMetadata(
-        doc_id="docA",
+        rev_id="docA",
         chapter_title="Comm",
         section_title=section,
         page_numbers=[42],
@@ -67,7 +67,7 @@ def _figure_chunk(
     )
     return Chunk(
         id=chunk_id,
-        doc_id="docA",
+        rev_id="docA",
         level=ChunkLevel.MICRO,
         text="[Figure]",
         context_text="SPI > Timing > [Figure] " + caption,
@@ -91,7 +91,7 @@ def _formula_chunk(chunk_id: str, *, image_path: str, text: str = "[Formula]") -
 
 def _text_chunk(chunk_id: str, text: str) -> Chunk:
     md = ChunkMetadata(
-        doc_id="docA",
+        rev_id="docA",
         chapter_title="Comm",
         section_title="SPI Timing",
         page_numbers=[42],
@@ -99,7 +99,7 @@ def _text_chunk(chunk_id: str, text: str) -> Chunk:
     )
     return Chunk(
         id=chunk_id,
-        doc_id="docA",
+        rev_id="docA",
         level=ChunkLevel.MICRO,
         text=text,
         context_text=text,
