@@ -322,7 +322,7 @@ def register_field(
             "role mfr-part marks a kind of part number; give role part too "
             "(--role part --role mfr-part)"
         )
-    _begin(conn)
+    begin_immediate(conn)
     try:
         if get_field(conn, name) is not None:
             raise MetadataFieldError(f"field {name!r} is already registered")
@@ -347,7 +347,7 @@ def remove_field(conn: sqlite3.Connection, name: str, *, clear: bool = False) ->
     set: then those values are deleted with it. Built-in fields cannot be
     removed.
     """
-    _begin(conn)
+    begin_immediate(conn)
     try:
         spec = get_field(conn, name)
         if spec is None:
@@ -737,7 +737,7 @@ def field_filter_sql(
     return clauses, params
 
 
-def _begin(conn: sqlite3.Connection) -> None:
+def begin_immediate(conn: sqlite3.Connection) -> None:
     """Start an explicit transaction, committing any implicit one first.
 
     IMMEDIATE takes the write lock now, so the reads that follow see the rows

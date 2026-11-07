@@ -482,13 +482,13 @@ def set_metadata(
     * ``add_projects`` / ``remove_projects``: the document joins / leaves
       each named project; its other projects are left alone. A project it
       is already in becomes a ``manual`` membership (a person asked for
-      it, so a BOM sync keeps it).
+      it, so a BOM sync keeps it). A project in both lists, or an empty
+      name, raises ``ValueError`` before anything is written. Leaving a
+      project deletes the document's project-scoped values in it. Not
+      allowed with ``this_revision``.
     * ``default_projects``: projects the document joins when it is not in
       them yet, such as the ``.rag.toml`` project. An existing membership
-      keeps its source. A project in
-      both lists, or an empty name, raises ``ValueError`` before anything
-      is written. Leaving a project deletes the document's project-scoped
-      values in it. Not allowed with ``this_revision``.
+      keeps its source. Not allowed with ``this_revision``.
     * ``tags``: replace wholesale (not merged); ``[]`` clears. With
       ``this_revision``, ``[]`` removes the override (the revision inherits
       the document's tags again).

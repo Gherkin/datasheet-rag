@@ -121,6 +121,44 @@ def test_reingest_under_another_project_adds_it(backend: LocalBackend) -> None:
     assert backend.get_document(did).projects == ["board-b", "board-c"]
 
 
+def test_reingest_into_the_ingest_project_keeps_a_bom_membership(
+    backend: LocalBackend, conn: sqlite3.Connection
+) -> None:
+    """The ingest project joins without claiming, also in the metadata step (GH #125)."""
+    from datasheet_rag.store.bom import BomLine
+
+    def source(project: str) -> str | None:
+        row = conn.execute(
+            "SELECT source FROM document_projects WHERE project_id = ?", (project,)
+        ).fetchone()
+        return row["source"] if row else None
+
+    did = "e" * 64
+    backend.ingest_chunk_graph(
+        _plain_graph(did), metadata=MetadataPatch(fields={"mpn": "X1"}), embed=False
+    )
+    backend.sync_bom("netdaq", [BomLine(parts={"mpn": "X1"})])
+    assert source("netdaq") == "bom"
+
+    # A patch that is not empty, so the metadata step runs.
+    backend.ingest_chunk_graph(
+        _plain_graph(did),
+        project_id="netdaq",
+        metadata=MetadataPatch(tags=["adc"]),
+        embed=False,
+    )
+    assert source("netdaq") == "bom"
+    backend.sync_bom("netdaq", [])
+    assert source("netdaq") is None
+
+    # An explicit add at ingest claims the membership.
+    backend.sync_bom("netdaq", [BomLine(parts={"mpn": "X1"})])
+    backend.ingest_chunk_graph(
+        _plain_graph(did), metadata=MetadataPatch(add_projects=["netdaq"]), embed=False
+    )
+    assert source("netdaq") == "manual"
+
+
 def test_ingest_rejects_a_bad_project_patch_before_writing_chunks(
     backend: LocalBackend,
 ) -> None:

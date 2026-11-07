@@ -194,15 +194,11 @@ class MetadataPatch(BaseModel):
         self.default_projects = normalize_projects(self.default_projects) or None
         return self
 
-    def add_project(self, project_id: str | None) -> None:
-        """Add ``project_id`` to ``add_projects`` (no-op for ``None``/blank)."""
+    def add_default_project(self, project_id: str | None) -> None:
+        """Add ``project_id`` to ``default_projects`` (no-op for ``None``/blank)."""
         if not project_id or not project_id.strip():
             return
-        add, remove = check_project_change(
-            [*(self.add_projects or []), project_id], self.remove_projects
-        )
-        self.add_projects = add or None
-        self.remove_projects = remove or None
+        self.default_projects = normalize_projects([*(self.default_projects or []), project_id])
 
     def kwargs(self) -> dict[str, Any]:
         """Return only the set (non-None) fields as set_metadata kwargs."""

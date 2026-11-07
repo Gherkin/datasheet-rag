@@ -35,7 +35,7 @@ from datasheet_rag.store.documents import format_document_id
 from datasheet_rag.store.fields import (
     FieldSpec,
     MetadataFieldError,
-    _begin,
+    begin_immediate,
     delete_document_project_values,
     list_fields,
 )
@@ -224,7 +224,7 @@ def sync_bom(
     # Take the write lock before reading, so the plan is made on the rows
     # it is applied to. A dry run only reads.
     if not dry_run:
-        _begin(conn)
+        begin_immediate(conn)
     try:
         index = _effective_values(conn, used)
         results: list[tuple[BomLine, dict[int, list[str]], list[tuple[int, str, str]]]] = []

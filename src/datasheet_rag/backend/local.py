@@ -877,13 +877,10 @@ class LocalBackend(RagBackend):
             # names one (GH #123).
             patch = (metadata or MetadataPatch()).model_copy(deep=True)
             # Only the patch's own add_projects were asked for explicitly:
-            # they become manual memberships. The ingest project and any
-            # default projects join without changing an existing one (GH #125).
-            claimed = list(patch.add_projects or [])
-            patch.add_project(project_id)
-            for default in patch.default_projects or []:
-                patch.add_project(default)
-            patch.default_projects = None
+            # they become manual memberships. The ingest project is a default
+            # project: it joins without changing an existing membership, here
+            # and in the metadata step below (GH #125).
+            patch.add_default_project(project_id)
             if patch.project is None and project_id and project_id.strip():
                 patch.project = project_id.strip()
             # Decide which document the PDF goes into (GH #124): the one named
@@ -910,6 +907,7 @@ class LocalBackend(RagBackend):
                 this_revision=bool(patch.this_revision),
                 revision=patch.revision,
                 into=target,
+                default_projects=patch.default_projects,
             )
 
             def place_revision() -> None:
@@ -922,7 +920,8 @@ class LocalBackend(RagBackend):
             # commits them with the chunks: no stored state has chunks without
             # their projects (a stopped describe) or projects without chunks
             # (a failed embed).
-            join = patch.add_projects or []
+            claimed = patch.add_projects or []
+            join = [*claimed, *(patch.default_projects or [])]
             described = 0
             # The provisional insert below prunes too, so the final insert
             # finds nothing left to drop — count both or the describe path

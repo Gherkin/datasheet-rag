@@ -4801,6 +4801,8 @@ def _parse_bom_columns(specs: tuple[str, ...]) -> dict[str, str]:
             # A BOM line holds one value per field; a second column would
             # overwrite the first.
             raise click.UsageError(f"two --column options map to field {field!r}")
+        if header in out:
+            raise click.UsageError(f"two --column options name column {header!r}")
         out[header] = field
     return out
 

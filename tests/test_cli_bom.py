@@ -141,6 +141,8 @@ def test_two_columns_for_one_field_are_refused(db_path: Path, tmp_path: Path) ->
     args = ["bom", "sync", str(bom), "--project", "p", "--column", "MPN=mpn"]
     out = _rag(db_path, *args, "--column", "Alt MPN=mpn")
     assert out.exit_code == 2 and "two --column options map to field 'mpn'" in out.output
+    out = _rag(db_path, *args, "--column", "MPN=acme-pn")
+    assert out.exit_code == 2 and "two --column options name column 'MPN'" in out.output
 
 
 def test_a_non_utf8_csv_is_a_usage_error(db_path: Path, tmp_path: Path) -> None:
