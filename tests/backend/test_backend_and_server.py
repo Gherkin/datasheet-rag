@@ -121,6 +121,44 @@ def test_reingest_under_another_project_adds_it(backend: LocalBackend) -> None:
     assert backend.get_document(did).projects == ["board-b", "board-c"]
 
 
+def test_reingest_into_the_ingest_project_keeps_a_bom_membership(
+    backend: LocalBackend, conn: sqlite3.Connection
+) -> None:
+    """The ingest project joins without claiming, also in the metadata step (GH #125)."""
+    from datasheet_rag.store.bom import BomLine
+
+    def source(project: str) -> str | None:
+        row = conn.execute(
+            "SELECT source FROM document_projects WHERE project_id = ?", (project,)
+        ).fetchone()
+        return row["source"] if row else None
+
+    did = "e" * 64
+    backend.ingest_chunk_graph(
+        _plain_graph(did), metadata=MetadataPatch(fields={"mpn": "X1"}), embed=False
+    )
+    backend.sync_bom("netdaq", [BomLine(parts={"mpn": "X1"})])
+    assert source("netdaq") == "bom"
+
+    # A patch that is not empty, so the metadata step runs.
+    backend.ingest_chunk_graph(
+        _plain_graph(did),
+        project_id="netdaq",
+        metadata=MetadataPatch(tags=["adc"]),
+        embed=False,
+    )
+    assert source("netdaq") == "bom"
+    backend.sync_bom("netdaq", [])
+    assert source("netdaq") is None
+
+    # An explicit add at ingest claims the membership.
+    backend.sync_bom("netdaq", [BomLine(parts={"mpn": "X1"})])
+    backend.ingest_chunk_graph(
+        _plain_graph(did), metadata=MetadataPatch(add_projects=["netdaq"]), embed=False
+    )
+    assert source("netdaq") == "manual"
+
+
 def test_ingest_rejects_a_bad_project_patch_before_writing_chunks(
     backend: LocalBackend,
 ) -> None:
@@ -1004,6 +1042,35 @@ def test_server_answers_one_document_summary(client, conn: sqlite3.Connection) -
     assert r.status_code == 200
     assert r.json()["rev_id"] == "d2"
     assert client.get("/documents/nope/summary").status_code == 204
+
+
+def test_server_and_remote_sync_a_bom(client, conn: sqlite3.Connection) -> None:
+    """POST /bom/sync (GH #125): the remote client round-trips the result."""
+    from datasheet_rag.backend.remote import RemoteBackend
+    from datasheet_rag.store.bom import BomLine
+    from datasheet_rag.store.metadata import set_metadata
+
+    did = "f" * 64
+    LocalBackend(conn=conn).ingest_chunk_graph(_plain_graph(did), embed=False)
+    set_metadata(conn, did, fields={"mpn": ["TLA2518"]})
+    be = RemoteBackend.__new__(RemoteBackend)
+    be._client = client
+    be._compute = "server"
+
+    line = BomLine(ref="U8", parts={"mpn": "TLA2518"})
+    dry = be.sync_bom("netdaq/rev-b", [line], dry_run=True)
+    assert dry.dry_run and [d.document_id for d in dry.added] == ["D1"]
+    assert conn.execute("SELECT COUNT(*) FROM document_projects").fetchone()[0] == 0
+
+    result = be.sync_bom("netdaq/rev-b", [line])
+    assert result.project == "netdaq/rev-b"
+    assert [(m.document_id, m.fields) for m in result.lines[0].matches] == [("D1", ["mpn"])]
+    assert client.get(f"/documents/{did}/metadata").json()["projects"] == ["netdaq/rev-b"]
+
+    bad = client.post(
+        "/bom/sync", json={"project": "p", "lines": [{"parts": {"manufacturer": "TI"}}]}
+    )
+    assert bad.status_code == 400 and "not a part field" in bad.json()["detail"]
 
 
 def test_remote_title_hints_none_keeps_and_empty_clears(client) -> None:

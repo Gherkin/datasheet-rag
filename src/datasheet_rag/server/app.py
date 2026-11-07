@@ -54,6 +54,7 @@ from datasheet_rag.store import (
     revoke_api_key,
     stored_embedding_dim,
 )
+from datasheet_rag.store.bom import BomLine
 from datasheet_rag.store.fields import FieldScope, FieldShape, scopes_of, shapes_of
 from datasheet_rag.store.metadata import check_patch_for
 
@@ -142,6 +143,14 @@ class IdentityRuleBody(BaseModel):
 
 
 class ApplyRuleBody(BaseModel):
+    dry_run: bool = False
+
+
+class BomSyncBody(BaseModel):
+    # The project travels in the body, not the path: a project name is free
+    # text and may hold a '/'.
+    project: str
+    lines: list[BomLine]
     dry_run: bool = False
 
 
@@ -597,6 +606,13 @@ def build_app() -> FastAPI:
         name: str, clear: bool = False, be: LocalBackend = Depends(get_backend)
     ) -> dict[str, Any]:
         return {"held": be.remove_field(name, clear=clear)}
+
+    # -- BOM (GH #125) ----------------------------------------------------
+    # The caller sends a project's whole BOM; sending it again is a no-op.
+    # A dry run writes nothing, but it is the same request: one scope for both.
+    @app.post("/bom/sync", dependencies=ingest_dep)
+    def bom_sync(body: BomSyncBody, be: LocalBackend = Depends(get_backend)) -> dict[str, Any]:
+        return be.sync_bom(body.project, body.lines, dry_run=body.dry_run).model_dump(mode="json")
 
     # -- stats -----------------------------------------------------------
     @app.get("/stats", dependencies=dep)

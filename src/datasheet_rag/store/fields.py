@@ -59,9 +59,17 @@ FIELD_SHAPES: tuple[FieldShape, ...] = get_args(FieldShape)
 FieldScope = Literal["document", "project"]
 FIELD_SCOPES: tuple[FieldScope, ...] = get_args(FieldScope)
 
-#: What a field is used for, beyond being filterable. ``part`` marks a field
-#: whose values are part numbers (BOM import matches on these — GH #125).
-FieldRole = Literal["part"]
+#: What a field is used for, beyond being filterable (GH #125):
+#:
+#: * ``part``     – the values are part numbers. A BOM sync matches a BOM
+#:                  line on them, exactly (case-insensitive).
+#: * ``mfr-part`` – the part numbers are manufacturers' numbers, which a BOM
+#:                  usually names with an ordering suffix the document leaves
+#:                  out (``TLA2518`` vs ``TLA2518IRTER``). A BOM line that
+#:                  matches nothing gets prefix suggestions from these fields.
+#:                  Needs ``part`` too. An internal part number is ``part``
+#:                  only: it either matches or it does not.
+FieldRole = Literal["part", "mfr-part"]
 FIELD_ROLES: tuple[FieldRole, ...] = get_args(FieldRole)
 
 #: A field's value as stored and returned: a string, or a list of strings.
@@ -111,7 +119,7 @@ BUILTIN_FIELDS: tuple[FieldSpec, ...] = (
         name="mpn",
         description="Manufacturer part number(s) the document covers, e.g. STM32H743VIT6.",
         shape="list",
-        roles=["part"],
+        roles=["part", "mfr-part"],
         builtin=True,
     ),
     FieldSpec(
@@ -309,7 +317,12 @@ def register_field(
     bad_roles = [r for r in role_list if r not in FIELD_ROLES]
     if bad_roles:
         raise MetadataFieldError(f"unknown role(s) {bad_roles} (expected some of {FIELD_ROLES})")
-    _begin(conn)
+    if "mfr-part" in role_list and "part" not in role_list:
+        raise MetadataFieldError(
+            "role mfr-part marks a kind of part number; give role part too "
+            "(--role part --role mfr-part)"
+        )
+    begin_immediate(conn)
     try:
         if get_field(conn, name) is not None:
             raise MetadataFieldError(f"field {name!r} is already registered")
@@ -334,7 +347,7 @@ def remove_field(conn: sqlite3.Connection, name: str, *, clear: bool = False) ->
     set: then those values are deleted with it. Built-in fields cannot be
     removed.
     """
-    _begin(conn)
+    begin_immediate(conn)
     try:
         spec = get_field(conn, name)
         if spec is None:
@@ -724,7 +737,7 @@ def field_filter_sql(
     return clauses, params
 
 
-def _begin(conn: sqlite3.Connection) -> None:
+def begin_immediate(conn: sqlite3.Connection) -> None:
     """Start an explicit transaction, committing any implicit one first.
 
     IMMEDIATE takes the write lock now, so the reads that follow see the rows

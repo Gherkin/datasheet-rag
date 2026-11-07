@@ -367,6 +367,9 @@ class CheckedWrite(NamedTuple):
     project: str | None
     add: list[str]
     remove: list[str]
+    #: Default projects (``.rag.toml``) not also in ``add``: joined without
+    #: claiming, so an existing membership keeps its source.
+    join: list[str]
 
 
 def check_write(
@@ -381,6 +384,7 @@ def check_write(
     this_revision: bool = False,
     revision: str | None = None,
     into: int | None = None,
+    default_projects: list[str] | None = None,
 ) -> CheckedWrite:
     """Validate a metadata write (the arguments of :func:`set_metadata`).
 
@@ -409,8 +413,9 @@ def check_write(
     scopes = field_scopes(conn)
     field_patch = check_patch_for(field_shapes(conn), scopes, fields=fields, project=project)
     add, remove = check_project_change(add_projects, remove_projects)
+    join = [p for p in check_project_change(default_projects, remove)[0] if p not in add]
     if this_revision:
-        if add or remove:
+        if add or remove or join:
             raise RevisionError(
                 "projects belong to the whole document; drop --this-revision to change them"
             )
@@ -429,12 +434,12 @@ def check_write(
             if document_id is not None
             else []
         )
-        if project in remove or (project not in current and project not in add):
+        if project in remove or (project not in current and project not in add + join):
             raise MetadataFieldError(
                 f"{ref} is not in project {project!r}; add it to the project "
                 "first (--add-project) to set its project fields there"
             )
-    return CheckedWrite(field_patch, scopes, project, add, remove)
+    return CheckedWrite(field_patch, scopes, project, add, remove, join)
 
 
 def check_patch_for(
@@ -463,6 +468,7 @@ def set_metadata(
     project: str | None = None,
     this_revision: bool = False,
     revision: str | None = None,
+    default_projects: list[str] | None = None,
 ) -> DocMetadata:
     """Upsert metadata with **partial** merge semantics.
 
@@ -474,10 +480,15 @@ def set_metadata(
     Merge rules
     -----------
     * ``add_projects`` / ``remove_projects``: the document joins / leaves
-      each named project; its other projects are left alone. A project in
-      both lists, or an empty name, raises ``ValueError`` before anything
-      is written. Leaving a project deletes the document's project-scoped
-      values in it. Not allowed with ``this_revision``.
+      each named project; its other projects are left alone. A project it
+      is already in becomes a ``manual`` membership (a person asked for
+      it, so a BOM sync keeps it). A project in both lists, or an empty
+      name, raises ``ValueError`` before anything is written. Leaving a
+      project deletes the document's project-scoped values in it. Not
+      allowed with ``this_revision``.
+    * ``default_projects``: projects the document joins when it is not in
+      them yet, such as the ``.rag.toml`` project. An existing membership
+      keeps its source. Not allowed with ``this_revision``.
     * ``tags``: replace wholesale (not merged); ``[]`` clears. With
       ``this_revision``, ``[]`` removes the override (the revision inherits
       the document's tags again).
@@ -505,6 +516,7 @@ def set_metadata(
         project=project,
         this_revision=this_revision,
         revision=revision,
+        default_projects=default_projects,
     )
     try:
         document_id, rev = resolve_target(conn, ref)
@@ -524,7 +536,10 @@ def set_metadata(
                 "UPDATE revisions SET revision = ? WHERE rev_id = ?",
                 (revision.strip() or None, rev),
             )
-        change_projects(conn, document_id, add=checked.add, remove=checked.remove)
+        # An explicit add claims the membership, so a BOM sync does not
+        # remove it later; a default project only joins (GH #125).
+        change_projects(conn, document_id, add=checked.add, remove=checked.remove, claim=True)
+        change_projects(conn, document_id, add=checked.join)
         delete_document_project_values(conn, document_id, checked.remove)
         write_field_values(
             conn,
@@ -549,16 +564,22 @@ def set_metadata(
     return refreshed
 
 
-def join_projects(conn: sqlite3.Connection, rev_id: str, projects: list[str]) -> None:
+def join_projects(
+    conn: sqlite3.Connection, rev_id: str, projects: list[str], *, claim: Sequence[str] = ()
+) -> None:
     """Add ``rev_id``'s document to ``projects``. Does not commit.
 
     Ingest calls this inside the chunk-insert transaction, so the projects
     commit with the chunks. ``projects`` are normalised already
-    (``MetadataPatch``).
+    (``MetadataPatch``). The ones also in ``claim`` were asked for
+    explicitly and become ``manual`` memberships; the rest (the ingest's
+    default project) keep an existing membership's source (GH #125).
     """
     if not projects:
         return
-    change_projects(conn, ensure_revision(conn, rev_id), add=projects)
+    document_id = ensure_revision(conn, rev_id)
+    change_projects(conn, document_id, add=[p for p in projects if p in claim], claim=True)
+    change_projects(conn, document_id, add=[p for p in projects if p not in claim])
 
 
 def delete_metadata(conn: sqlite3.Connection, rev_id: str) -> int:

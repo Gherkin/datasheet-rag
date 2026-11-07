@@ -77,6 +77,7 @@ from datasheet_rag.store import (
     vector_search,
 )
 from datasheet_rag.store import documents as revs
+from datasheet_rag.store.bom import BomLine, BomSyncResult, sync_bom
 from datasheet_rag.store.fields import (
     FieldScope,
     FieldShape,
@@ -579,6 +580,13 @@ class LocalBackend(RagBackend):
         with self._write_lock:
             return remove_field(self._get_conn(), name, clear=clear)
 
+    # -- BOM (GH #125) -------------------------------------------------
+    def sync_bom(
+        self, project: str, lines: Sequence[BomLine], *, dry_run: bool = False
+    ) -> BomSyncResult:
+        with self._write_lock:
+            return sync_bom(self._get_conn(), project, lines, dry_run=dry_run)
+
     # -- stats ---------------------------------------------------------
     def stats(self, *, project_id: str | None = None, rev_id: str | None = None) -> StatsResult:
         conn = self._get_conn()
@@ -868,7 +876,11 @@ class LocalBackend(RagBackend):
             # Project-scoped fields go to the ingest project unless the patch
             # names one (GH #123).
             patch = (metadata or MetadataPatch()).model_copy(deep=True)
-            patch.add_project(project_id)
+            # Only the patch's own add_projects were asked for explicitly:
+            # they become manual memberships. The ingest project is a default
+            # project: it joins without changing an existing membership, here
+            # and in the metadata step below (GH #125).
+            patch.add_default_project(project_id)
             if patch.project is None and project_id and project_id.strip():
                 patch.project = project_id.strip()
             # Decide which document the PDF goes into (GH #124): the one named
@@ -895,6 +907,7 @@ class LocalBackend(RagBackend):
                 this_revision=bool(patch.this_revision),
                 revision=patch.revision,
                 into=target,
+                default_projects=patch.default_projects,
             )
 
             def place_revision() -> None:
@@ -907,7 +920,8 @@ class LocalBackend(RagBackend):
             # commits them with the chunks: no stored state has chunks without
             # their projects (a stopped describe) or projects without chunks
             # (a failed embed).
-            join = patch.add_projects or []
+            claimed = patch.add_projects or []
+            join = [*claimed, *(patch.default_projects or [])]
             described = 0
             # The provisional insert below prunes too, so the final insert
             # finds nothing left to drop — count both or the describe path
@@ -928,7 +942,7 @@ class LocalBackend(RagBackend):
                     embed_chunk_graph(graph, embedder=self._get_embedder()) if embed else vectors
                 )
                 place_revision()
-                join_projects(conn, did, join)
+                join_projects(conn, did, join, claim=claimed)
                 pruned += insert_chunk_graph(conn, graph, vectors=vectors_tmp).pruned
                 conn.commit()
                 descriptions = describe_figures_in_store(
@@ -960,7 +974,7 @@ class LocalBackend(RagBackend):
             # figure path) for every id that survives, which is why this is not
             # a delete-then-insert.
             place_revision()
-            join_projects(conn, did, join)
+            join_projects(conn, did, join, claim=claimed)
             stats = insert_chunk_graph(conn, graph, vectors=vectors)
             pruned += stats.pruned
             conn.commit()

@@ -3418,6 +3418,9 @@ def _ingest_one(
     # A blank --project-id is no project (the store treats it so): the
     # .rag.toml project_id still applies.
     project_id = (project_id.strip() or None) if project_id else None
+    # --project-id is an explicit add: it makes a BOM-added membership manual.
+    # The .rag.toml project is a default and leaves it as it is (GH #125).
+    explicit_project = project_id
     if proj_cfg is not None:
         project_id = project_id or proj_cfg.project_id
         if not tags and proj_cfg.tags:
@@ -3451,6 +3454,7 @@ def _ingest_one(
     from datasheet_rag.backend import MetadataPatch
 
     meta_patch = MetadataPatch(
+        add_projects=[explicit_project] if explicit_project else None,
         tags=list(tags) if tags else None,
         fields=fields or None,
         revision=revision_label,
@@ -4506,9 +4510,13 @@ def metadata_cmd(
             per_revision = True
 
     proj_cfg = None if per_revision else get_project_config()
+    default_projects: list[str] = []
     if proj_cfg is not None:
         if proj_cfg.project_id and not (add_projects or remove_projects):
-            add_projects = (proj_cfg.project_id,)
+            # The config's project is a default, not a request: a document
+            # already in it keeps its membership as it is, so a BOM-added
+            # one stays BOM-added (GH #125).
+            default_projects = [proj_cfg.project_id]
         if fields_project is None:
             fields_project = proj_cfg.project_id
         if not tags and proj_cfg.tags:
@@ -4534,7 +4542,7 @@ def metadata_cmd(
                 in_cfg = False
             elif fields_project != cfg_project:
                 in_cfg, why_not = False, f"this write goes to project {fields_project!r}"
-            elif cfg_project not in add_projects:
+            elif cfg_project not in [*add_projects, *default_projects]:
                 stored = be.get_metadata(rev_id)
                 if stored is None or cfg_project not in stored.projects:
                     in_cfg, why_not = False, f"{rev_id} is not in that project"
@@ -4582,6 +4590,7 @@ def metadata_cmd(
             MetadataPatch(
                 add_projects=list(add_projects) or None,
                 remove_projects=list(remove_projects) or None,
+                default_projects=default_projects or None,
                 tags=new_tags,
                 fields=fields or None,
                 project=fields_project,
@@ -4711,8 +4720,10 @@ def fields_list_cmd(db_path: Path | None) -> None:
     "--role",
     "roles",
     multiple=True,
-    type=click.Choice(["part"]),
-    help="part: the values are part numbers (used to match a BOM).",
+    type=click.Choice(["part", "mfr-part"]),
+    help="part: the values are part numbers; a BOM sync matches on them exactly. "
+    "mfr-part (with part): they are manufacturer part numbers; a BOM line that "
+    "matches nothing gets prefix suggestions from them.",
 )
 @_db_option
 def fields_add_cmd(
@@ -4728,6 +4739,7 @@ def fields_add_cmd(
     \b
         rag fields add acme-id --description "ACME document number"
         rag fields add acme-pn --shape list --role part
+        rag fields add vendor-pn --role part --role mfr-part
         rag fields add board-ref --scope project
     """
     try:
@@ -4761,6 +4773,188 @@ def fields_remove_cmd(name: str, clear: bool, db_path: Path | None) -> None:
     console.print(f"[green]Removed[/] {name}")
     if held:
         console.print(f"  Deleted its values on {held} document(s).")
+
+
+# ---------------------------------------------------------------------------
+# bom (sync a project's documents with its BOM — GH #125)
+# ---------------------------------------------------------------------------
+
+
+@cli.group("bom", short_help="Sync a project's documents with its BOM.")
+def bom_group() -> None:
+    """Put the documents a BOM names into a project.
+
+    Other systems send a BOM with POST /bom/sync on the server. `rag bom
+    sync` does the same from a CSV file, such as a KiCad BOM export.
+    """
+
+
+def _parse_bom_columns(specs: tuple[str, ...]) -> dict[str, str]:
+    """``("MPN=mpn", "acme-pn")`` → ``{"MPN": "mpn", "acme-pn": "acme-pn"}``."""
+    out: dict[str, str] = {}
+    for spec in specs:
+        header, sep, field = spec.partition("=")
+        header, field = header.strip(), (field if sep else header).strip()
+        if not header or not field:
+            raise click.UsageError(f"--column {spec!r} must be HEADER=FIELD or FIELD")
+        if field in out.values():
+            # A BOM line holds one value per field; a second column would
+            # overwrite the first.
+            raise click.UsageError(f"two --column options map to field {field!r}")
+        if header in out:
+            raise click.UsageError(f"two --column options name column {header!r}")
+        out[header] = field
+    return out
+
+
+def _read_bom_csv(
+    path: Path, columns: dict[str, str], ref_column: str | None, delimiter: str
+) -> list[Any]:
+    """BOM lines from a CSV file; a row with no part number is skipped."""
+    import csv
+
+    try:
+        return _read_bom_rows(path, columns, ref_column, delimiter)
+    except UnicodeDecodeError as e:
+        raise click.UsageError(f"{path} is not UTF-8 text ({e}); save it as UTF-8 CSV") from e
+    except csv.Error as e:
+        raise click.UsageError(f"{path} is not a readable CSV file: {e}") from e
+
+
+def _read_bom_rows(
+    path: Path, columns: dict[str, str], ref_column: str | None, delimiter: str
+) -> list[Any]:
+    import csv
+
+    from datasheet_rag.store.bom import BomLine
+
+    with path.open(newline="", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f, delimiter=delimiter)
+        headers = reader.fieldnames or []
+        missing = [h for h in [*columns, *([ref_column] if ref_column else [])] if h not in headers]
+        if missing:
+            raise click.UsageError(
+                f"{path} has no column(s) {', '.join(repr(m) for m in missing)} "
+                f"(its columns: {', '.join(repr(h) for h in headers)})"
+            )
+        lines = []
+        for row in reader:
+            parts = {
+                field: (row.get(header) or "").strip()
+                for header, field in columns.items()
+                if (row.get(header) or "").strip()
+            }
+            if parts:
+                ref = None
+                if ref_column:
+                    ref = (row.get(ref_column) or "").strip() or None
+                lines.append(BomLine(ref=ref, parts=parts))
+        return lines
+
+
+@bom_group.command("sync", short_help="Sync a project with a BOM in a CSV file.")
+@click.argument("csv_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option(
+    "--project",
+    default=None,
+    help="The project the BOM belongs to. Defaults to the project in .rag.toml.",
+)
+@click.option(
+    "--column",
+    "columns",
+    multiple=True,
+    required=True,
+    help="A CSV column holding part numbers, as HEADER=FIELD (e.g. 'MPN=mpn', "
+    "'Internal PN=acme-pn'), or FIELD when the header is the field's name. "
+    "FIELD must have the part role. Repeat for each column.",
+)
+@click.option(
+    "--ref-column",
+    default=None,
+    help="A column to label each line with in the report, e.g. Reference.",
+)
+@click.option("--delimiter", default=",", show_default=True, help="The CSV field separator.")
+@click.option("--dry-run", is_flag=True, help="Print what would change; change nothing.")
+@_db_option
+def bom_sync_cmd(
+    csv_file: Path,
+    project: str | None,
+    columns: tuple[str, ...],
+    ref_column: str | None,
+    delimiter: str,
+    dry_run: bool,
+    db_path: Path | None,
+) -> None:
+    """Make PROJECT's BOM documents match CSV_FILE, the project's whole BOM.
+
+    A line matches a document when one of its part numbers equals the
+    document's value of that field, ignoring case. Matched documents join
+    the project. Documents an earlier sync added that the BOM no longer
+    matches leave it. Documents added by hand, such as app notes, stay.
+
+    A line that matches nothing is listed, with suggestions where a stored
+    manufacturer part number is the start of the line's (TLA2518 for
+    TLA2518IRTER). Suggestions do not join the project. To accept one, add
+    the BOM's part number to the document's mpn list:
+
+    \b
+        rag metadata D12 --mpn-alias TLA2518IRTER
+
+    \b
+        rag bom sync bom.csv --project netdaq --column MPN=mpn --ref-column Reference
+    """
+    from datasheet_rag.project_config import get_project_config
+
+    if not project:
+        cfg = get_project_config()
+        project = cfg.project_id if cfg is not None else None
+    if not project:
+        raise click.UsageError("name the project with --project, or run inside a .rag.toml project")
+    if len(delimiter) != 1:
+        raise click.UsageError("--delimiter must be one character")
+    lines = _read_bom_csv(csv_file, _parse_bom_columns(columns), ref_column, delimiter)
+    try:
+        result = _backend_for(db_path).sync_bom(project, lines, dry_run=dry_run)
+    except ValueError as e:
+        raise click.ClickException(str(e)) from e
+    _print_bom_result(result)
+
+
+def _bom_doc(d: Any) -> str:
+    return f"{d.document_id} {d.title}" if d.title else d.document_id
+
+
+def _bom_line(line: Any) -> str:
+    parts = ", ".join(f"{k}={v}" for k, v in line.parts.items())
+    return f"{line.ref}: {parts}" if line.ref else parts
+
+
+def _print_bom_result(result: Any) -> None:
+    matched = [ln for ln in result.lines if ln.matches]
+    unmatched = [ln for ln in result.lines if not ln.matches]
+    console.print(
+        f"Project {result.project}: {len(result.lines)} BOM line(s), "
+        f"{len(matched)} matched, {len(unmatched)} with no document."
+    )
+    verb_add, verb_rm = ("Would add", "Would remove") if result.dry_run else ("Added", "Removed")
+    for title, docs in ((verb_add, result.added), (verb_rm, result.removed)):
+        if docs:
+            console.print(f"\n[green]{title}[/] {len(docs)} document(s):")
+            for d in docs:
+                console.print(f"  {_bom_doc(d)}")
+    if result.kept_manual:
+        console.print(
+            f"\n{len(result.kept_manual)} matched document(s) were already in the "
+            "project by hand; left as they are."
+        )
+    if unmatched:
+        console.print("\n[yellow]No document[/] (ingest a datasheet, or check the part number):")
+        for ln in unmatched:
+            console.print(f"  {_bom_line(ln)}")
+            for s in ln.suggestions:
+                console.print(f"    suggestion: {_bom_doc(s)} ({s.field}={s.value})")
+    if result.dry_run:
+        console.print("\nDry run: nothing was changed. Run without --dry-run to sync.")
 
 
 # ---------------------------------------------------------------------------

@@ -37,6 +37,7 @@ from datasheet_rag.backend.models import (
 from datasheet_rag.ingest_pipeline import ProgressCallback
 from datasheet_rag.models.chunk import Chunk, ChunkGraph
 from datasheet_rag.store import DocMetadata, FieldSpec, SearchFilters, SearchResult, TitleSource
+from datasheet_rag.store.bom import BomLine, BomSyncResult
 from datasheet_rag.store.fields import FieldScope, FieldShape
 
 SearchMode = Literal["hybrid", "vector", "keyword"]
@@ -284,6 +285,19 @@ class RagBackend(ABC):
         """Unregister a field; returns how many documents held a value.
 
         Refuses while documents hold values, unless ``clear`` deletes them.
+        """
+
+    # ---- BOM (GH #125) ----
+    @abstractmethod
+    def sync_bom(
+        self, project: str, lines: Sequence[BomLine], *, dry_run: bool = False
+    ) -> BomSyncResult:
+        """Make ``project``'s BOM memberships match ``lines``, its full BOM.
+
+        Matched documents join the project; documents an earlier sync added
+        that no longer match leave it; documents added by hand stay. Lines
+        that match nothing carry prefix suggestions from ``mfr-part`` fields.
+        With ``dry_run`` nothing is written. See :mod:`datasheet_rag.store.bom`.
         """
 
     # ---- stats ----
