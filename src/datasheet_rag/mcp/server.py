@@ -1214,7 +1214,8 @@ def build_server(
         Each field has a name, a description, a shape ('single' value or
         'list' of values), a scope ('document' = one value per document,
         'project' = one value per document in each project), roles ('part' =
-        its values are part numbers) and whether it is built in. Use the names
+        its values are part numbers; 'mfr-part' = manufacturer part numbers)
+        and whether it is built in. Use the names
         with the `fields` filter of `search` and `list_documents`. Built-ins:
         mpn, manufacturer, doc_type, and the project-scoped subsystem; the rest are registered by whoever runs this store, e.g. an internal
         document number.

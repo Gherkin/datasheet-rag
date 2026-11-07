@@ -267,7 +267,6 @@ def _merge_documents(conn: sqlite3.Connection, source: int, target: int) -> None
     call. Does not commit.
     """
     from datasheet_rag.store.fields import get_document_values, get_project_values
-    from datasheet_rag.store.projects import get_projects_for_documents
 
     src_vals = get_document_values(conn, [source]).get(source, {})
     dst_vals = get_document_values(conn, [target]).get(target, {})
@@ -309,10 +308,14 @@ def _merge_documents(conn: sqlite3.Connection, source: int, target: int) -> None
                     "WHERE document_id = ? AND project_id = ? AND field = ?",
                     (target, source, project, name),
                 )
-    projects = get_projects_for_documents(conn, [source]).get(source, [])
-    conn.executemany(
-        "INSERT OR IGNORE INTO document_projects (document_id, project_id) VALUES (?, ?)",
-        [(target, p) for p in projects],
+    # A project both are in stays added by hand if either was (GH #125):
+    # a BOM sync must not remove a document someone put there.
+    conn.execute(
+        "INSERT INTO document_projects (document_id, project_id, source) "
+        "SELECT ?, project_id, source FROM document_projects WHERE document_id = ? "
+        "ON CONFLICT (document_id, project_id) DO UPDATE SET source = 'manual' "
+        "WHERE excluded.source = 'manual'",
+        (target, source),
     )
     tags = list(dict.fromkeys([*_tags_of(conn, target), *_tags_of(conn, source)]))
     conn.execute(
@@ -465,8 +468,8 @@ def unlink_revision(conn: sqlite3.Connection, rev_id: str) -> int:
     try:
         new = new_document(conn, tags=_tags_of(conn, old))
         conn.execute(
-            "INSERT INTO document_projects (document_id, project_id) "
-            "SELECT ?, project_id FROM document_projects WHERE document_id = ?",
+            "INSERT INTO document_projects (document_id, project_id, source) "
+            "SELECT ?, project_id, source FROM document_projects WHERE document_id = ?",
             (new, old),
         )
         conn.execute(

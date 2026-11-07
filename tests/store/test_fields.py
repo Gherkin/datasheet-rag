@@ -41,7 +41,7 @@ def conn() -> Iterator[sqlite3.Connection]:
 def test_builtin_fields_ship_registered(conn: sqlite3.Connection) -> None:
     fields = {f.name: f for f in list_fields(conn)}
     assert {f.name for f in BUILTIN_FIELDS} <= set(fields)
-    assert fields["mpn"].shape == "list" and fields["mpn"].roles == ["part"]
+    assert fields["mpn"].shape == "list" and fields["mpn"].roles == ["part", "mfr-part"]
     assert fields["manufacturer"].shape == "single" and fields["manufacturer"].builtin
     assert fields["mpn"].scope == "document"
     assert fields["subsystem"].scope == "project" and fields["subsystem"].builtin
