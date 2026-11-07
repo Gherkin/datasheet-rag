@@ -3418,6 +3418,9 @@ def _ingest_one(
     # A blank --project-id is no project (the store treats it so): the
     # .rag.toml project_id still applies.
     project_id = (project_id.strip() or None) if project_id else None
+    # --project-id is an explicit add: it makes a BOM-added membership manual.
+    # The .rag.toml project is a default and leaves it as it is (GH #125).
+    explicit_project = project_id
     if proj_cfg is not None:
         project_id = project_id or proj_cfg.project_id
         if not tags and proj_cfg.tags:
@@ -3451,6 +3454,7 @@ def _ingest_one(
     from datasheet_rag.backend import MetadataPatch
 
     meta_patch = MetadataPatch(
+        add_projects=[explicit_project] if explicit_project else None,
         tags=list(tags) if tags else None,
         fields=fields or None,
         revision=revision_label,
@@ -4506,14 +4510,13 @@ def metadata_cmd(
             per_revision = True
 
     proj_cfg = None if per_revision else get_project_config()
+    default_projects: list[str] = []
     if proj_cfg is not None:
         if proj_cfg.project_id and not (add_projects or remove_projects):
             # The config's project is a default, not a request: a document
-            # already in it keeps its membership as it is. Adding it would
-            # mark a BOM-added document as added by hand (GH #125).
-            stored = be.get_metadata(rev_id)
-            if stored is None or proj_cfg.project_id not in stored.projects:
-                add_projects = (proj_cfg.project_id,)
+            # already in it keeps its membership as it is, so a BOM-added
+            # one stays BOM-added (GH #125).
+            default_projects = [proj_cfg.project_id]
         if fields_project is None:
             fields_project = proj_cfg.project_id
         if not tags and proj_cfg.tags:
@@ -4539,7 +4542,7 @@ def metadata_cmd(
                 in_cfg = False
             elif fields_project != cfg_project:
                 in_cfg, why_not = False, f"this write goes to project {fields_project!r}"
-            elif cfg_project not in add_projects:
+            elif cfg_project not in [*add_projects, *default_projects]:
                 stored = be.get_metadata(rev_id)
                 if stored is None or cfg_project not in stored.projects:
                     in_cfg, why_not = False, f"{rev_id} is not in that project"
@@ -4587,6 +4590,7 @@ def metadata_cmd(
             MetadataPatch(
                 add_projects=list(add_projects) or None,
                 remove_projects=list(remove_projects) or None,
+                default_projects=default_projects or None,
                 tags=new_tags,
                 fields=fields or None,
                 project=fields_project,

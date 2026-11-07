@@ -876,7 +876,14 @@ class LocalBackend(RagBackend):
             # Project-scoped fields go to the ingest project unless the patch
             # names one (GH #123).
             patch = (metadata or MetadataPatch()).model_copy(deep=True)
+            # Only the patch's own add_projects were asked for explicitly:
+            # they become manual memberships. The ingest project and any
+            # default projects join without changing an existing one (GH #125).
+            claimed = list(patch.add_projects or [])
             patch.add_project(project_id)
+            for default in patch.default_projects or []:
+                patch.add_project(default)
+            patch.default_projects = None
             if patch.project is None and project_id and project_id.strip():
                 patch.project = project_id.strip()
             # Decide which document the PDF goes into (GH #124): the one named
@@ -936,7 +943,7 @@ class LocalBackend(RagBackend):
                     embed_chunk_graph(graph, embedder=self._get_embedder()) if embed else vectors
                 )
                 place_revision()
-                join_projects(conn, did, join)
+                join_projects(conn, did, join, claim=claimed)
                 pruned += insert_chunk_graph(conn, graph, vectors=vectors_tmp).pruned
                 conn.commit()
                 descriptions = describe_figures_in_store(
@@ -968,7 +975,7 @@ class LocalBackend(RagBackend):
             # figure path) for every id that survives, which is why this is not
             # a delete-then-insert.
             place_revision()
-            join_projects(conn, did, join)
+            join_projects(conn, did, join, claim=claimed)
             stats = insert_chunk_graph(conn, graph, vectors=vectors)
             pruned += stats.pruned
             conn.commit()

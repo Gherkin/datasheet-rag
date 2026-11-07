@@ -16,7 +16,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from datasheet_rag.models.chunk import Chunk
-from datasheet_rag.store.projects import check_project_change
+from datasheet_rag.store.projects import check_project_change, normalize_projects
 
 
 class DocSummary(BaseModel):
@@ -173,6 +173,10 @@ class MetadataPatch(BaseModel):
 
     add_projects: list[str] | None = None
     remove_projects: list[str] | None = None
+    #: Projects to join only if the document is not in them yet (the
+    #: ``.rag.toml`` project). Unlike ``add_projects`` they leave an existing
+    #: membership as it is, so a BOM-added document stays BOM-added (GH #125).
+    default_projects: list[str] | None = None
     tags: list[str] | None = None
     fields: dict[str, str | list[str] | None] | None = None
     project: str | None = None
@@ -187,6 +191,7 @@ class MetadataPatch(BaseModel):
         add, remove = check_project_change(self.add_projects, self.remove_projects)
         self.add_projects = add or None
         self.remove_projects = remove or None
+        self.default_projects = normalize_projects(self.default_projects) or None
         return self
 
     def add_project(self, project_id: str | None) -> None:

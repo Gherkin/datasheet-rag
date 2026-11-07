@@ -236,17 +236,27 @@ def test_dry_run_writes_nothing(conn: sqlite3.Connection) -> None:
 def test_adding_a_bom_member_by_hand_makes_it_manual(conn: sqlite3.Connection) -> None:
     a = _ingest(conn, "r1", fields={"mpn": ["PART-A"]})
     b = _ingest(conn, "r2", fields={"mpn": ["PART-B"]})
-    sync_bom(conn, "p", [_line(mpn="PART-A"), _line(mpn="PART-B")])
+    c = _ingest(conn, "r3", fields={"mpn": ["PART-C"]})
+    d = _ingest(conn, "r4", fields={"mpn": ["PART-D"]})
+    parts = ["PART-A", "PART-B", "PART-C", "PART-D"]
+    sync_bom(conn, "p", [_line(mpn=m) for m in parts])
 
-    set_metadata(conn, "r1", add_projects=["p"])
-    # Ingest joins without claiming: re-ingesting into the project changes nothing.
-    join_projects(conn, "r2", ["p"])
+    set_metadata(conn, "r1", add_projects=["p"])  # explicit: claims
+    set_metadata(conn, "r2", default_projects=["p"])  # .rag.toml default: does not
+    join_projects(conn, "r3", ["p"], claim=["p"])  # ingest --project-id: claims
+    join_projects(conn, "r4", ["p"])  # ingest with the .rag.toml project: does not
     conn.commit()
-    assert _members(conn, "p") == {a: "manual", b: "bom"}
+    assert _members(conn, "p") == {a: "manual", b: "bom", c: "manual", d: "bom"}
 
-    # Both parts leave the BOM: only the BOM-added one goes.
+    # Every part leaves the BOM: only the BOM-added ones go.
     result = sync_bom(conn, "p", [_line(mpn="OTHER")])
-    assert [d.document_id for d in result.removed] == [b]
+    assert [x.document_id for x in result.removed] == [b, d]
+    assert _members(conn, "p") == {a: "manual", c: "manual"}
+
+
+def test_a_default_project_joins_a_document_not_in_it(conn: sqlite3.Connection) -> None:
+    a = _ingest(conn, "r1")
+    set_metadata(conn, "r1", default_projects=["p"], fields={"subsystem": "adc"}, project="p")
     assert _members(conn, "p") == {a: "manual"}
 
 

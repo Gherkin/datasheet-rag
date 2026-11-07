@@ -310,6 +310,24 @@ def test_ingest_passes_the_link_and_prints_it(tmp_path: Path, fake_backend: _Fak
     assert "linked to D7 as newest revision (--new-revision-of)" in result.output
 
 
+def test_ingest_project_id_is_an_explicit_add_and_rag_toml_is_not(
+    tmp_path: Path, fake_backend: _FakeBackend
+) -> None:
+    # GH #125: an explicit add claims a BOM-added membership; the default does not.
+    (tmp_path / ".rag.toml").write_text('project_id = "netdaq"\n')
+    pdf = tmp_path / "a.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n")
+
+    result = CliRunner().invoke(cli, ["ingest", str(pdf)])
+    assert result.exit_code == 0, result.output
+    assert fake_backend.calls[0]["project_id"] == "netdaq"
+    assert fake_backend.calls[0]["metadata"].add_projects is None
+
+    result = CliRunner().invoke(cli, ["ingest", str(pdf), "--project-id", "other"])
+    assert result.exit_code == 0, result.output
+    assert fake_backend.calls[1]["metadata"].add_projects == ["other"]
+
+
 def test_ingest_stops_before_the_parse_when_the_link_fails(
     tmp_path: Path, fake_backend: _FakeBackend
 ) -> None:
