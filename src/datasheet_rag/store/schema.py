@@ -23,7 +23,9 @@ Tables created by :func:`init_schema`:
   ``doc_field_values``  (GH #123), and per-revision overrides — see
                        :mod:`datasheet_rag.store.fields`.
 * ``document_projects`` – project membership, one row per (document,
-                       project) (GH #121) — see :mod:`datasheet_rag.store.projects`.
+                       project) (GH #121), with who added it: by hand or
+                       by a BOM sync (GH #125) — see
+                       :mod:`datasheet_rag.store.projects`.
 * ``store_settings`` – store-wide settings (the identity rule, GH #124).
 * ``schema_version`` – single-row table recording the schema version and
                        the embedding dimension the DB was created with.
@@ -43,7 +45,7 @@ from datasheet_rag.config import get_settings
 
 console = Console()
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # Columns added in each schema version, used for in-place migration of
 # databases created at an older version. Each entry is (column_name, DDL
@@ -560,6 +562,38 @@ def _v6_rename_to_rev_id(conn: sqlite3.Connection) -> None:
         conn.execute("DROP INDEX IF EXISTS ix_audit_doc")
 
 
+def _migrate_to_v7(conn: sqlite3.Connection) -> None:
+    """Record who added each project membership, for BOM sync (GH #125).
+
+    ``document_projects`` gains ``source``. Every existing membership was
+    added by hand or at ingest, so it becomes ``manual``: a BOM sync never
+    removes it. The built-in ``mpn`` field gains the ``mfr-part`` role.
+    One transaction.
+    """
+    from datasheet_rag.store.projects import SOURCE_COLUMN_DDL
+
+    if conn.in_transaction:
+        conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        row = conn.execute("SELECT version FROM schema_version WHERE id = 1").fetchone()
+        if row is not None and int(row["version"]) >= 7:
+            conn.commit()
+            return
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(document_projects)")}
+        if "source" not in cols:
+            conn.execute(f"ALTER TABLE document_projects ADD COLUMN {SOURCE_COLUMN_DDL}")
+        conn.execute(
+            "UPDATE metadata_fields SET roles = ? WHERE name = 'mpn' AND builtin = 1",
+            (json.dumps(["part", "mfr-part"]),),
+        )
+        conn.execute("UPDATE schema_version SET version = 7 WHERE id = 1")
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+
+
 #: Data migrations run when an older store is opened, keyed by the version
 #: they bring it to. Run after that version's chunk columns are added.
 _MIGRATIONS_BY_VERSION = {
@@ -567,6 +601,7 @@ _MIGRATIONS_BY_VERSION = {
     4: _migrate_to_v4,
     5: _migrate_to_v5,
     6: _migrate_to_v6,
+    7: _migrate_to_v7,
 }
 
 

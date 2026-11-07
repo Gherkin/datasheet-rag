@@ -77,6 +77,7 @@ from datasheet_rag.store import (
     vector_search,
 )
 from datasheet_rag.store import documents as revs
+from datasheet_rag.store.bom import BomLine, BomSyncResult, sync_bom
 from datasheet_rag.store.fields import (
     FieldScope,
     FieldShape,
@@ -578,6 +579,13 @@ class LocalBackend(RagBackend):
     def remove_field(self, name: str, *, clear: bool = False) -> int:
         with self._write_lock:
             return remove_field(self._get_conn(), name, clear=clear)
+
+    # -- BOM (GH #125) -------------------------------------------------
+    def sync_bom(
+        self, project: str, lines: Sequence[BomLine], *, dry_run: bool = False
+    ) -> BomSyncResult:
+        with self._write_lock:
+            return sync_bom(self._get_conn(), project, lines, dry_run=dry_run)
 
     # -- stats ---------------------------------------------------------
     def stats(self, *, project_id: str | None = None, rev_id: str | None = None) -> StatsResult:

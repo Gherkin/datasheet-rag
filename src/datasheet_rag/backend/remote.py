@@ -49,6 +49,7 @@ from datasheet_rag.backend.models import (
     TitleContext,
 )
 from datasheet_rag.models.chunk import Chunk, ChunkGraph
+from datasheet_rag.store.bom import BomLine, BomSyncResult
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping, Sequence
@@ -510,6 +511,21 @@ class RemoteBackend(RagBackend):
     def remove_field(self, name: str, *, clear: bool = False) -> int:
         params = {"clear": "true"} if clear else None
         return int(self._json("DELETE", f"/metadata/fields/{name}", params=params)["held"])
+
+    # -- BOM (GH #125) -------------------------------------------------
+    def sync_bom(
+        self, project: str, lines: Sequence[BomLine], *, dry_run: bool = False
+    ) -> BomSyncResult:
+        data = self._json(
+            "POST",
+            "/bom/sync",
+            json={
+                "project": project,
+                "lines": [line.model_dump(mode="json") for line in lines],
+                "dry_run": dry_run,
+            },
+        )
+        return BomSyncResult.model_validate(data)
 
     # -- stats ---------------------------------------------------------
     def stats(self, *, project_id: str | None = None, rev_id: str | None = None) -> StatsResult:

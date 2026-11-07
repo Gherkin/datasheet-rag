@@ -12,23 +12,43 @@ Membership is a fixed table, not a registered field (``store.fields``): it
 is the scoping mechanism behind ``/mcp/<project>``, ``.rag.toml`` and the
 default project.
 
+Each membership records its ``source`` (GH #125): ``manual`` when a person
+or an ingest put the document in the project, ``bom`` when a BOM sync
+(``store.bom``) did. A BOM sync only ever removes ``bom`` memberships, so
+reference documents added by hand stay. Adding a document that is already a
+member keeps the source it has.
+
 Writes go through ``store.metadata.set_metadata`` (``add_projects`` /
-``remove_projects``) or, for ingest, ``store.metadata.join_projects``.
+``remove_projects``), for ingest ``store.metadata.join_projects``, and for a
+BOM ``store.bom.sync_bom``.
 """
 
 from __future__ import annotations
 
 import sqlite3
 from collections.abc import Iterable, Sequence
+from typing import Literal
+
+#: Who put a document in a project: a person or an ingest, or a BOM sync.
+MembershipSource = Literal["manual", "bom"]
+
+#: The ``document_projects.source`` column, as created and as added by the
+#: v7 migration (``store.schema``).
+SOURCE_COLUMN_DDL = "source TEXT NOT NULL DEFAULT 'manual' CHECK (source IN ('manual', 'bom'))"
 
 
 def ensure_projects_table(conn: sqlite3.Connection) -> None:
-    """Create ``document_projects`` and its index if absent (idempotent)."""
+    """Create ``document_projects`` and its index if absent (idempotent).
+
+    An existing table must already have the ``source`` column (the v7
+    migration adds it).
+    """
     conn.execute(
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS document_projects (
             document_id INTEGER NOT NULL,
             project_id  TEXT NOT NULL,
+            {SOURCE_COLUMN_DDL},
             PRIMARY KEY (document_id, project_id)
         )
         """
@@ -133,8 +153,8 @@ def change_projects(
     """Add and remove project memberships of a document. Does not commit.
 
     Adding a project the document already has, or removing one it does not
-    have, is a no-op. Callers normalise the names first
-    (:func:`check_project_change`).
+    have, is a no-op; an existing membership keeps its source. A new one is
+    ``manual``. Callers normalise the names first (:func:`check_project_change`).
     """
     conn.executemany(
         "INSERT OR IGNORE INTO document_projects (document_id, project_id) VALUES (?, ?)",

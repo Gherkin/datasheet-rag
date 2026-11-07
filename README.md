@@ -402,6 +402,29 @@ A write goes to the project named with `--project`. Without it, the `.rag.toml` 
 
 `rag ingest --subsystem` writes to the ingest project. `rag list --subsystem` and `rag search --subsystem` match the value in the listed or searched project, or in any project with `--global`. The MCP `fields` filter does the same.
 
+### Projects from a BOM
+
+A project's BOM already says which parts the board uses. A BOM sync puts the documents for those parts into the project. Another system sends the project's whole BOM to the server, each time it changes:
+
+```
+POST /bom/sync          (an ingest key)
+{"project": "netdaq",
+ "lines": [{"ref": "U8,U9", "parts": {"acme-pn": "100-2345", "mpn": "TLA2518IRTER"}}],
+ "dry_run": false}
+```
+
+The same from a CSV file, such as a KiCad BOM export:
+
+```
+rag bom sync bom.csv --project netdaq --column MPN=mpn --column "Internal PN=acme-pn" --ref-column Reference --dry-run
+```
+
+- A BOM line names a part by one or more part numbers. Each must be a field with the `part` role and one value per document: `mpn`, or your own, such as `rag fields add acme-pn --role part`.
+- A line matches a document when one of its part numbers equals the document's value of that field, ignoring case. Matched documents join the project.
+- Documents an earlier sync added that the BOM no longer matches leave the project, with their per-project values. Documents added by hand (`--add-project`, or at ingest) are never removed, so app notes and standards stay.
+- A line that matches nothing is listed in the reply. When a field has the `mfr-part` role (`mpn` has), the line also gets *suggestions*: documents whose value is the start of the line's part number, such as `TLA2518` for `TLA2518IRTER`. A suggestion does not join the project. To accept it, add the BOM's part number to the document: `rag metadata D12 --field mpn=TLA2518 --field mpn=TLA2518IRTER` (the list is replaced, so name every value).
+- Sending the same BOM twice changes nothing the second time. `dry_run` (`--dry-run`) reports what would change and writes nothing.
+
 ### Documents and revisions
 
 A datasheet often comes in several revisions: Rev A, Rev B, Rev C. Each PDF is a *revision* with its own `rev_id` (the SHA-256 of the file). Revisions of one datasheet are grouped in a *document*, named `D12`. Every command that takes a document accepts either the `D12` or any of its revisions' `rev_id`s.

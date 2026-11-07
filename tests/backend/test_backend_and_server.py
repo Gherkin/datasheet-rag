@@ -1006,6 +1006,35 @@ def test_server_answers_one_document_summary(client, conn: sqlite3.Connection) -
     assert client.get("/documents/nope/summary").status_code == 204
 
 
+def test_server_and_remote_sync_a_bom(client, conn: sqlite3.Connection) -> None:
+    """POST /bom/sync (GH #125): the remote client round-trips the result."""
+    from datasheet_rag.backend.remote import RemoteBackend
+    from datasheet_rag.store.bom import BomLine
+    from datasheet_rag.store.metadata import set_metadata
+
+    did = "f" * 64
+    LocalBackend(conn=conn).ingest_chunk_graph(_plain_graph(did), embed=False)
+    set_metadata(conn, did, fields={"mpn": ["TLA2518"]})
+    be = RemoteBackend.__new__(RemoteBackend)
+    be._client = client
+    be._compute = "server"
+
+    line = BomLine(ref="U8", parts={"mpn": "TLA2518"})
+    dry = be.sync_bom("netdaq/rev-b", [line], dry_run=True)
+    assert dry.dry_run and [d.document_id for d in dry.added] == ["D1"]
+    assert conn.execute("SELECT COUNT(*) FROM document_projects").fetchone()[0] == 0
+
+    result = be.sync_bom("netdaq/rev-b", [line])
+    assert result.project == "netdaq/rev-b"
+    assert [(m.document_id, m.fields) for m in result.lines[0].matches] == [("D1", ["mpn"])]
+    assert client.get(f"/documents/{did}/metadata").json()["projects"] == ["netdaq/rev-b"]
+
+    bad = client.post(
+        "/bom/sync", json={"project": "p", "lines": [{"parts": {"manufacturer": "TI"}}]}
+    )
+    assert bad.status_code == 400 and "not a part field" in bad.json()["detail"]
+
+
 def test_remote_title_hints_none_keeps_and_empty_clears(client) -> None:
     """null vs {} must survive RemoteBackend → JSON → /ingest: keep vs clear."""
     from datasheet_rag.backend.remote import RemoteBackend
