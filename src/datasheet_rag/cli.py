@@ -4788,6 +4788,10 @@ def _parse_bom_columns(specs: tuple[str, ...]) -> dict[str, str]:
         header, field = header.strip(), (field if sep else header).strip()
         if not header or not field:
             raise click.UsageError(f"--column {spec!r} must be HEADER=FIELD or FIELD")
+        if field in out.values():
+            # A BOM line holds one value per field; a second column would
+            # overwrite the first.
+            raise click.UsageError(f"two --column options map to field {field!r}")
         out[header] = field
     return out
 
@@ -4796,6 +4800,19 @@ def _read_bom_csv(
     path: Path, columns: dict[str, str], ref_column: str | None, delimiter: str
 ) -> list[Any]:
     """BOM lines from a CSV file; a row with no part number is skipped."""
+    import csv
+
+    try:
+        return _read_bom_rows(path, columns, ref_column, delimiter)
+    except UnicodeDecodeError as e:
+        raise click.UsageError(f"{path} is not UTF-8 text ({e}); save it as UTF-8 CSV") from e
+    except csv.Error as e:
+        raise click.UsageError(f"{path} is not a readable CSV file: {e}") from e
+
+
+def _read_bom_rows(
+    path: Path, columns: dict[str, str], ref_column: str | None, delimiter: str
+) -> list[Any]:
     import csv
 
     from datasheet_rag.store.bom import BomLine
@@ -4867,11 +4884,10 @@ def bom_sync_cmd(
     A line that matches nothing is listed, with suggestions where a stored
     manufacturer part number is the start of the line's (TLA2518 for
     TLA2518IRTER). Suggestions do not join the project. To accept one, add
-    the BOM's part number to the document (the list is replaced, so name
-    every value):
+    the BOM's part number to the document's mpn list:
 
     \b
-        rag metadata D12 --field mpn=TLA2518 --field mpn=TLA2518IRTER
+        rag metadata D12 --mpn-alias TLA2518IRTER
 
     \b
         rag bom sync bom.csv --project netdaq --column MPN=mpn --ref-column Reference

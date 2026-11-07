@@ -35,6 +35,7 @@ from datasheet_rag.store.documents import format_document_id
 from datasheet_rag.store.fields import (
     FieldSpec,
     MetadataFieldError,
+    _begin,
     delete_document_project_values,
     list_fields,
 )
@@ -43,6 +44,14 @@ from datasheet_rag.store.projects import normalize_projects
 #: A stored value shorter than this never makes a prefix suggestion: a short
 #: value is the start of too many unrelated part numbers.
 MIN_PREFIX_LEN = 4
+
+_ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+
+
+def _fold(value: str) -> str:
+    """Fold ASCII case only, as SQLite's NOCASE does, so a BOM line matches
+    the same documents as ``rag list --field``."""
+    return value.translate(_ASCII_LOWER)
 
 
 class BomLine(BaseModel):
@@ -130,7 +139,7 @@ def check_lines(specs: Iterable[FieldSpec], lines: Sequence[BomLine]) -> list[Bo
 def _effective_values(
     conn: sqlite3.Connection, fields: Sequence[str]
 ) -> dict[tuple[str, str], dict[int, str]]:
-    """``{(field, casefolded value): {document_id: stored value}}``.
+    """``{(field, folded value): {document_id: stored value}}`` (see :func:`_fold`).
 
     A document holds a value when one of its revisions does: the revision's
     override when it has one for the field, else the document's value.
@@ -160,7 +169,7 @@ def _effective_values(
 
     def add(document_id: int, field: str, values: Iterable[str]) -> None:
         for v in values:
-            index.setdefault((field, v.casefold()), {}).setdefault(document_id, v)
+            index.setdefault((field, _fold(v)), {}).setdefault(document_id, v)
 
     for document_id in set(doc_vals) | set(revisions):
         own = doc_vals.get(document_id, {})
@@ -206,21 +215,16 @@ def sync_bom(
     written. Raises ``ValueError`` (:class:`MetadataFieldError`) for a blank
     project or a bad line, before anything is written. Commits.
     """
-    names = normalize_projects([project])
-    if not names:
-        raise ValueError("a project name cannot be empty")
-    project = names[0]
+    (project,) = normalize_projects([project])  # raises for a blank name
     specs = list_fields(conn)
     checked = check_lines(specs, lines)
     mfr_fields = {s.name for s in specs if "mfr-part" in s.roles}
     used = sorted({f for line in checked for f in line.parts})
 
-    if conn.in_transaction:
-        conn.commit()
     # Take the write lock before reading, so the plan is made on the rows
     # it is applied to. A dry run only reads.
     if not dry_run:
-        conn.execute("BEGIN IMMEDIATE")
+        _begin(conn)
     try:
         index = _effective_values(conn, used)
         results: list[tuple[BomLine, dict[int, list[str]], list[tuple[int, str, str]]]] = []
@@ -228,21 +232,18 @@ def sync_bom(
         for line in checked:
             hits: dict[int, list[str]] = {}
             for field, value in line.parts.items():
-                for document_id in index.get((field, value.casefold()), {}):
+                for document_id in index.get((field, _fold(value)), {}):
                     hits.setdefault(document_id, []).append(field)
             suggestions: list[tuple[int, str, str]] = []
             if not hits:
                 for field, value in line.parts.items():
                     if field not in mfr_fields:
                         continue
-                    wanted = value.casefold()
-                    for (f, stored), docs in index.items():
-                        if (
-                            f == field
-                            and len(stored) >= MIN_PREFIX_LEN
-                            and (wanted.startswith(stored) and wanted != stored)
-                        ):
-                            suggestions.extend((d, f, v) for d, v in docs.items())
+                    wanted = _fold(value)
+                    # Look up each proper prefix of the line's value.
+                    for k in range(MIN_PREFIX_LEN, len(wanted)):
+                        docs = index.get((field, wanted[:k]), {})
+                        suggestions.extend((d, field, v) for d, v in docs.items())
             matched.update(hits)
             results.append((line, hits, sorted(set(suggestions))))
 

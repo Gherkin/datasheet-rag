@@ -116,3 +116,18 @@ def test_sync_needs_a_project_and_known_columns(db_path: Path, tmp_path: Path) -
 
     out = _rag(db_path, "bom", "sync", str(bom), "--project", "p", "--column", "MPN=manufacturer")
     assert out.exit_code != 0 and "not a part field" in out.output
+
+
+def test_two_columns_for_one_field_are_refused(db_path: Path, tmp_path: Path) -> None:
+    bom = _csv(tmp_path, "MPN,Alt MPN\nX,Y\n")
+    args = ["bom", "sync", str(bom), "--project", "p", "--column", "MPN=mpn"]
+    out = _rag(db_path, *args, "--column", "Alt MPN=mpn")
+    assert out.exit_code == 2 and "two --column options map to field 'mpn'" in out.output
+
+
+def test_a_non_utf8_csv_is_a_usage_error(db_path: Path, tmp_path: Path) -> None:
+    bom = tmp_path / "bom.csv"
+    bom.write_bytes("MPN,Value\nTLA2518,10 µF\n".encode("cp1252"))
+    out = _rag(db_path, "bom", "sync", str(bom), "--project", "p", "--column", "MPN=mpn")
+    assert out.exit_code == 2 and "is not UTF-8 text" in out.output
+    assert out.exception is None or isinstance(out.exception, SystemExit)

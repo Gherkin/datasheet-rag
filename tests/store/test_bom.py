@@ -82,6 +82,17 @@ def test_exact_match_ignores_case_and_joins_as_bom(conn: sqlite3.Connection) -> 
     assert [(m.document_id, m.fields) for m in line.matches] == [(d1, ["mpn"])]
 
 
+def test_case_is_folded_for_ascii_only_like_nocase(conn: sqlite3.Connection) -> None:
+    # SQLite NOCASE, which `rag list --field` uses, folds ASCII letters only.
+    _ingest(conn, "r1", fields={"mpn": ["ÉX-100"]})
+    _ingest(conn, "r2", fields={"mpn": ["STRASSE"]})
+
+    result = sync_bom(conn, "p", [_line(mpn="éx-100"), _line(mpn="straße")], dry_run=True)
+
+    assert [line.matches for line in result.lines] == [[], []]
+    assert result.added == []
+
+
 def test_internal_part_number_matches_and_either_identifier_is_enough(
     conn: sqlite3.Connection,
 ) -> None:
