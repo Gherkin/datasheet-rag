@@ -149,15 +149,23 @@ def change_projects(
     *,
     add: Sequence[str] = (),
     remove: Sequence[str] = (),
+    claim: bool = False,
 ) -> None:
     """Add and remove project memberships of a document. Does not commit.
 
-    Adding a project the document already has, or removing one it does not
-    have, is a no-op; an existing membership keeps its source. A new one is
-    ``manual``. Callers normalise the names first (:func:`check_project_change`).
+    A new membership is ``manual``. Adding a project the document already
+    has keeps its source, unless ``claim``: a person asked for this
+    membership, so a BOM-added one becomes ``manual`` and a BOM sync no
+    longer removes it. Removing a project the document is not in is a no-op.
+    Callers normalise the names first (:func:`check_project_change`).
     """
     conn.executemany(
-        "INSERT OR IGNORE INTO document_projects (document_id, project_id) VALUES (?, ?)",
+        "INSERT INTO document_projects (document_id, project_id) VALUES (?, ?) "
+        + (
+            "ON CONFLICT (document_id, project_id) DO UPDATE SET source = 'manual'"
+            if claim
+            else "ON CONFLICT (document_id, project_id) DO NOTHING"
+        ),
         [(document_id, p) for p in add],
     )
     conn.executemany(

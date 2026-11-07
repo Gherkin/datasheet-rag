@@ -4508,7 +4508,12 @@ def metadata_cmd(
     proj_cfg = None if per_revision else get_project_config()
     if proj_cfg is not None:
         if proj_cfg.project_id and not (add_projects or remove_projects):
-            add_projects = (proj_cfg.project_id,)
+            # The config's project is a default, not a request: a document
+            # already in it keeps its membership as it is. Adding it would
+            # mark a BOM-added document as added by hand (GH #125).
+            stored = be.get_metadata(rev_id)
+            if stored is None or proj_cfg.project_id not in stored.projects:
+                add_projects = (proj_cfg.project_id,)
         if fields_project is None:
             fields_project = proj_cfg.project_id
         if not tags and proj_cfg.tags:

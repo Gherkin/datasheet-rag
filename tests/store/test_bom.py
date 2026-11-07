@@ -18,7 +18,7 @@ from datasheet_rag.store.documents import (
     unlink_revision,
 )
 from datasheet_rag.store.fields import MetadataFieldError, get_field, register_field
-from datasheet_rag.store.metadata import get_metadata, set_metadata
+from datasheet_rag.store.metadata import get_metadata, join_projects, set_metadata
 from datasheet_rag.store.schema import SCHEMA_VERSION, connect
 from datasheet_rag.store.sqlite import insert_chunks
 
@@ -233,11 +233,21 @@ def test_dry_run_writes_nothing(conn: sqlite3.Connection) -> None:
     assert not conn.in_transaction
 
 
-def test_adding_a_bom_member_by_hand_keeps_its_source(conn: sqlite3.Connection) -> None:
+def test_adding_a_bom_member_by_hand_makes_it_manual(conn: sqlite3.Connection) -> None:
     a = _ingest(conn, "r1", fields={"mpn": ["PART-A"]})
-    sync_bom(conn, "p", [_line(mpn="PART-A")])
+    b = _ingest(conn, "r2", fields={"mpn": ["PART-B"]})
+    sync_bom(conn, "p", [_line(mpn="PART-A"), _line(mpn="PART-B")])
+
     set_metadata(conn, "r1", add_projects=["p"])
-    assert _members(conn, "p") == {a: "bom"}
+    # Ingest joins without claiming: re-ingesting into the project changes nothing.
+    join_projects(conn, "r2", ["p"])
+    conn.commit()
+    assert _members(conn, "p") == {a: "manual", b: "bom"}
+
+    # Both parts leave the BOM: only the BOM-added one goes.
+    result = sync_bom(conn, "p", [_line(mpn="OTHER")])
+    assert [d.document_id for d in result.removed] == [b]
+    assert _members(conn, "p") == {a: "manual"}
 
 
 # ---- revisions keep the source -----------------------------------------------

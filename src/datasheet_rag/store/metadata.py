@@ -474,7 +474,8 @@ def set_metadata(
     Merge rules
     -----------
     * ``add_projects`` / ``remove_projects``: the document joins / leaves
-      each named project; its other projects are left alone. A project in
+      each named project; its other projects are left alone. A project it
+      is already in becomes a ``manual`` membership. A project in
       both lists, or an empty name, raises ``ValueError`` before anything
       is written. Leaving a project deletes the document's project-scoped
       values in it. Not allowed with ``this_revision``.
@@ -524,7 +525,10 @@ def set_metadata(
                 "UPDATE revisions SET revision = ? WHERE rev_id = ?",
                 (revision.strip() or None, rev),
             )
-        change_projects(conn, document_id, add=checked.add, remove=checked.remove)
+        # A metadata write names its projects on purpose: it claims them, so
+        # a BOM sync does not remove them later (GH #125). Ingest's join does
+        # not (join_projects).
+        change_projects(conn, document_id, add=checked.add, remove=checked.remove, claim=True)
         delete_document_project_values(conn, document_id, checked.remove)
         write_field_values(
             conn,

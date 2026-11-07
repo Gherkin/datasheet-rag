@@ -118,6 +118,24 @@ def test_sync_needs_a_project_and_known_columns(db_path: Path, tmp_path: Path) -
     assert out.exit_code != 0 and "not a part field" in out.output
 
 
+def test_rag_toml_project_does_not_claim_a_bom_member(db_path: Path, tmp_path: Path) -> None:
+    bom = _csv(tmp_path, "Internal PN\n100-1\n")
+    out = _rag(
+        db_path, "bom", "sync", str(bom), "--project", "netdaq", "--column", "Internal PN=acme-pn"
+    )
+    assert out.exit_code == 0, out.output
+    (tmp_path / ".rag.toml").write_text('project_id = "netdaq"\n')
+    get_project_config.cache_clear()
+
+    out = _rag(db_path, "metadata", "D1", "--tag", "adc")
+    assert out.exit_code == 0, out.output
+    assert _members(db_path, "netdaq") == {1: "bom"}
+
+    out = _rag(db_path, "metadata", "D1", "--add-project", "netdaq")
+    assert out.exit_code == 0, out.output
+    assert _members(db_path, "netdaq") == {1: "manual"}
+
+
 def test_two_columns_for_one_field_are_refused(db_path: Path, tmp_path: Path) -> None:
     bom = _csv(tmp_path, "MPN,Alt MPN\nX,Y\n")
     args = ["bom", "sync", str(bom), "--project", "p", "--column", "MPN=mpn"]
