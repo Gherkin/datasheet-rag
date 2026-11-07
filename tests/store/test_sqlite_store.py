@@ -27,6 +27,7 @@ from datasheet_rag.models.chunk import (
     ChunkMetadata,
     LayoutType,
 )
+from datasheet_rag.store.documents import add_revision, document_of
 from datasheet_rag.store.fields import MetadataFieldError
 from datasheet_rag.store.metadata import (
     delete_metadata,
@@ -590,6 +591,48 @@ def test_filters_restrict_searches(conn: sqlite3.Connection) -> None:
     for r in page_hits:
         first_page = r.chunk.metadata.page_numbers[0]
         assert 1 <= first_page <= 2
+
+
+def test_vector_filter_applies_before_the_k_cut(conn: sqlite3.Connection) -> None:
+    """A selective filter still gets k vector hits (GH #127).
+
+    The 60 decoy chunks are all nearer the query than any chunk of the
+    filtered document, so they fill any fixed over-fetch window.
+    """
+    decoys = [
+        _make_chunk(f"near:{i}", rev_id="near", level=ChunkLevel.MICRO, text=f"decoy {i}")
+        for i in range(60)
+    ]
+    targets = [
+        _make_chunk(f"far:{i}", rev_id="far", level=ChunkLevel.MICRO, text=f"target {i}")
+        for i in range(3)
+    ]
+    vectors = {c.id: _unit_vec(0) for c in decoys}
+    vectors |= {c.id: _unit_vec(1 + i) for i, c in enumerate(targets)}
+    insert_chunks(conn, decoys + targets, vectors=vectors)
+    set_metadata(conn, "far", add_projects=["alpha"], fields={"mpn": "INA226"})
+
+    query = _unit_vec(0)
+    for filt in (
+        SearchFilters(rev_ids=["far"]),
+        SearchFilters(project_id="alpha"),
+        SearchFilters(fields={"mpn": "INA226"}),
+    ):
+        hits = vector_search(conn, query, k=3, filters=filt)
+        assert sorted(r.chunk_id for r in hits) == ["far:0", "far:1", "far:2"], filt
+
+    # Hybrid keeps the vector half: "target" is not a keyword in the query.
+    hyb = hybrid_search(conn, query, "unrelated", k=3, filters=SearchFilters(rev_ids=["far"]))
+    assert sorted(r.chunk_id for r in hyb) == ["far:0", "far:1", "far:2"]
+
+    # The default filter hides older revisions (GH #124): with "far" as the
+    # newest revision of the decoys' document, a plain search must still
+    # reach its chunks past the 60 nearer, hidden ones.
+    near_doc = document_of(conn, "near")
+    assert near_doc is not None
+    add_revision(conn, near_doc, "far")
+    hits = vector_search(conn, query, k=3)
+    assert sorted(r.chunk_id for r in hits) == ["far:0", "far:1", "far:2"]
 
 
 # ---------------------------------------------------------------------------

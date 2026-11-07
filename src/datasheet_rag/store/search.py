@@ -24,7 +24,7 @@ from datasheet_rag.models.chunk import Chunk, ChunkLevel, LayoutType
 from datasheet_rag.store.documents import older_revisions_sql
 from datasheet_rag.store.fields import field_filter_sql
 from datasheet_rag.store.projects import project_scope_sql
-from datasheet_rag.store.sqlite import get_chunk
+from datasheet_rag.store.sqlite import _row_to_chunk
 
 
 class SearchFilters(BaseModel):
@@ -138,66 +138,49 @@ def vector_search(
 
     Scoring
     -------
-    ``sqlite-vec`` returns the raw distance (cosine by default for vec0
-    when vectors are L2-normalized). We map it to a bounded "larger is
-    better" score with ``1.0 / (1.0 + distance)`` so the result list is
+    ``sqlite-vec`` returns the raw distance (L2: ``chunk_vecs`` declares
+    no ``distance_metric``). We map it to a bounded "larger is better"
+    score with ``1.0 / (1.0 + distance)`` so the result list is
     comparable to the keyword branch.
 
     Filtering
     ---------
-    ``vec0`` doesn't natively support metadata pre-filtering in the
-    version pinned by ``sqlite-vec``. When ``filters`` are supplied we
-    over-fetch (``max(k * 5, 50)``) from ``chunk_vecs`` and re-rank /
-    truncate after JOINing on ``chunks`` with the WHERE filter applied.
+    The filters pick the allowed chunk ids, and the KNN query takes them
+    as ``chunk_id IN (...)``. ``vec0`` applies that constraint before it
+    cuts to ``k``, so a filter that matches few chunks still gets its
+    ``k`` nearest (GH #127). Filtering after the KNN lost every match
+    that ranked outside the fetched window.
     """
+
     embedding_bytes = _vector_to_bytes(query_embedding)
     # No filters still means "newest revision of each document" (GH #124).
     where_sql, where_params = (filters or SearchFilters())._where_clause()
 
-    if not where_sql:
-        rows = conn.execute(
-            """
-            SELECT chunk_id, distance
-            FROM chunk_vecs
-            WHERE embedding MATCH ? AND k = ?
-            ORDER BY distance
-            """,
-            (embedding_bytes, int(k)),
-        ).fetchall()
-    else:
-        over_fetch = max(k * 5, 50)
-        # NOTE: vec0 doesn't support metadata pre-filtering, so we
-        # over-fetch from the vector index then post-filter on chunks.
-        sql = f"""
-            SELECT v.chunk_id AS chunk_id, v.distance AS distance
-            FROM chunk_vecs v
-            JOIN chunks c ON c.id = v.chunk_id
-            WHERE v.embedding MATCH ? AND v.k = ?
-            {where_sql}
-            ORDER BY v.distance
-            LIMIT ?
-        """
-        params: list[object] = [embedding_bytes, int(over_fetch)]
-        params.extend(where_params)
-        params.append(int(k))
-        rows = conn.execute(sql, params).fetchall()
-
-    results: list[SearchResult] = []
-    for row in rows:
-        chunk = get_chunk(conn, row["chunk_id"])
-        if chunk is None:
-            continue
-        distance = float(row["distance"])
-        score = 1.0 / (1.0 + distance)
-        results.append(
-            SearchResult(
-                chunk_id=row["chunk_id"],
-                score=score,
-                chunk=chunk,
-                match_source="vector",
-            )
+    knn_sql = "SELECT chunk_id, distance FROM chunk_vecs WHERE embedding MATCH ? AND k = ?"
+    params: list[object] = [embedding_bytes, int(k)]
+    if where_sql:
+        # One NULL in the IN list makes vec0 return no rows at all.
+        knn_sql += (
+            f" AND chunk_id IN (SELECT c.id FROM chunks c WHERE c.id IS NOT NULL {where_sql})"
         )
-    return results
+        params.extend(where_params)
+    sql = f"""
+        SELECT c.*, v.distance AS knn_distance
+        FROM ({knn_sql}) v
+        JOIN chunks c ON c.id = v.chunk_id
+        ORDER BY v.distance
+    """
+    rows = conn.execute(sql, params).fetchall()
+
+    return [
+        SearchResult(
+            chunk_id=row["id"],
+            score=1.0 / (1.0 + float(row["knn_distance"])),
+            chunk=_row_to_chunk(row),
+            match_source="vector",
+        )
+        for row in rows
+    ]
 
 
 # FTS5 reserves these characters; the simplest robust escape is to wrap
@@ -257,9 +240,6 @@ def keyword_search(
     keywords = _extract_keywords(query)
     if not keywords:
         return []
-
-    # Late import to avoid a cycle (sqlite.py imports nothing from here).
-    from datasheet_rag.store.sqlite import _row_to_chunk
 
     where_sql, extra_params = (filters or SearchFilters())._where_clause()
 
@@ -370,17 +350,9 @@ def hybrid_search(
 
     fused.sort(key=lambda x: x[1], reverse=True)
 
-    results: list[SearchResult] = []
-    for chunk_id, score in fused[:k]:
-        chunk = get_chunk(conn, chunk_id)
-        if chunk is None:
-            continue
-        results.append(
-            SearchResult(
-                chunk_id=chunk_id,
-                score=score,
-                chunk=chunk,
-                match_source="hybrid",
-            )
-        )
-    return results
+    # Both branches already loaded their chunks; no need to read them again.
+    chunks = {r.chunk_id: r.chunk for r in (*vec_results, *kw_results)}
+    return [
+        SearchResult(chunk_id=chunk_id, score=score, chunk=chunks[chunk_id], match_source="hybrid")
+        for chunk_id, score in fused[:k]
+    ]
